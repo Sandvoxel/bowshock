@@ -16,6 +16,7 @@ use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
 use bowshock_cfd::sst::{Turbulence, Viscous, WallThermal};
+use bowshock_cfd::transition3::Transition;
 
 /// `cfl_max` of a wall-resolved (viscous) **3D** grid, a half domain or a sector (the wedge, one azimuthal cell, keeps `Numerics3::viscous`'s 50 below Mach 1 and 20 above): 10.
 /// The three-factor implicit step has a CFL limit on every 3D grid tried, finned or not, between 30 and 40 at Mach 0.5 and lower supersonic (CPU f64, Draft tier of the example rocket: the
@@ -319,6 +320,9 @@ pub struct Case3 {
     /// Thermal condition of the no-slip walls of the viscous equations ([`WallThermal`]): adiabatic by default; [`Case3::with_wall_thermal`]. Not part of the grid: the wall
     /// spacing of the tiers is sized for the adiabatic wall, and a cold wall (higher wall density, lower wall viscosity) raises the `y+` of the first cells.
     pub wall_thermal: WallThermal,
+    /// Prescribed transition of the viscous equations ([`Case3::with_transition`]): laminar walls upstream of the given stations, turbulent downstream; `None` (default): fully
+    /// turbulent from the nose tip.
+    pub transition: Option<Transition>,
 }
 
 /// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`
@@ -349,6 +353,7 @@ impl Case3 {
             jet: None,
             viscous: None,
             wall_thermal: WallThermal::Adiabatic,
+            transition: None,
         }
     }
 
@@ -497,6 +502,14 @@ impl Case3 {
         self
     }
 
+    /// This case with a prescribed transition (`bowshock_cfd::transition3`, SST only): the walls of the body (and the sting) upstream of `x_tr` nose diameters from the tip are laminar
+    /// (no eddy viscosity, no production of `k`, `omega`; the plain resolved-wall state), turbulent downstream; the fins are laminar over the fraction `fin_chord_fraction` of
+    /// their local chord from the leading edge (`0`: turbulent from the leading edge, `1`: laminar over the whole fin). `with_transition(0.0, 0.0)` is the default, a fully turbulent run.
+    pub fn with_transition(mut self, x_tr_body_calibers: f64, fin_chord_fraction: f64) -> Case3 {
+        self.transition = Some(Transition { x_tr: x_tr_body_calibers, fin_frac: fin_chord_fraction });
+        self
+    }
+
     /// This case sized for `tier`: the first cell of the body walls on both meridian grids for the body `y+`, the fin stack for the fin `y+` (the wall-resolved
     /// tiers; the lift tier keeps uniform azimuthal cells, `32 << level` over a half domain), the roughness of the body and of the fins carried on the grid.
     pub fn with_tier(mut self, tier: Tier) -> Case3 {
@@ -621,7 +634,13 @@ impl Case3 {
             let ks = if ks.iter().any(|&k| k > 0.0) { ks } else { Vec::new() };
             s.set_viscous_with(
                 Some(v),
-                RansOpts3 { pressure_outflow: self.numerics.pressure_outflow, ks, wall_thermal: self.wall_thermal, ..RansOpts3::default() },
+                RansOpts3 {
+                    pressure_outflow: self.numerics.pressure_outflow,
+                    ks,
+                    wall_thermal: self.wall_thermal,
+                    transition: self.transition,
+                    ..RansOpts3::default()
+                },
             );
         }
         s
@@ -702,6 +721,29 @@ mod tests {
         assert!((s2.y1 - 0.5 * s0.y1).abs() < 1e-18);
         assert!((s2.growth_bl - 1.0 - 0.5 * (s0.growth_bl - 1.0)).abs() < 1e-12 && (s2.growth_out - 1.0 - 0.5 * (s0.growth_out - 1.0)).abs() < 1e-12);
         assert_eq!(fine.grid.fin_cells_across, base.grid.fin_cells_across);
+    }
+
+    /// Prescribed transition is opt-in: the default case and `with_transition(0, 0)` hand the solver no intermittency field (fully turbulent, bit-identical to the solver without the
+    /// feature); `with_transition(x_tr, f)` gives the near-wall cells of the body upstream of `x_tr` calibers `gamma = 0` and those downstream `1`, `RansOpts3::transition`.
+    #[test]
+    fn transition_is_opt_in_and_reaches_the_solver() {
+        let flow = WallFlow { re_c: 7.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let base = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(flow), 0);
+        assert_eq!(base.transition, None);
+        let gamma_of = |c: &Case3| {
+            let s = c.build_solver().unwrap();
+            let r = s.rans().expect("viscous");
+            let near: Vec<(f64, f64)> =
+                (0..s.grid.vol.len()).filter(|&i| r.dwall[i] < 0.02).map(|i| (s.grid.xc[i][0], r.gamma.get(i).copied().unwrap_or(1.0))).collect();
+            (r.gamma.is_empty(), near)
+        };
+        assert!(gamma_of(&base).0);
+        assert!(gamma_of(&base.clone().with_transition(0.0, 0.0)).0);
+        let (empty, near) = gamma_of(&base.with_transition(2.0, 0.0));
+        assert!(!empty);
+        assert!(near.iter().filter(|&&(x, _)| x < 1.5).all(|&(_, g)| g == 0.0), "the body wall cells upstream of the trip are laminar");
+        assert!(near.iter().filter(|&&(x, _)| x > 2.5 && x < 8.5).all(|&(_, g)| g == 1.0), "and the ones downstream turbulent");
+        assert!(near.iter().any(|&(x, _)| x < 1.5) && near.iter().any(|&(x, _)| x > 2.5 && x < 8.5));
     }
 
     /// Every viscous 3D domain (half domain, sector) starts at [`DDADI_CFL_MAX`] with the DDADI line solve and the runners' rollback controller on; the wedge at the engine's

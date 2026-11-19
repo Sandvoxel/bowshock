@@ -394,6 +394,8 @@ pub(crate) struct TDev3<const N: usize> {
     speed: A,
     /// Roughness per cell (`None`: all smooth).
     ks: Option<A>,
+    /// Prescribed intermittency per cell (`transition3`; `None`: all turbulent).
+    gamma: Option<A>,
     /// A smooth wall cell takes its `S^2` from the law of the wall and its `k` is capped (`TurbIn::law_strain`).
     law_strain: bool,
     /// The law of the wall at the smooth wall cells ([`LazySolver3::wall_law3`]); filled by [`LazySolver3::turbulence_update3`] (set `None`).
@@ -542,7 +544,7 @@ impl LazySolver3 {
     /// `turbulence3::wall_state_pass`: the wall state `[k_w, omega_w, mu_t,w]` of every fluid cell with a no-slip face (zero elsewhere) from the unpadded primitives `p`,
     /// the viscosity `mu`, the wall distance `dwall` and the roughness per cell `ks` (`None`: all smooth). The state is computed on the gathered wall cells only (the
     /// Newton and fixed-point iterations are transcendental: in `Df32` they cost as much as the rest of the update on all cells) and scattered into zeros.
-    fn wall_state_pass3(&self, tg: &TGeo3, p: &Rec3, mu: &A, dwall: &A, ks: Option<&A>) -> Result<[A; 3]> {
+    fn wall_state_pass3(&self, tg: &TGeo3, p: &Rec3, mu: &A, dwall: &A, ks: Option<&A>, gamma: Option<&A>) -> Result<[A; 3]> {
         let Some(idx) = &tg.wall_idx else { return Ok(std::array::from_fn(|_| c(0.0) * &p[0])) };
         let at = |a: &A| a.take(idx);
         let (rho, mu, d) = (at(&p[0]), at(mu), at(dwall));
@@ -560,11 +562,20 @@ impl LazySolver3 {
             }
         };
         let speed = self.wall_speed_at3(tg, &u, &v, &w);
+        // a laminar cell (prescribed transition, `turbulence3::wall_state_pass`) is a plain resolved wall: speed 0, smooth
+        let laminar = gamma.map(|g| at(g).lt(c(0.5)));
+        let speed = match &laminar {
+            Some(l) => select(l, c(0.0), &speed),
+            None => speed,
+        };
         let smooth = self.wall_smooth3(&rho, &nu, &speed, &d);
         let state = match ks {
             None => smooth,
             Some(ks) => {
-                let ks = at(ks);
+                let ks = match &laminar {
+                    Some(l) => select(l, c(0.0), at(ks)),
+                    None => at(ks),
+                };
                 let rough_cell = ks.gt(c(0.0));
                 let ks_safe = select(&rough_cell, &ks, c(1.0));
                 let [k_w, om_w, nu_t] = self.aupoix3(&nu, &speed, &d, &ks_safe);
@@ -783,7 +794,13 @@ impl LazySolver3 {
             }
             None => turb,
         };
-        let mu_t = select(fluid, model.eddy_viscosity(&self.cell_in3(dev, &turb, grad)), c(0.0));
+        let mu_t = model.eddy_viscosity(&self.cell_in3(dev, &turb, grad));
+        // a laminar cell (prescribed transition) has no eddy viscosity, hence no production (`turbulence3::solve_and_update`)
+        let mu_t = match &dev.gamma {
+            Some(g) => mu_t * g,
+            None => mu_t,
+        };
+        let mu_t = select(fluid, mu_t, c(0.0));
         let n_active = c(tg.n_active as f64);
         let rnorm: [A; N] = std::array::from_fn(|e| (select(fluid, &ct.r[e] * &ct.r[e], c(0.0)).sum() / n_active).sqrt());
         TUpdate3 { turb, mu_t, rnorm }
@@ -812,6 +829,11 @@ impl LazySolver3 {
             Some(ks) => w1.gt(c(0.0)) & at(ks).eq(c(0.0)) & counted,
             None => w1.gt(c(0.0)) & counted,
         };
+        // a laminar cell of a prescribed transition takes neither the strain of the law nor its cap
+        let smooth = match &dev.gamma {
+            Some(g) => smooth & at(g).ge(c(0.5)),
+            None => smooth,
+        };
         let (smooth, s2, yp, u_tau, nu) = self.staged3((select(&smooth, c(1.0), c(0.0)), &strain * &strain, yp, u_tau, nu));
         let full = |a: &A| select(&tg.wall_cell, a.take(pos), c(0.0));
         let (smooth, s2, yp, u_tau, nu) = self.staged3((full(&smooth), full(&s2), full(&yp), full(&u_tau), full(&nu)));
@@ -832,6 +854,7 @@ impl LazySolver3 {
             turb: dev.turb.clone(),
             speed: dev.speed.clone(),
             ks: dev.ks.clone(),
+            gamma: dev.gamma.clone(),
             law_strain: dev.law_strain,
             law: self.wall_law3(tg, dev),
         }
@@ -903,6 +926,7 @@ impl LazySolver3 {
             },
             speed: self.wall_speed_grid3(tg, &p)?,
             ks: if cx.ks.is_empty() { None } else { Some(per_cell(&|c| cx.ks[c])?) },
+            gamma: if cx.gamma.is_empty() { None } else { Some(per_cell(&|c| cx.gamma[c])?) },
             law_strain: cx.law_strain,
             law: None,
         };
@@ -927,7 +951,7 @@ impl LazySolver3 {
         let (vg, tg) = self.geometry_turb3(cx, sym)?;
         let (dev, p) = self.upload_turb3(&tg, cx)?;
         let nc = self.ni * self.nj * self.nk;
-        let wall_out = self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref())?;
+        let wall_out = self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref(), dev.gamma.as_ref())?;
         let dev = self.with_law3(&tg, &dev);
         let dev = &dev;
         let grad = self.scalar_gradients3(&tg, &vg, model, dev);
@@ -979,7 +1003,7 @@ impl LazySolver3 {
         let (vg, tg) = self.geometry_turb3(cx, sym)?;
         let (dev, p) = self.upload_turb3(&tg, cx)?;
         let wall_run = || -> Result<()> {
-            self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref())?.eval()?;
+            self.wall_state_pass3(&tg, &p, &dev.cell.mu, &dev.dwall, dev.ks.as_ref(), dev.gamma.as_ref())?.eval()?;
             self.ctx.sync()
         };
         let update_run = || -> Result<()> {

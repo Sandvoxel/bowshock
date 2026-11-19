@@ -151,6 +151,8 @@ struct Case {
     wall: Vec<[f64; 3]>,
     dwall: Vec<f64>,
     ks: Vec<f64>,
+    /// `TurbIn::gamma`: the prescribed intermittency per cell (empty: all turbulent).
+    gamma: Vec<f64>,
     /// `TurbIn::law_strain`: the wall cells take the law of the wall for `S^2` and the `k` cap (the wall cases), or the 2D treatment (the wedge / sector parity cases).
     law_strain: bool,
     /// `TurbIn::law_i_walls`: the no-slip faces of the `i` family take the law of the wall too (else a cell with only such faces is a plain wall cell).
@@ -253,7 +255,7 @@ impl Case {
             })
             .collect();
         let mut wall = vec![[0.0; 3]; nc];
-        t3::wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, &ks, iso, law_i_walls, &mut wall);
+        t3::wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, &ks, &[], iso, law_i_walls, &mut wall);
         let mut turb: Vec<[f64; 2]> = (0..nc).map(|_| [10f64.powf(rng.range(-6.0, -2.0)), 10f64.powf(rng.range(0.0, 2.0))]).collect();
         // the wall cells of the sweep carry `k+ = k / u_tau^2` from 0.3 to 40, so that the `k` cap of the law of the wall acts where its weight is not small (`y+ >~ 3`)
         for &(c, u_star) in &u_stars {
@@ -299,7 +301,57 @@ impl Case {
             v
         });
         let dt: Vec<f64> = (0..nc).map(|_| rng.range(0.02, 0.2)).collect();
-        Case { name: name.into(), grid, cfg, solid, w, dirs, bc, sym, mu, mu_t, grad, wall, dwall, ks, law_strain, law_i_walls, f, dt, turb, re_c, iso }
+        Case {
+            name: name.into(),
+            grid,
+            cfg,
+            solid,
+            w,
+            dirs,
+            bc,
+            sym,
+            mu,
+            mu_t,
+            grad,
+            wall,
+            dwall,
+            ks,
+            gamma: Vec::new(),
+            law_strain,
+            law_i_walls,
+            f,
+            dt,
+            turb,
+            re_c,
+            iso,
+        }
+    }
+
+    /// This case with a prescribed transition: the cells with `x` below the median `x` of the fluid cells are laminar (`gamma = 0`, a station that cuts the wall cells, the rough ones
+    /// and the blocks among them), the wall state and the eddy viscosity of the inputs recomputed with the field (`turbulence3::wall_state_pass`).
+    fn with_transition(mut self) -> Case {
+        let mut xs: Vec<f64> = (0..self.solid.len()).filter(|&c| !self.solid[c]).map(|c| self.grid.xc[c][0]).collect();
+        xs.sort_by(f64::total_cmp);
+        let x_tr = xs[xs.len() / 2];
+        self.gamma = (0..self.solid.len()).map(|c| if self.grid.xc[c][0] < x_tr { 0.0 } else { 1.0 }).collect();
+        t3::wall_state_pass(
+            &self.grid,
+            &self.solid,
+            &self.dirs,
+            &self.w,
+            &self.mu,
+            &self.dwall,
+            &self.ks,
+            &self.gamma,
+            self.iso,
+            self.law_i_walls,
+            &mut self.wall,
+        );
+        for c in 0..self.mu_t.len() {
+            self.mu_t[c] *= self.gamma[c];
+        }
+        self.name = format!("{}, transition", self.name);
+        self
     }
 
     fn input(&self) -> TurbIn<'_, 2> {
@@ -315,6 +367,7 @@ impl Case {
             wall: &self.wall,
             iso: self.iso,
             ks: &self.ks,
+            gamma: &self.gamma,
             law_strain: self.law_strain,
             law_i_walls: self.law_i_walls,
             dwall: &self.dwall,
@@ -387,6 +440,48 @@ fn cases() -> Vec<Case> {
         let mut g = Grid3::try_from_nodes(n[0], n[1], n[2], x.clone(), y.clone(), z.clone()).expect("sweep grid");
         g.mark_solid(SolidBox { i: 0..n[0], j: 0..1, k: 0..n[2] }, Some(Part::Body(0)));
         v.push(Case::new(name, g, box_config(), s, bc, 5.0e4, Flow::YPlusSweep, rough, true, false, 7));
+    }
+    // prescribed transition (`turbulence3::TurbIn::gamma`): the left half of the cells laminar; with rough cells, the law of the wall and the cold wall
+    let (s, bc) = box_sides(false);
+    let block = [SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
+    v.push(
+        Case::new(
+            "box, Inf ghosts, law_strain",
+            box_grid([8, 7, 6], &block, &mut Rng::new(11)),
+            box_config(),
+            s,
+            bc,
+            re_box,
+            Flow::Random,
+            true,
+            true,
+            false,
+            3,
+        )
+        .with_transition(),
+    );
+    v.push(
+        Case::with_wall(
+            "box, Inf ghosts, law_strain, isothermal wall",
+            box_grid([8, 7, 6], &block, &mut Rng::new(11)),
+            box_config(),
+            s,
+            bc,
+            re_box,
+            Flow::Random,
+            true,
+            true,
+            true,
+            3,
+            WallThermal::Isothermal(1.2),
+        )
+        .with_transition(),
+    );
+    for rough in [false, true] {
+        let mut g = Grid3::try_from_nodes(n[0], n[1], n[2], x.clone(), y.clone(), z.clone()).expect("sweep grid");
+        g.mark_solid(SolidBox { i: 0..n[0], j: 0..1, k: 0..n[2] }, Some(Part::Body(0)));
+        let name = if rough { "y+ sweep 0.1 .. 300, rough cells, law_strain" } else { "y+ sweep 0.1 .. 300, smooth, law_strain" };
+        v.push(Case::new(name, g, box_config(), s, bc, 5.0e4, Flow::YPlusSweep, rough, true, false, 7).with_transition());
     }
     let wedge_sym = [false, false, false, false, true, true];
     let wedge_bc = [ScalarBc::Inf, ScalarBc::Inf, ScalarBc::Cell, ScalarBc::Inf, ScalarBc::Cell, ScalarBc::Cell];

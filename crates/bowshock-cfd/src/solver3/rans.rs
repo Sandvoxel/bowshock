@@ -60,6 +60,7 @@ use super::Solver3;
 use crate::gas3::{Cons3, Prim3};
 use crate::grid3::Grid3;
 use crate::sst::{IsoWall, Turbulence, Viscous, WallThermal};
+use crate::transition3::{gamma_field, Transition};
 use crate::turbulence3::{self, ScalarBc, ScalarSides, Sst, TurbIn};
 use crate::viscous3::{self, face_shape, FaceDirs3, Grad3, SymSides, WallTraction};
 use crate::walldist3::{wall_distance3, wall_faces};
@@ -84,6 +85,9 @@ pub struct RansOpts3 {
     /// Thermal condition of the no-slip walls ([`WallThermal`]; `Adiabatic` is the default and leaves every result bit-identical). An isothermal wall changes the ghost of the viscous
     /// kernels (`T_g = 2 T_w - T`, face viscosity `mu(T_w)`) and gives the law of the wall the density and viscosity at the wall temperature; the inviscid fluxes keep the adiabatic ghost.
     pub wall_thermal: WallThermal,
+    /// Prescribed transition (`transition3`; SST only): laminar walls upstream of the given stations, turbulent downstream. `None` (default): fully turbulent, bit-identical to a
+    /// solver without the feature.
+    pub transition: Option<Transition>,
 }
 
 impl Default for RansOpts3 {
@@ -95,6 +99,7 @@ impl Default for RansOpts3 {
             pressure_outflow: true,
             law_i_walls: false,
             wall_thermal: WallThermal::Adiabatic,
+            transition: None,
         }
     }
 }
@@ -121,6 +126,8 @@ pub struct Rans3 {
     /// Wall distance of the cell centroids (SST; empty otherwise) and the roughness per cell (empty: smooth).
     pub dwall: Vec<f64>,
     pub ks: Vec<f64>,
+    /// Prescribed intermittency per cell (`transition3::gamma_field`: `0` laminar, `1` turbulent; empty: fully turbulent).
+    pub gamma: Vec<f64>,
     /// `[k, omega]` per cell (SST; empty otherwise) and the density residual norm `rho dk/dt` of the last update.
     pub turb: Vec<[f64; 2]>,
     pub turb_rnorm: f64,
@@ -163,11 +170,18 @@ impl Solver3 {
         let dirs = viscous3::face_dirs(&self.grid, &self.solid, &opts.sym);
         let (mut turb, mut mu_t, mut dwall, mut wall) = (Vec::new(), vec![0.0; nc], Vec::new(), Vec::new());
         let mut ks = Vec::new();
+        let mut gamma = Vec::new();
         if sst {
             let faces = wall_faces(&self.grid, &self.solid);
             dwall = wall_distance3(&self.grid, &self.solid, &faces);
             let rho = self.cfg.freestream[0];
             (turb, mu_t) = turbulence3::init(&model, &self.solid, |_| rho);
+            if let Some(tr) = opts.transition {
+                gamma = gamma_field(&self.grid, &self.solid, &faces, tr);
+                for (m, g) in mu_t.iter_mut().zip(&gamma) {
+                    *m *= g;
+                }
+            }
             wall = vec![[0.0; 3]; nc];
             ks = if !opts.ks.is_empty() {
                 assert_eq!(opts.ks.len(), nc, "one roughness per cell");
@@ -193,6 +207,7 @@ impl Solver3 {
             wall,
             dwall,
             ks,
+            gamma,
             turb,
             turb_rnorm: 0.0,
             fvi: vec![[0.0; 5]; g.iface.len()],
@@ -217,7 +232,7 @@ impl Solver3 {
         for c in 0..given.len() {
             if !self.solid[c] {
                 r.turb[c] = given[c];
-                r.mu_t[c] = (u[c][0] * given[c][0] / given[c][1]).min(cap);
+                r.mu_t[c] = (u[c][0] * given[c][0] / given[c][1]).min(cap) * r.gamma.get(c).copied().unwrap_or(1.0);
             }
         }
     }
@@ -277,7 +292,7 @@ impl Solver3 {
         let Solver3 { grid, w, solid, rans, .. } = self;
         let Some(r) = rans.as_deref_mut() else { return };
         if !r.wall.is_empty() {
-            turbulence3::wall_state_pass(grid, solid, &r.dirs, w, &r.mu, &r.dwall, &r.ks, r.iso, r.law_i_walls, &mut r.wall);
+            turbulence3::wall_state_pass(grid, solid, &r.dirs, w, &r.mu, &r.dwall, &r.ks, &r.gamma, r.iso, r.law_i_walls, &mut r.wall);
         }
         viscous3::face_pass(grid, solid, w, &r.dirs, &r.grad, &r.mu, &r.mu_t, &r.wall, r.iso, &mut r.fvi, &mut r.fvj, &mut r.fvk);
     }
@@ -326,6 +341,7 @@ impl Solver3 {
             wall: &r.wall,
             iso: r.iso,
             ks: &r.ks,
+            gamma: &r.gamma,
             law_strain: true,
             law_i_walls: r.law_i_walls,
             dwall: &r.dwall,

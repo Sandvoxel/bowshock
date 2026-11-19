@@ -100,7 +100,7 @@ impl LazySolver3 {
             let mu_t = mu_t_state.clone().unwrap_or_else(|| &cell.mu * c(0.0));
             let wall = match &self.turb {
                 Some(t) => Some(stage!(self, rows, reps, "wall state (automatic wall treatment)", {
-                    let wl = self.wall_state_pass3(&t.tg, &prim, &cell.mu, &t.dwall, t.ks.as_ref())?;
+                    let wl = self.wall_state_pass3(&t.tg, &prim, &cell.mu, &t.dwall, t.ks.as_ref(), t.gamma.as_ref())?;
                     (evs_s(&wl), wl)
                 })),
                 None => None,
@@ -262,6 +262,7 @@ impl LazySolver3 {
                 turb: [s[7].clone(), s[8].clone()],
                 speed: self.wall_speed_grid3(&t.tg, &prim)?,
                 ks: t.ks.clone(),
+                gamma: t.gamma.clone(),
                 law_strain: true,
                 law: None,
             };

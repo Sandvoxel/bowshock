@@ -368,6 +368,7 @@ pub fn wall_state_pass(
     mu: &[f64],
     dwall: &[f64],
     ks: &[f64],
+    gamma: &[f64],
     iso: Option<IsoWall>,
     law_i_walls: bool,
     out: &mut [[f64; 3]],
@@ -390,8 +391,13 @@ pub fn wall_state_pass(
                 }
                 let wc = &w[pidx3(ni, nj, nk, i as isize, j as isize, k as isize)];
                 let (rho_w, nu) = wall_props(wc, mu[c], iso);
-                let speed = wall_speed(grid, dirs, i, j, k, wc, law_i_walls).unwrap_or(0.0);
-                let s = wall_state(rho_w, nu, speed, dwall[c], ks.get(c).copied().unwrap_or(0.0));
+                // a laminar cell (prescribed transition) is a plain resolved wall: speed 0, smooth (`transition3`)
+                let (speed, ks) = if gamma.get(c).is_some_and(|&g| g < 0.5) {
+                    (0.0, 0.0)
+                } else {
+                    (wall_speed(grid, dirs, i, j, k, wc, law_i_walls).unwrap_or(0.0), ks.get(c).copied().unwrap_or(0.0))
+                };
+                let s = wall_state(rho_w, nu, speed, dwall[c], ks);
                 pl[j * ni + i] = [s.k_w, s.omega_w, s.mu_t_w];
             }
         }
@@ -616,6 +622,9 @@ pub struct TurbIn<'a, const N: usize> {
     pub iso: Option<IsoWall>,
     /// Roughness per cell (empty: all smooth).
     pub ks: &'a [f64],
+    /// Prescribed intermittency per cell (`transition3`: `0` laminar, `1` turbulent; empty: all turbulent, the default). A laminar cell has `mu_t = 0` (so no production of `k` and
+    /// `omega`), a laminar wall cell the plain resolved-wall state and the strain of its velocity gradient.
+    pub gamma: &'a [f64],
     /// A smooth wall cell takes its `S^2` from the law of the wall ([`strain_law`]) instead of its mean-flow gradient (a rough one always keeps the gradient). `false`
     /// is the 2D module's treatment (the wedge parity tests); the solver runs with `true`.
     pub law_strain: bool,
@@ -687,11 +696,17 @@ impl<const N: usize> TurbIn<'_, N> {
         CellIn { rho: w[0], nu, d: self.dwall[c], phi, grad, s2, mu_t: self.mu_t[c] }
     }
 
+    /// Is the cell `c` turbulent (`gamma >= 1/2`; every cell without a prescribed field)?
+    #[inline]
+    fn turbulent(&self, c: usize) -> bool {
+        self.gamma.get(c).is_none_or(|&g| g >= 0.5)
+    }
+
     /// The speed the law of the wall takes in the cell `c` if it takes the law for its strain and its pinned scalars: `law_strain`, a smooth wall cell with a no-slip
     /// face of the law class ([`wall_speed`]); `None` otherwise (a plain wall cell, a rough one, no wall).
     #[inline]
     fn law_speed(&self, c: usize, w: &Prim3) -> Option<f64> {
-        if !(self.law_strain && self.wall.get(c).is_some_and(|w| w[1] > 0.0) && self.ks.get(c).is_none_or(|&ks| ks == 0.0)) {
+        if !(self.law_strain && self.wall.get(c).is_some_and(|w| w[1] > 0.0) && self.ks.get(c).is_none_or(|&ks| ks == 0.0) && self.turbulent(c)) {
             return None;
         }
         let g = self.grid;
@@ -1008,7 +1023,7 @@ pub fn solve_and_update<M: TurbModel<N>, const N: usize>(cx: &TurbIn<N>, model: 
                 t[e] = model.wall_cell(e, t[e], yp, u_tau, nu);
             }
         }
-        *m = model.eddy_viscosity(&cx.cell_in(c, *t, tg[c]));
+        *m = model.eddy_viscosity(&cx.cell_in(c, *t, tg[c])) * cx.gamma.get(c).copied().unwrap_or(1.0);
     });
     let n_active = cx.solid.iter().filter(|s| !**s).count().max(1) as f64;
     let mut rnorm = [0.0; N];
@@ -1101,7 +1116,7 @@ mod tests {
             cell_pass(&visc(re_c), &grid, &solid, &w, None, &mut grad, &mut mu);
             let dwall = wall_distance3(&grid, &solid, &wall_faces(&grid, &solid));
             let mut wall = vec![[0.0; 3]; nc];
-            wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, ks, None, false, &mut wall);
+            wall_state_pass(&grid, &solid, &dirs, &w, &mu, &dwall, ks, &[], None, false, &mut wall);
             let f = [0, 1, 2].map(|dir| {
                 let [n0, n1, n2] = face_shape(&grid, dir);
                 let mut v = vec![[0.0; 5]; n0 * n1 * n2];
@@ -1161,6 +1176,7 @@ mod tests {
                 wall: &self.wall,
                 iso: None,
                 ks: &[],
+                gamma: &[],
                 law_strain: false,
                 law_i_walls: false,
                 dwall: &self.dwall,
@@ -1357,7 +1373,7 @@ mod tests {
         ks[g.cell(1, 1, 1)] = 1e-4; // rough junction cell
         ks[g.cell(1, 2, 1)] = 0.0; // smooth: a cell above the z wall only (j = 2 is beside no y wall)
         let mut out = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &ks, None, false, &mut out);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &ks, &[], None, false, &mut out);
         let st = |c: usize, k: f64| {
             let s = wall_state(1.0, 1.0e-6, 0.8, dwall[c], k);
             [s.k_w, s.omega_w, s.mu_t_w]
@@ -1400,7 +1416,7 @@ mod tests {
         assert!((wall_speed(&g, &dirs, 2, 2, 1, &cell, true).unwrap() - 0.3).abs() < 1e-14, "tangential to the i wall: the v component");
         assert!((wall_speed(&g, &dirs, 3, 1, 1, &cell, false).unwrap() - 0.8).abs() < 1e-14, "tangential to the floor: the u component");
         let mut out = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, false, &mut out);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], &[], None, false, &mut out);
         let same = |a: [f64; 3], b: [f64; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-12 * (x.abs() + y.abs()));
         assert!(same(out[only_i], state(only_i, 0.0)), "{:?}", out[only_i]);
         assert_eq!(out[only_i][0], 0.0);
@@ -1409,7 +1425,7 @@ mod tests {
         assert!((out[only_i][1] / menter - 1.0).abs() < 1e-12, "Menter's 2D value {} vs {menter}", out[only_i][1]);
         assert!(same(out[floor], state(floor, 0.8)), "{:?}", out[floor]);
         assert!(same(out[both], state(both, 0.8)), "the i wall does not enter the speed of a cell with a streamwise wall: {:?}", out[both]);
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, true, &mut out);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], &[], None, true, &mut out);
         assert!(same(out[only_i], state(only_i, 0.3)), "{:?}", out[only_i]);
         assert!(same(out[floor], state(floor, 0.8)));
         assert!(same(out[both], state(both, 0.8)));
@@ -1440,7 +1456,7 @@ mod tests {
         cell_pass(&v, &g, &solid, &w, None, &mut grad, &mut mu);
         let dwall = wall_distance3(&g, &solid, &wall_faces(&g, &solid));
         let mut wall = vec![[0.0; 3]; nc];
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, false, &mut wall);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], &[], None, false, &mut wall);
         let mu_t = vec![0.0; nc];
         let run = |wall: &[[f64; 3]]| {
             let (mut fi, mut fj, mut fk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
@@ -1876,7 +1892,7 @@ mod tests {
         let t_cell = t.elapsed();
         let mut wall = vec![[0.0; 3]; nc];
         let t = Instant::now();
-        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], None, false, &mut wall);
+        wall_state_pass(&g, &solid, &dirs, &w, &mu, &dwall, &[], &[], None, false, &mut wall);
         let t_wall = t.elapsed();
         let mu_t = vec![1e-5; nc];
         let (mut fi, mut fj, mut fk) = (vec![[0.0; 5]; g.iface.len()], vec![[0.0; 5]; g.jface.len()], vec![[0.0; 5]; g.kface.len()]);
@@ -1911,6 +1927,7 @@ mod tests {
             wall: &wall,
             iso: None,
             ks: &[],
+            gamma: &[],
             law_strain: false,
             law_i_walls: false,
             dwall: &dwall,
@@ -2079,6 +2096,7 @@ mod tests {
             wall: &case.wall,
             iso: None,
             ks: &[],
+            gamma: &[],
             law_strain: false,
             law_i_walls: false,
             dwall: &case.dwall,

@@ -15,12 +15,19 @@ pub(crate) struct TurbRun3 {
     tg: TGeo3,
     dwall: A,
     ks: Option<A>,
+    /// Prescribed intermittency per cell (`transition3`) on the device and on the host (`None` / empty: fully turbulent).
+    gamma: Option<A>,
+    gamma_host: Vec<f64>,
 }
 
 impl TurbRun3 {
     /// The free-stream `[k, omega]` and `mu_t` of every cell (`turbulence3::init`).
     fn init_host(&self, solid: &[bool], rho: f64) -> (Vec<[f64; 2]>, Vec<f64>) {
-        crate::turbulence3::init(&crate::turbulence3::Sst { re_c: self.re_c }, solid, |_| rho)
+        let (turb, mut mu_t) = crate::turbulence3::init(&crate::turbulence3::Sst { re_c: self.re_c }, solid, |_| rho);
+        for (m, g) in mu_t.iter_mut().zip(&self.gamma_host) {
+            *m *= g;
+        }
+        (turb, mu_t)
     }
 }
 
@@ -97,6 +104,7 @@ impl LazySolver3 {
             turb: [s[7].clone(), s[8].clone()],
             speed: self.wall_speed_grid3(&t.tg, &last.p).expect("the wall speed of the wall cells"),
             ks: t.ks.clone(),
+            gamma: t.gamma.clone(),
             law_strain: true,
             law: None,
         };
@@ -204,6 +212,8 @@ impl LazySolver3 {
                 tg: TGeo3::new(&self.ctx, g, &self.solid_host, &sym, &r.bc, &vg, r.law_i_walls)?,
                 dwall: up(&self.ctx, &r.dwall.iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), shape)?,
                 ks: if r.ks.is_empty() { None } else { Some(up(&self.ctx, &r.ks, shape)?) },
+                gamma: if r.gamma.is_empty() { None } else { Some(up(&self.ctx, &r.gamma, shape)?) },
+                gamma_host: r.gamma.clone(),
             })
         } else {
             None
@@ -233,7 +243,7 @@ impl LazySolver3 {
         let cell = self.jet_fix_cell3(self.viscous_cells3(vg, &p, &w));
         let mu_t = mu_t.cloned().unwrap_or_else(|| &cell.mu * c(0.0));
         // SST: the wall state of the cells with a no-slip face (the automatic treatment), its eddy viscosity `mu_t,w` the face value of the wall faces
-        let wall = self.turb.as_ref().map(|t| self.wall_state_pass3(&t.tg, &p, &cell.mu, &t.dwall, t.ks.as_ref()).expect("the wall state arrays of the grid"));
+        let wall = self.turb.as_ref().map(|t| self.wall_state_pass3(&t.tg, &p, &cell.mu, &t.dwall, t.ks.as_ref(), t.gamma.as_ref()).expect("the wall state arrays of the grid"));
         let fv = self.viscous_fluxes3(vg, &w, &cell, &mu_t, wall.as_ref().map(|w| &w[2]));
         let total: [Rec3; 3] = std::array::from_fn(|d| Self::total_flux3(&f[d], &fv[d]));
         let diff = compute_dt.then(|| self.diffusion_rates3(&cell, &mu_t, &p[0]));

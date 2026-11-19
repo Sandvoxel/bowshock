@@ -335,3 +335,39 @@ fn isothermal_box_matches_cpu() {
     }
     report("S5b isothermal viscous box (10 x 8 x 6, no-slip block, dead block), 30 iterations from the free stream", &rows);
 }
+
+/// [`host`] with a prescribed transition at `x_tr` on the body walls (`RansOpts3::transition`, `bowshock_cfd::transition3`).
+fn host_transition(grid: &Grid3, mach: f64, scheme: Scheme3, v: Viscous, x_tr: f64) -> Solver3 {
+    use bowshock_cfd::solver3::RansOpts3;
+    use bowshock_cfd::transition3::Transition;
+    let low_mach = matches!(scheme, Scheme3::Implicit(p) if p.low_mach_precond);
+    let cfg = Config3 { freestream: freestream3(mach, 0.0), cfl: 0.5, limiter: Limiter::VanAlbada, first_order_iters: 5, low_mach, scheme };
+    let mut s = Solver3::new(grid.clone(), cfg);
+    s.set_viscous_with(Some(v), RansOpts3 { transition: Some(Transition { x_tr, fin_frac: 0.0 }), ..RansOpts3::default() });
+    s
+}
+
+/// Prescribed transition (`transition3`): the walls of the block upstream of `x_tr = 0.4` (the left column of its top face and its left side) are laminar (`mu_t = 0`, no production,
+/// the plain resolved-wall state, the strain of the velocity gradient), the rest turbulent; the cells take the property of their nearest wall face. The state and `k`, `omega`, `mu_t` after
+/// 30 iterations from the free stream on the GPU against the CPU, explicit and implicit block, two Reynolds numbers (the first cell of the block walls at a small and at a large `y+`).
+#[test]
+fn transition_box_matches_cpu() {
+    let g = box_grid();
+    let mut rows = Vec::new();
+    for (mach, re) in [(0.3, 2e3), (0.3, 2e5)] {
+        let v = viscous(Turbulence::Sst, re);
+        let s = host_transition(&g, mach, block(), v, 0.4);
+        let gamma = &s.rans().expect("viscous").gamma;
+        let laminar = gamma.iter().filter(|&&x| x == 0.0).count();
+        assert!(laminar > 0 && laminar < gamma.len(), "the field must have laminar and turbulent cells ({laminar} of {})", gamma.len());
+        compare_with(
+            &format!("SST transition M {mach} Re {re:.0e} explicit"),
+            &|| host_transition(&g, mach, Scheme3::Explicit, v, 0.4),
+            30,
+            EXPLICIT,
+            &mut rows,
+        );
+        compare_with(&format!("SST transition M {mach} Re {re:.0e} implicit block"), &|| host_transition(&g, mach, block(), v, 0.4), 30, IMPLICIT, &mut rows);
+    }
+    report("S5b SST box with a prescribed transition at x = 0.4 (10 x 8 x 6, no-slip block, dead block), 30 iterations from the free stream", &rows);
+}
