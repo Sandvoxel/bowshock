@@ -381,6 +381,8 @@ pub struct LiftInfo {
     pub backend: String,
     /// When the solve finished (seconds since the Unix epoch).
     pub solved_at: u64,
+    /// Whether it is the 3D engine's, so that the centre-of-pressure and margin bands apply (`CfdLiftTable::bands`).
+    pub bands: bool,
 }
 
 /// Where a CFD table came from and what it left out: the provenance line's content.
@@ -398,6 +400,8 @@ pub struct CfdInfo {
     pub solve_seconds: f64,
     /// The grid it was solved on.
     pub grid: CfdGrid,
+    /// Whether the drag is the 3D engine's, so that the drag band applies (`CfdTable::bands`).
+    pub bands: bool,
     /// The 3D stability solve the margin, CP and `CNα` come from, when the table has a usable one.
     pub lift: Option<LiftInfo>,
     /// The table's first Mach node when the plotted range starts below it (the drag there is the first point scaled by Extended's trend).
@@ -652,10 +656,12 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         solved_at: table.solved_at,
         solve_seconds: table.solve_seconds,
         grid: table.grid,
+        bands: table.bands,
         lift: table.lift.as_ref().filter(|l| cfd::lift_usable(l)).map(|l| LiftInfo {
             points: l.points.len(),
             backend: l.backend.clone(),
             solved_at: l.solved_at,
+            bands: l.bands,
         }),
         scaled_below,
         notes,
@@ -907,6 +913,7 @@ mod tests {
             stage: 1,
             solved_at: 0,
             solve_seconds: 1.0,
+            bands: false,
             backend: "CPU".into(),
             fallback: None,
             altitude: 0.0,
@@ -1021,6 +1028,7 @@ mod tests {
             stage: 1,
             solved_at: 0,
             solve_seconds: 0.0,
+            bands: false,
             backend: "CPU".to_string(),
             fallback: None,
             altitude: 0.0,

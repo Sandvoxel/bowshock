@@ -396,7 +396,7 @@ mod tests {
     fn lift(machs: &[f64]) -> CfdLiftTable {
         let points =
             machs.iter().map(|&m| CfdLiftPoint { mach: m, alpha_deg: 2.0, cn: 0.1, x_cp: 1.0, cd: None, cm: None, quality: CfdQuality::Converged }).collect();
-        CfdLiftTable { key: 1, solved_at: 0, solve_seconds: 1.0, backend: "GPU (Luma)".to_string(), points, notes: Vec::new() }
+        CfdLiftTable { key: 1, solved_at: 0, solve_seconds: 1.0, bands: false, backend: "GPU (Luma)".to_string(), points, notes: Vec::new() }
     }
 
     #[test]

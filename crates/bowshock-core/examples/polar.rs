@@ -23,7 +23,7 @@ fn main() {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 },
         aft: vec![AftSpec::Tube { length: 0.60 }, AftSpec::Transition { length: 0.10, aft_diameter: 0.08 }],
     };
-    let analysis = Analysis::new(&spec).expect("invalid body").resolution(Resolution::Coarse);
+    let analysis = Analysis::legacy(&spec).expect("invalid body").resolution(Resolution::Coarse);
 
     let polar = analysis.clone().run(&MACHS).expect("analysis failed");
     println!("mach,cd_forebody,cd_base,cd_total,stop_reason,quality,warnings");

@@ -36,7 +36,7 @@ fn with_3d_grid(fins: bool) -> Analysis {
         root_te_to_base: 0.0,
         profile: FinProfile::Square,
     };
-    let analysis = Analysis::new(&spec).unwrap();
+    let analysis = Analysis::legacy(&spec).unwrap();
     let analysis = if fins { analysis.fins(fins_spec) } else { analysis };
     analysis.backend(Backend::Cpu).resolution(Resolution::Coarse).case3_hook(|c| {
         let s = &mut c.grid.sting;
@@ -109,7 +109,7 @@ fn a_viscous_finned_drag_sweep_gives_the_numbers_of_the_old_entry_to_the_last_bi
         root_te_to_base: 0.0,
         profile: FinProfile::Rounded,
     };
-    let p = Analysis::new(&spec)
+    let p = Analysis::legacy(&spec)
         .unwrap()
         .fins(fins)
         .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 120.0 } })

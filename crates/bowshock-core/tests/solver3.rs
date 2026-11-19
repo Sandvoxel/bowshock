@@ -61,12 +61,16 @@ fn solver3() -> Analysis {
 }
 
 #[test]
-fn the_engine_is_legacy_unless_asked_and_travels_in_the_spec() {
+fn the_engine_is_the_3d_one_unless_asked_and_travels_in_the_spec() {
+    assert_eq!(Engine::DEFAULT, Engine::Solver3);
     let a = Analysis::new(&body()).unwrap();
-    // BOWSHOCK_ENGINE decides the default of a new analysis; the tests run without it
+    // BOWSHOCK_ENGINE decides the default of a new analysis, and a machine without a GPU falls back to the legacy engine with a reason; the tests run without the variable
     if std::env::var("BOWSHOCK_ENGINE").is_err() {
-        assert_eq!(a.spec().unwrap().engine, Engine::Legacy);
+        let expect = if bowshock_core::gpu_name().is_some() { Engine::Solver3 } else { Engine::Legacy };
+        assert_eq!(a.spec().unwrap().engine, expect);
+        assert_eq!(Engine::no_gpu_fallback().is_some(), expect == Engine::Legacy);
     }
+    assert_eq!(Analysis::legacy(&body()).unwrap().spec().unwrap().engine, Engine::Legacy);
     let spec = a.engine(Engine::Solver3).spec().unwrap();
     assert_eq!(spec.engine, Engine::Solver3);
     assert_eq!(Analysis::from_spec(&spec).unwrap().spec().unwrap().engine, Engine::Solver3);
@@ -153,9 +157,15 @@ fn progress_is_reported_and_a_break_cancels() {
 }
 
 #[test]
-fn the_uncertainty_estimate_runs_the_neighbouring_level() {
-    let polar = solver3().estimate_uncertainty(true).run(&[2.0]).unwrap();
-    assert!(polar.points[0].cd_uncertainty.is_some_and(|u| u.is_finite()));
+fn the_bands_come_from_the_measured_terms_without_a_second_sweep() {
+    let polar = solver3().run(&[Condition::from(2.0), Condition::new(2.0, 2.0)]).unwrap();
+    let (p, a) = (&polar.points[0], &polar.points[1]);
+    let band = p.cd_band.expect("a drag band at zero incidence");
+    assert!(band.low > band.high && band.high > 0.0, "{band:?}");
+    assert_eq!(p.cd_uncertainty, Some(band.half_width()));
+    assert!(p.x_cp_band.is_none() && a.cd_band.is_none());
+    let cp = a.x_cp_band.expect("a centre-of-pressure band at an angle");
+    assert!(cp.low > 0.0);
 }
 
 #[test]

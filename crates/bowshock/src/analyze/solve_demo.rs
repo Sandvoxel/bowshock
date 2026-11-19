@@ -458,6 +458,7 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
                 key: cfd::lift_key(job.plan.geometry, &job.stability),
                 solved_at: cfd::now(),
                 solve_seconds: at,
+                bands: crate::analyze::cfd::solves_3d(),
                 backend: "GPU (Luma)".to_string(),
                 points,
                 notes: Vec::new(),

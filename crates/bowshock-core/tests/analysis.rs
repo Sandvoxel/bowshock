@@ -59,12 +59,12 @@ fn invalid_specs_are_rejected_with_the_field_named() {
     for (field, edit) in cases {
         let mut s = spec();
         edit(&mut s);
-        match Analysis::new(&s) {
+        match Analysis::legacy(&s) {
             Err(Error::InvalidInput(msg)) => assert!(msg.starts_with(field), "expected `{field}`, got `{msg}`"),
             other => panic!("expected InvalidInput for {field}, got {:?}", other.map(|_| ())),
         }
     }
-    assert!(Analysis::new(&spec()).is_ok());
+    assert!(Analysis::legacy(&spec()).is_ok());
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn drag_is_referenced_to_the_largest_cross_section() {
     assert_eq!(spec.reference_diameter(), 0.10);
     let (internal, _) = spec.to_internal().unwrap();
     let mach = 0.6;
-    let polar = Analysis::new(&spec).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(100).run(&[mach]).unwrap();
+    let polar = Analysis::legacy(&spec).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(100).run(&[mach]).unwrap();
     let p = &polar.points[0];
     let base = base_drag_coefficient(mach) * (internal.base_radius() / internal.body.radius()).powi(2);
     let raw = p.detail.cd_aft.iter().fold(p.detail.cd_nose, |a, c| a + c) / 0.64;

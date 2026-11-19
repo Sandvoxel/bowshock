@@ -81,8 +81,8 @@ missing. CPU verification of the final tree is in section 9.
 
 ## 2. How to run it
 
-- **Engine switch:** `BOWSHOCK_ENGINE=3d` (or `solver3`) selects the 3D engine in `bowshock_core::Analysis` (`analysis.rs`, `Engine::from_env`); the default is still
-  `Engine::Legacy` (the 2D route). The facade tiers are `Tier::{Draft, Coarse, Fine, Lift}` (`engine/case3.rs`): **Draft** (opt-in quick tier: wall functions on body and
+- **Engine switch:** `BOWSHOCK_ENGINE=3d` (or `solver3`) selects the 3D engine in `bowshock_core::Analysis` (`analysis.rs`, `Engine::from_env`); `Engine::DEFAULT` is `Solver3`
+  since the product flip (section 0; a machine without a GPU falls back to `Engine::Legacy` with a note, `BOWSHOCK_ENGINE=legacy` forces it). The facade tiers are `Tier::{Draft, Coarse, Fine, Lift}` (`engine/case3.rs`): **Draft** (opt-in quick tier: wall functions on body and
   fins, y+ 40, axial counts x0.6, domain 5 L / 3 L, 32 chord cells; Mach >= 0.8 with default levers, below 0.8 `Case3::draft_subsonic`), **Coarse** (table tier, wall
   resolved, fin stack y+ ~15), **Fine** (y+ ~1, 39 azimuth cells), **Lift** (half domain at incidence, fin stack y+ 60). The app's Quick button is `app-integrate`'s (see
   `handoff/app.md`; the Quick tier's subsonic bias is open, section 8).

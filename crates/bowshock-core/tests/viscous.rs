@@ -19,7 +19,7 @@ fn g3_ogive_cylinder_friction_and_base_pressure() {
 
     let t0 = Instant::now();
     let polar =
-        Analysis::new(&spec).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).viscous(FlightConditions { atmosphere }).run(&[mach]).unwrap();
+        Analysis::legacy(&spec).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).viscous(FlightConditions { atmosphere }).run(&[mach]).unwrap();
     let wall_seconds = t0.elapsed().as_secs_f64();
     let p = &polar.points[0];
     let r = &p.detail;
@@ -74,7 +74,7 @@ fn viscous_analysis_needs_a_dimensional_spec() {
 fn viscous_grids_pass_the_quality_check_and_report_friction() {
     use bowshock_core::Wake;
     for (wake, base_modelled) in [(None, false), (Some(Wake::Sting), true)] {
-        let mut a = Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).viscous(flight()).max_iterations(5);
+        let mut a = Analysis::legacy(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).viscous(flight()).max_iterations(5);
         if let Some(w) = wake {
             a = a.wake(w);
         }
@@ -96,7 +96,7 @@ fn g3_gpu_matches_cpu() {
     let spec = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] };
     let run = |backend| {
         let t0 = Instant::now();
-        let polar = Analysis::new(&spec).unwrap().backend(backend).resolution(Resolution::Coarse).viscous(flight()).run(&[0.5]).unwrap();
+        let polar = Analysis::legacy(&spec).unwrap().backend(backend).resolution(Resolution::Coarse).viscous(flight()).run(&[0.5]).unwrap();
         println!("G3 {backend:?}: {:.1} s, backend used {:?}, fallback {:?}", t0.elapsed().as_secs_f64(), polar.backend, polar.fallback);
         polar.points.into_iter().next().unwrap()
     };
@@ -132,7 +132,7 @@ fn g3_spec() -> BodySpec {
 /// The G3 body with fins: both fin parts are positive and the total is the sum of all parts.
 #[test]
 fn fins_add_friction_and_pressure_drag() {
-    let polar = Analysis::new(&g3_spec())
+    let polar = Analysis::legacy(&g3_spec())
         .unwrap()
         .fins(fin_set())
         .backend(Backend::Cpu)
@@ -150,7 +150,7 @@ fn fins_add_friction_and_pressure_drag() {
 
 #[test]
 fn fins_without_flight_conditions_are_rejected() {
-    let err = Analysis::new(&g3_spec()).unwrap().fins(fin_set()).run(&[0.5]).unwrap_err();
+    let err = Analysis::legacy(&g3_spec()).unwrap().fins(fin_set()).run(&[0.5]).unwrap_err();
     assert_eq!(err.to_string(), "fins need flight conditions: call Analysis::viscous");
 }
 
@@ -163,7 +163,7 @@ fn motor() -> MotorSpec {
 #[test]
 fn motor_on_analysis_reports_annulus_base_drag() {
     let t0 = Instant::now();
-    let polar = Analysis::new(&g3_spec())
+    let polar = Analysis::legacy(&g3_spec())
         .unwrap()
         .motor(motor())
         .backend(Backend::Cpu)
@@ -195,7 +195,7 @@ fn motor_on_analysis_reports_annulus_base_drag() {
 fn motor_gpu_matches_cpu() {
     let run = |backend| {
         let t0 = Instant::now();
-        let polar = Analysis::new(&g3_spec())
+        let polar = Analysis::legacy(&g3_spec())
             .unwrap()
             .motor(motor())
             .backend(backend)
@@ -220,18 +220,18 @@ fn motor_gpu_matches_cpu() {
 #[test]
 fn motor_run_errors() {
     let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
-    let err = Analysis::new(&g3_spec()).unwrap().motor(motor()).run(&[0.5]).unwrap_err();
+    let err = Analysis::legacy(&g3_spec()).unwrap().motor(motor()).run(&[0.5]).unwrap_err();
     assert_eq!(err.to_string(), "motor-on analysis needs Analysis::viscous");
-    let err = Analysis::new(&g3_spec()).unwrap().motor(motor()).viscous(flight).wake(Wake::Sting).run(&[0.5]).unwrap_err();
+    let err = Analysis::legacy(&g3_spec()).unwrap().motor(motor()).viscous(flight).wake(Wake::Sting).run(&[0.5]).unwrap_err();
     assert_eq!(err.to_string(), "motor-on analysis needs the base wake");
     let wide = MotorSpec { exit_diameter: 0.0951, ..motor() };
-    let err = Analysis::new(&g3_spec()).unwrap().motor(wide).viscous(flight).run(&[0.5]).unwrap_err();
+    let err = Analysis::legacy(&g3_spec()).unwrap().motor(wide).viscous(flight).run(&[0.5]).unwrap_err();
     assert!(err.to_string().contains("motor.exit_diameter"), "{err}");
 }
 
 #[test]
 fn drag_tolerance_needs_viscous_and_a_sane_value() {
-    let base = || Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse);
+    let base = || Analysis::legacy(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse);
     let bad = |a: Analysis| matches!(a.run(&[0.5]), Err(bowshock_core::Error::InvalidInput(m)) if m.contains("drag"));
     assert!(bad(base().drag_tolerance(0.002)));
     for rel in [0.0, f64::NAN, -1e-3, 0.5] {
@@ -249,19 +249,19 @@ fn roughness_is_validated() {
         Err(bowshock_core::Error::InvalidInput(m)) => m,
         other => panic!("expected InvalidInput, got {:?}", other.map(|p| p.points.len())),
     };
-    let viscous = || Analysis::new(&roughness_spec()).unwrap().viscous(flight());
+    let viscous = || Analysis::legacy(&roughness_spec()).unwrap().viscous(flight());
     for bad in [-1e-6, f64::NAN, f64::INFINITY, 1e-3, 0.01 * 0.10] {
         assert!(invalid(viscous().roughness(bad)).contains("roughness"), "{bad}");
     }
-    let m = invalid(Analysis::new(&roughness_spec()).unwrap().roughness(60e-6));
+    let m = invalid(Analysis::legacy(&roughness_spec()).unwrap().roughness(60e-6));
     assert!(m.contains("needs Analysis::viscous"), "{m}");
 }
 
 #[test]
 fn roughness_reaches_the_solver_case_in_nose_diameters() {
-    let a = Analysis::new(&roughness_spec()).unwrap().viscous(flight()).roughness(60e-6);
+    let a = Analysis::legacy(&roughness_spec()).unwrap().viscous(flight()).roughness(60e-6);
     let v = a.engine_cases(&[0.5]).unwrap()[0].viscous.unwrap();
     assert!((v.roughness - 60e-6 / 0.10).abs() < 1e-15, "{}", v.roughness);
-    let smooth = Analysis::new(&roughness_spec()).unwrap().viscous(flight()).engine_cases(&[0.5]).unwrap();
+    let smooth = Analysis::legacy(&roughness_spec()).unwrap().viscous(flight()).engine_cases(&[0.5]).unwrap();
     assert_eq!(smooth[0].viscous.unwrap().roughness, 0.0);
 }

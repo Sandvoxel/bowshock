@@ -41,7 +41,7 @@ fn coarsest_body_cell(case: &bowshock_core::engine::case::Case) -> f64 {
 
 /// RANS analysis with the base wake (`rans`) or the Euler sting grid.
 fn analysis(spec: &BodySpec, rans: bool, resolution: Resolution) -> Analysis {
-    let a = Analysis::new(spec).unwrap().resolution(resolution);
+    let a = Analysis::legacy(spec).unwrap().resolution(resolution);
     if rans {
         a.viscous(flight())
     } else {
@@ -120,9 +120,9 @@ fn the_streamwise_cell_count_follows_the_length_beyond_40_diameters() {
 /// The limit is explicit and the message names the field and the length.
 #[test]
 fn a_body_past_the_length_limit_is_refused_with_the_length_in_the_message() {
-    let Err(Error::InvalidInput(msg)) = Analysis::new(&two_stage(101.0)).map(|_| ()) else { panic!("101 d accepted") };
+    let Err(Error::InvalidInput(msg)) = Analysis::legacy(&two_stage(101.0)).map(|_| ()) else { panic!("101 d accepted") };
     assert_eq!(msg, "aft: total body length 101.0 nose diameters exceeds 100");
-    assert!(Analysis::new(&two_stage(100.0)).is_ok());
+    assert!(Analysis::legacy(&two_stage(100.0)).is_ok());
 }
 
 /// The 46 d rocket and the same rocket cut at 40 d at Mach 0.5 and 2 (RANS, base wake, coarse grid, CPU): both converge, the forebody
@@ -137,7 +137,7 @@ fn a_46_diameter_body_has_the_forebody_drag_of_the_40_diameter_one_plus_friction
     for mach in [0.5, 2.0] {
         let solve = |total: f64| {
             let t0 = Instant::now();
-            let polar = Analysis::new(&two_stage(total))
+            let polar = Analysis::legacy(&two_stage(total))
                 .unwrap()
                 .backend(Backend::Cpu)
                 .resolution(Resolution::Coarse)

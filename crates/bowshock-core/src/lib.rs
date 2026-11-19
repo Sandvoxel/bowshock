@@ -39,6 +39,7 @@ pub mod field3;
 mod fins;
 pub mod progress;
 pub mod spec;
+pub mod uncertainty;
 
 #[doc(hidden)]
 pub use analysis::{take_facade_timings, Engine, FacadeTiming};
@@ -60,6 +61,7 @@ pub use progress::{Progress, ProgressSink};
 #[doc(hidden)]
 pub use spec::FinOutline;
 pub use spec::{AftSpec, BodySpec, FinProfile, FinSpec, MotorSpec, NoseShape, NoseSpec, SharpShape};
+pub use uncertainty::Band;
 
 /// Compiles and runs the code blocks of the user guide (`guide/src/*.md`) as doctests.
 #[cfg(doctest)]

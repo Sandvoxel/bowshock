@@ -49,7 +49,7 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 /// The 2D engine case of a fixture facade case.
 fn engine_case_of(c: &FacadeCase) -> Result<bowshock_core::engine::case::Case, String> {
-    let mut a = Analysis::new(&c.body).map_err(err)?.resolution(c.resolution);
+    let mut a = Analysis::legacy(&c.body).map_err(err)?.resolution(c.resolution);
     a = if c.rans {
         // the wall-resolved grid of the facade's viscous analysis (ISA 120 m unless the fixture says otherwise), the wall roughness of the fixture
         let a = a.viscous(bowshock_core::FlightConditions { atmosphere: c.atmosphere.unwrap_or(bowshock_core::Atmosphere::Isa { altitude_m: 120.0 }) });

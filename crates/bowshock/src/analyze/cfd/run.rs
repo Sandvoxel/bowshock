@@ -349,6 +349,13 @@ pub(in crate::analyze) struct Tally {
     pub(in crate::analyze) fallback: Option<String>,
 }
 
+/// The notes a table starts with: the plan's, and why the legacy engine solved it when the 3D engine would have but there is no GPU ([`solver::Engine::no_gpu_fallback`]).
+fn job_notes(job: &Job) -> Vec<String> {
+    let mut notes = job.plan.notes.clone();
+    notes.extend(solver::Engine::no_gpu_fallback().map(str::to_string));
+    notes
+}
+
 /// The table of `job` from `tally`. `attempted` is how many of the job's Mach numbers were tried (all of them for a whole solve):
 /// the key is the one of those nodes, so a table that stopped early reads as not the table of the whole range (see [`partial_of`]).
 pub(in crate::analyze) fn table_from(job: &Job, tally: Tally, attempted: usize, seconds: f64) -> CfdTable {
@@ -369,6 +376,7 @@ pub(in crate::analyze) fn table_from(job: &Job, tally: Tally, attempted: usize, 
         stage: job.stage,
         solved_at: now(),
         solve_seconds: seconds,
+        bands: solves_3d(),
         backend: backend.to_string(),
         fallback,
         altitude,
@@ -400,7 +408,7 @@ pub fn partial_table(job: &Job, tracker: &Tracker, seconds: f64) -> Option<CfdTa
         return None;
     }
     let attempted = tracker.done_prefix();
-    let mut notes = job.plan.notes.clone();
+    let mut notes = job_notes(job);
     notes.extend(
         tracker
             .units()
@@ -432,6 +440,7 @@ pub fn partial_table(job: &Job, tracker: &Tracker, seconds: f64) -> Option<CfdTa
                 key: lift_key(job.plan.geometry, &job.stability[..lift_kept]),
                 solved_at: now(),
                 solve_seconds: seconds,
+                bands: solves_3d(),
                 backend: backend_text(&parts),
                 points: lift_points,
                 notes: Vec::new(),
@@ -615,7 +624,7 @@ pub(super) fn solve_sized(
     let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
     let n_drag = job.nodes.len();
     let total = job.work_items();
-    let mut notes = job.plan.notes.clone();
+    let mut notes = job_notes(job);
     if job.altitude > SOLVER_CEILING {
         notes.push("The solver's atmosphere ends at 20 km; solved there.".to_string());
     }
@@ -742,6 +751,7 @@ pub(super) fn solve_sized(
         key: lift_key(job.plan.geometry, &job.stability),
         solved_at: now(),
         solve_seconds: seconds,
+        bands: solves_3d(),
         backend,
         points,
         notes: stability_notes.clone(),

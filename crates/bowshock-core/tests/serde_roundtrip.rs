@@ -42,7 +42,7 @@ fn inputs_round_trip() {
 
 #[test]
 fn viscous_polar_round_trips_equal() {
-    let polar = Analysis::new(&spec())
+    let polar = Analysis::legacy(&spec())
         .unwrap()
         .backend(Backend::Cpu)
         .resolution(Resolution::Coarse)
@@ -56,7 +56,7 @@ fn viscous_polar_round_trips_equal() {
 /// JSON has no NaN: serde_json writes it as `null`, and the fields documented as NaN read it back as NaN.
 #[test]
 fn nan_fields_of_an_euler_point_come_back_as_nan() {
-    let polar = Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(20).run(&[0.5]).unwrap();
+    let polar = Analysis::legacy(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(20).run(&[0.5]).unwrap();
     let back: Polar = roundtrip(&polar);
     let (a, b) = (&polar.points[0], &back.points[0]);
     for (x, y) in [(a.detail.cd_base_solver, b.detail.cd_base_solver), (a.detail.cp_base, b.detail.cp_base), (a.detail.y_plus_max, b.detail.y_plus_max)] {
@@ -79,7 +79,7 @@ fn full_analysis() -> Analysis {
         profile: FinProfile::Rounded,
     };
     let motor = MotorSpec { exit_diameter: 0.05, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
-    Analysis::new(&spec())
+    Analysis::legacy(&spec())
         .unwrap()
         .reference_diameter(0.09)
         .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 1000.0 } })
@@ -109,21 +109,22 @@ fn an_analysis_spec_round_trips_through_json_and_rebuilds_the_analysis() {
     .is_err());
 }
 
-/// The engine is additive on the wire: a spec written before it (no `engine` key) is the legacy engine's, and the 3D engine survives the round trip.
+/// The engine is additive on the wire: a spec written before it (no `engine` key) is the default engine's (the 3D one), and the 3D engine survives the round trip.
 #[test]
-fn the_engine_of_a_spec_defaults_to_legacy_and_round_trips() {
+fn the_engine_of_a_spec_defaults_to_the_default_engine_and_round_trips() {
     let s = full_analysis().engine(bowshock_core::Engine::Solver3).spec().unwrap();
     let back: bowshock_core::AnalysisSpec = roundtrip(&s);
     assert_eq!(back.engine, bowshock_core::Engine::Solver3);
     let mut v = serde_json::to_value(&s).unwrap();
     v.as_object_mut().unwrap().remove("engine");
     let old: bowshock_core::AnalysisSpec = serde_json::from_value(v).unwrap();
-    assert_eq!(old.engine, bowshock_core::Engine::Legacy);
+    assert_eq!(old.engine, bowshock_core::Engine::DEFAULT);
+    assert_eq!(old.engine, bowshock_core::Engine::Solver3);
 }
 
 #[test]
 fn from_spec_of_spec_gives_the_same_run() {
-    let a = Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(40);
+    let a = Analysis::legacy(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(40);
     let b = Analysis::from_spec(&a.spec().unwrap()).unwrap();
     let (pa, pb) = (a.run(&[0.8, 2.0]).unwrap(), b.run(&[0.8, 2.0]).unwrap());
     // JSON writes the NaN of a field without a base wake as null on both sides
@@ -157,7 +158,7 @@ fn a_finned_angle_of_attack_point_round_trips_with_its_nans_and_its_field() {
         root_te_to_base: 0.0,
         profile: FinProfile::Square,
     };
-    let polar = Analysis::new(&body)
+    let polar = Analysis::legacy(&body)
         .unwrap()
         .fins(fins)
         .backend(Backend::Cpu)
@@ -188,7 +189,7 @@ fn a_finned_angle_of_attack_point_round_trips_with_its_nans_and_its_field() {
     );
     // a point at zero incidence has none of it
     assert!(serde_json::to_string(
-        &Analysis::new(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(20).run(&[0.5]).unwrap()
+        &Analysis::legacy(&spec()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(20).run(&[0.5]).unwrap()
     )
     .unwrap()
     .find("forces")

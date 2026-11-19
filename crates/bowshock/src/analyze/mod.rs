@@ -30,6 +30,7 @@ pub mod compute;
 mod flow_view;
 pub mod flutter;
 pub mod import;
+mod openrocket;
 pub mod optimize;
 mod optimize_view;
 pub mod overlay;
@@ -92,6 +93,10 @@ pub enum Message {
     Table(bool),
     /// Export the numbers as CSV (opens the save dialog).
     ExportCsv,
+    /// Export the CFD table as OpenRocket lookup tables (opens the save dialog).
+    ExportOpenRocket,
+    /// The OpenRocket files were written (or not).
+    ExportedOpenRocket(Result<Option<Vec<PathBuf>>, String>),
     /// The save dialog answered: the written path, `None` if cancelled, or the error.
     Exported(Result<Option<PathBuf>, String>),
     /// The worker finished the computation for this request.
@@ -306,6 +311,12 @@ impl State {
                 self.flow.update(m);
             }
             Message::ExportCsv => return self.export(ctx),
+            Message::ExportOpenRocket => return self.export_openrocket(ctx),
+            Message::ExportedOpenRocket(result) => match result {
+                Ok(Some(paths)) => ctx.notify(format!("Wrote {}", paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" and "))),
+                Ok(None) => {}
+                Err(e) => ctx.notify(format!("Export failed: {e}")),
+            },
             Message::Exported(result) => match result {
                 Ok(Some(path)) => ctx.notify(format!("Wrote {}", path.display())),
                 Ok(None) => {}
@@ -406,6 +417,28 @@ impl State {
                 None => Ok(None),
             };
             app::Message::Analyze(Message::Exported(res))
+        })
+    }
+
+    /// File > Export > *OpenRocket CFD tables*: the stored CFD table (fresh or stale, as the screen labels it) as OpenRocket's drag and stability lookup tables
+    /// ([`openrocket`]): `<name>-drag.csv` and, with a 3D solve, `<name>-stability.csv`.
+    fn export_openrocket(&self, ctx: &Ctx) -> Task<app::Message> {
+        let Some(table) = self.cfd.table.clone() else {
+            return Task::none();
+        };
+        let files = openrocket::export(&table);
+        let name = format!("{}-openrocket.csv", ctx.doc.title());
+        app::dialogs::save_file(ctx.env.export_file.clone(), "Export OpenRocket CFD tables", name, ("CSV", &["csv"]), move |path| {
+            let res = match path {
+                Some(p) => {
+                    let (drag, stability) = openrocket::file_names(&p);
+                    let mut written = Vec::new();
+                    let mut write = |path: PathBuf, text: &str| std::fs::write(&path, text).map(|()| written.push(path)).map_err(|e| e.to_string());
+                    write(drag, &files.drag).and_then(|()| files.stability.as_deref().map_or(Ok(()), |t| write(stability, t))).map(|()| Some(written))
+                }
+                None => Ok(None),
+            };
+            app::Message::Analyze(Message::ExportedOpenRocket(res))
         })
     }
 

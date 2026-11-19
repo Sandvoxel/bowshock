@@ -14,7 +14,7 @@ fn body() -> BodySpec {
 
 /// A short Euler run on the coarsest grid: far from converged, but a real solver state.
 fn analysis() -> Analysis {
-    Analysis::new(&body()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(300)
+    Analysis::legacy(&body()).unwrap().backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(300)
 }
 
 #[test]

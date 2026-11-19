@@ -433,6 +433,7 @@ mod tests {
             stage: 1,
             solved_at: 1_700_000_000,
             solve_seconds: 30.0,
+            bands: false,
             backend: "GPU (Luma)".into(),
             fallback: None,
             altitude: 120.0,

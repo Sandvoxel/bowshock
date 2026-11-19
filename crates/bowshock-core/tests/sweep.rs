@@ -31,7 +31,7 @@ fn body_c() -> BodySpec {
 
 fn small_matrix_never_fails(name: &str, spec: &BodySpec) {
     let machs = [0.5, 0.95, 1.6];
-    let polar = Analysis::new(spec)
+    let polar = Analysis::legacy(spec)
         .unwrap()
         .backend(Backend::Cpu)
         .resolution(Resolution::Coarse)
@@ -65,7 +65,7 @@ fn full_matrix() {
     let mut good = 0;
     for (name, spec) in [("A", body_a()), ("B", body_b()), ("C", body_c())] {
         let polar =
-            Analysis::new(&spec).unwrap().backend(Backend::Auto).resolution(Resolution::Coarse).run(&machs).unwrap_or_else(|e| panic!("body {name}: {e}"));
+            Analysis::legacy(&spec).unwrap().backend(Backend::Auto).resolution(Resolution::Coarse).run(&machs).unwrap_or_else(|e| panic!("body {name}: {e}"));
         println!("body {name}: backend {:?}, fallback {:?}", polar.backend, polar.fallback);
         for p in &polar.points {
             println!(

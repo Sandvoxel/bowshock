@@ -74,7 +74,7 @@ fn lift_analysis() -> Analysis {
         root_te_to_base: 0.0,
         profile: FinProfile::Square,
     };
-    Analysis::new(&spec)
+    Analysis::legacy(&spec)
         .unwrap()
         .fins(fins)
         .backend(Backend::Cpu)

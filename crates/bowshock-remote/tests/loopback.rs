@@ -30,7 +30,7 @@ fn fins() -> FinSpec {
 }
 
 fn spec() -> AnalysisSpec {
-    Analysis::new(&body()).unwrap().fins(fins()).backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(3000).spec().unwrap()
+    Analysis::legacy(&body()).unwrap().fins(fins()).backend(Backend::Cpu).resolution(Resolution::Coarse).max_iterations(3000).spec().unwrap()
 }
 
 /// A fin-less Euler drag analysis.

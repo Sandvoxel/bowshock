@@ -1,6 +1,6 @@
 //! The [`Engine::Solver3`] route of [`Analysis::run`]: every condition on the 3D solver and the base-wake grid, the one engine the product moves to
-//! (`DESIGN3D.md`). Selected by [`Analysis::engine`] or `BOWSHOCK_ENGINE=3d`; [`Engine::Legacy`] stays the default until the viscous 3D solver is
-//! validated, and then this file is the route (the legacy drag and lift paths of the parent module and the `engine/{run,gpu,case}.rs` 2D solver are deleted).
+//! (`DESIGN3D.md`). The default engine since the flip ([`Engine::DEFAULT`]); a machine without a GPU falls back to [`Engine::Legacy`] ([`Engine::no_gpu_fallback`]), and
+//! [`Analysis::engine`] or `BOWSHOCK_ENGINE=3d|legacy` choose. The legacy engine stays until its deletion; this file is then the only route (the legacy drag and lift paths of the parent module and the `engine/{run,gpu,case}.rs` 2D solver are deleted).
 //!
 //! | condition | case | domain |
 //! |---|---|---|
@@ -18,9 +18,9 @@
 //!
 //! # The flip
 //!
-//! With `BOWSHOCK_ENGINE=3d` the whole app already runs on this engine (`cfd/run.rs` `node_analysis`, `cfd/plan.rs` fin counts and `*_REV_3D` keys, `cfd/wording.rs`
-//! `Words(true)`, the shared grid), so the flip is: `Engine::DEFAULT = Solver3` (`analysis.rs`); the app already sends
-//! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds, and `tier3` maps them; the Jet patch (the motor request here); then delete the legacy
+//! The flip is done (`Engine::DEFAULT = Solver3`, `analysis.rs`). Its remaining steps are the deletions. The whole app runs on this engine by default (`cfd/run.rs` `node_analysis`, `cfd/plan.rs` fin counts and `*_REV_3D` keys, `cfd/wording.rs`
+//! `Words(true)`, the shared grid); the app sends
+//! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds, and `tier3` maps them; still to come: the Jet patch (the motor request here); then delete the legacy
 //! path (the route comment in `analysis.rs` lists it), `Words(false)`, `SOLVER_REV` / `LIFT_REV` (the `_3D` numbers take their place) and the app's two-engine branches
 //! (`solves_3d`, `shared_grid`).
 
@@ -628,24 +628,7 @@ impl Analysis {
         let machs: Vec<f64> = sorted.iter().map(|c| c.mach).collect();
         let flow = self.wall_flow(&machs)?;
         let level = self.resolution.level();
-        let (mut points, backend, mut fallback) = self.solve3_on(self.backend, &sorted, level, flow, true)?;
-        if self.estimate_uncertainty {
-            // the neighbouring grid level, cold: the difference of the totals is the point's uncertainty (neither point failed)
-            let cmp_level = if level >= 1 { level - 1 } else { level + 1 };
-            let b = match backend {
-                BackendUsed::Cpu => Backend::Cpu,
-                BackendUsed::Gpu => self.backend,
-            };
-            let (other, _, note) = self.solve3_on(b, &sorted, cmp_level, flow, false)?;
-            if let Some(note) = note {
-                fallback = Some(format!("uncertainty sweep: {note}"));
-            }
-            for (p, o) in points.iter_mut().zip(&other) {
-                if p.quality != Quality::Failed && o.quality != Quality::Failed {
-                    p.cd_uncertainty = Some((p.drag.total - o.drag.total).abs());
-                }
-            }
-        }
+        let (points, backend, fallback) = self.solve3_on(self.backend, &sorted, level, flow, true)?;
         let mut slots: Vec<Option<PolarPoint>> = (0..conditions.len()).map(|_| None).collect();
         for (&k, p) in order.iter().zip(points) {
             slots[k] = Some(p);
@@ -874,7 +857,27 @@ impl Analysis {
             f
         });
         tm.field_s = t_field.elapsed().as_secs_f64();
-        Ok(PolarPoint { mach: c.mach, alpha_deg: c.alpha_deg, drag, forces, detail, quality, warnings, cd_uncertainty: None, field: None, field3 })
+        // the bands come from the measured terms of `uncertainty`, not from a second sweep
+        let usable = quality != Quality::Failed;
+        let cd_band = (usable && drag.total.is_finite()).then(|| crate::uncertainty::cd_band(drag.total, c.mach, self.resolution));
+        let x_cp_band = forces.filter(|f| usable && f.x_cp.is_finite()).map(|_| {
+            let cal = crate::uncertainty::x_cp_band_cal(c.mach);
+            crate::uncertainty::Band { low: cal.low * self.d_ref, high: cal.high * self.d_ref }
+        });
+        Ok(PolarPoint {
+            mach: c.mach,
+            alpha_deg: c.alpha_deg,
+            drag,
+            forces,
+            detail,
+            quality,
+            warnings,
+            cd_uncertainty: cd_band.map(crate::uncertainty::Band::half_width),
+            cd_band,
+            x_cp_band,
+            field: None,
+            field3,
+        })
     }
 }
 

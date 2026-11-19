@@ -120,6 +120,9 @@ pub struct CfdLiftTable {
     /// Notes on points left out.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Whether the solve is the 3D engine's (see [`CfdTable::bands`]).
+    #[serde(default)]
+    pub bands: bool,
 }
 
 impl CfdLiftTable {
@@ -161,6 +164,10 @@ pub struct CfdTable {
     /// The 3D stability solve (normal force and CP), when there is one.
     #[serde(default)]
     pub lift: Option<CfdLiftTable>,
+    /// Whether the table is the 3D engine's, so that the uncertainty bands of `bowshock_core::uncertainty` (measured against free flight) describe it. False for a table
+    /// of the legacy engine and for one stored before the bands existed: those show no band.
+    #[serde(default)]
+    pub bands: bool,
 }
 
 impl CfdTable {
@@ -260,6 +267,7 @@ mod tests {
             stage,
             solved_at: 1_700_000_000,
             solve_seconds: 12.5,
+            bands: false,
             backend: "GPU (Luma)".into(),
             fallback: None,
             altitude: 120.0,
@@ -334,6 +342,7 @@ mod tests {
             key,
             solved_at: 1_700_000_100,
             solve_seconds: 90.0,
+            bands: false,
             backend: "GPU (Luma)".into(),
             points: vec![p(0.5, 2.0), p(0.5, 6.0)],
             notes: Vec::new(),

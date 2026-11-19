@@ -65,6 +65,8 @@ pub struct Row {
     pub cn_alpha: Option<f64>,
     /// Normal force coefficient.
     pub cn: Option<f64>,
+    /// Pitching-moment coefficient (the lookup table's `Cm`).
+    pub cm: Option<f64>,
 }
 
 /// A parsed file.
@@ -85,6 +87,7 @@ enum Col {
     Margin,
     CnAlpha,
     Cn,
+    Cm,
 }
 
 /// Which column a header names, with a rank (lower wins when several columns name the same thing).
@@ -100,6 +103,7 @@ fn classify(key: &str) -> Option<(Col, u8)> {
         "cnalpha" | "cna" => (Col::CnAlpha, 0),
         "cnalpha0to4deg" => (Col::CnAlpha, 1),
         "cn" | "normalforcecoefficient" => (Col::Cn, 0),
+        "cm" | "pitchingmomentcoefficient" => (Col::Cm, 0),
         _ => return None,
     })
 }
@@ -231,6 +235,7 @@ pub fn parse(text: &str, source: Source) -> Result<Imported, String> {
                 Col::Margin => row.margin = Some(v),
                 Col::CnAlpha => row.cn_alpha = Some(v),
                 Col::Cn => row.cn = Some(v),
+                Col::Cm => row.cm = Some(v),
             }
         }
         if row.mach.is_some() || row.alpha.is_some() {
@@ -240,7 +245,7 @@ pub fn parse(text: &str, source: Source) -> Result<Imported, String> {
     if rows.is_empty() {
         return Err("no numeric rows under the header".into());
     }
-    if rows.iter().all(|r| r.cd.is_none() && r.cp.is_none() && r.margin.is_none() && r.cn.is_none() && r.cn_alpha.is_none()) {
+    if rows.iter().all(|r| r.cd.is_none() && r.cp.is_none() && r.margin.is_none() && r.cn.is_none() && r.cn_alpha.is_none() && r.cm.is_none()) {
         return Err("no drag, CP, margin or normal-force column found".into());
     }
     Ok(Imported { source, rows })

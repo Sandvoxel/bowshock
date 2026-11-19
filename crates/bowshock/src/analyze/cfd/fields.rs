@@ -177,6 +177,7 @@ mod tests {
             stage: 1,
             solved_at,
             solve_seconds: 1.0,
+            bands: false,
             backend: "CPU".to_string(),
             fallback: None,
             altitude: 0.0,
@@ -245,7 +246,15 @@ mod tests {
         let mut store = FieldStore::default();
         store.replace(&t, [field(0.5), field(1.0)]);
         // the table with a 3D solve stored on it is the same table
-        let lift = bowshock_model::CfdLiftTable { key: 1, solved_at: 5, solve_seconds: 1.0, backend: "CPU".to_string(), points: Vec::new(), notes: Vec::new() };
+        let lift = bowshock_model::CfdLiftTable {
+            key: 1,
+            solved_at: 5,
+            solve_seconds: 1.0,
+            bands: false,
+            backend: "CPU".to_string(),
+            points: Vec::new(),
+            notes: Vec::new(),
+        };
         let with_lift = CfdTable { lift: Some(lift), ..t.clone() };
         store.retain_for(Some(&with_lift), Some(7));
         assert_eq!(store.len(), 2);

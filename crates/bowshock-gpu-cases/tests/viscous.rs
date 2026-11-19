@@ -197,7 +197,7 @@ fn motor_case() -> Case {
     let spec = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.30, diameter: 0.10 }, aft: vec![AftSpec::Tube { length: 0.60 }] };
     let motor = MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101325.0, total_temperature_k: 1500.0 };
     let flight = FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } };
-    let analysis = Analysis::new(&spec).unwrap().resolution(Resolution::Coarse).viscous(flight).motor(motor);
+    let analysis = Analysis::legacy(&spec).unwrap().resolution(Resolution::Coarse).viscous(flight).motor(motor);
     analysis.engine_cases(&[0.8]).unwrap().remove(0)
 }
 

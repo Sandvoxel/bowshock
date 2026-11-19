@@ -25,7 +25,7 @@ fn main() {
     };
     let (backend, machs): (Backend, Vec<f64>) =
         if cpu { (Backend::Cpu, vec![0.5, 1.0, 2.0]) } else { (Backend::Auto, (3..=25).map(|k| f64::from(k) / 10.0).collect()) };
-    let analysis = Analysis::new(&spec)
+    let analysis = Analysis::legacy(&spec)
         .expect("valid body")
         .fins(fins)
         .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } })

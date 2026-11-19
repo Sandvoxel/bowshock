@@ -893,6 +893,7 @@ fn cfd_table(geometry: u64) -> bowshock_model::CfdTable {
         stage: 1,
         solved_at: 0,
         solve_seconds: 1.0,
+        bands: false,
         backend: "test".into(),
         fallback: None,
         altitude: 0.0,
