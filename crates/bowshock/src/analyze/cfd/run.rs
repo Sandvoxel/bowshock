@@ -1,5 +1,5 @@
 use super::fields::FieldRef;
-use super::fresh::now;
+use super::fresh::{now, Status};
 use super::plan::{lift_key, nodes, table_key, Plan, DRAG_TOLERANCE, LIFT_ALPHAS, SHARED_GRID, SOLVER_CEILING};
 use super::remote::{self, Failed};
 use super::share::{self, Lost, Stop};
@@ -464,6 +464,16 @@ pub(super) fn shared_grid() -> bool {
 /// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) solves this process's nodes: it has no 2D grid to show a picture of before the first snapshot.
 pub fn solves_3d() -> bool {
     solver::Engine::from_env() == solver::Engine::Solver3
+}
+
+/// `BOWSHOCK_DRAFT_FIRST=off` turns the draft-first flow off (a solve for the coarse grid then goes straight to it).
+pub const DRAFT_FIRST_ENV: &str = "BOWSHOCK_DRAFT_FIRST";
+
+/// Whether a solve for `grid` goes through the draft grid first (DESIGN3D item 57): the 3D engine, a coarse solve, and no fresh table on screen to keep until the coarse one is in
+/// (`verdict`: [`Status::Missing`] or [`Status::Stale`]; a re-solve of a fresh table replaces nothing quicker than itself). The draft table is stored when it finishes, the plots
+/// and the table show it, and the coarse solve of the same job follows and replaces it.
+pub fn draft_first(grid: CfdGrid, verdict: &Status) -> bool {
+    solves_3d() && grid == CfdGrid::Coarse && matches!(verdict, Status::Missing | Status::Stale) && std::env::var(DRAFT_FIRST_ENV).map_or(true, |v| !v.eq_ignore_ascii_case("off"))
 }
 
 /// What a node needs solved.

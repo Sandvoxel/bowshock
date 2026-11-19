@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# gpuclk: run a command and report the clocks and power the GPU held while it ran.
+#
+#   gpuclk [--interval MS] [--label NAME] -- CMD...
+#
+# Samples `nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw,utilization.gpu,temperature.gpu` every MS milliseconds (default 1000) while CMD runs and prints, after it, one line
+#
+#   CLK {"label":NAME,"name":GPU,"max_sm_mhz":M,"sm_mhz_mean":A,"sm_mhz_min":L,"mem_mhz_mean":B,"power_w_mean":P,"power_limit_w":W,"util_mean":U,"samples":N}
+#
+# over the samples with utilisation of at least 50 % (the time the GPU was working, not the compile or the host phases). The figure that tells whether a laptop GPU held its boost
+# clock under the solver's load (DESIGN3D item 57). The exit status is CMD's.
+set -u
+interval=1000
+label=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --interval) interval=${2:?}; shift 2 ;;
+    --label) label=${2:?}; shift 2 ;;
+    --) shift; break ;;
+    *) echo "gpuclk: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+[ $# -gt 0 ] || { echo "usage: gpuclk [--interval MS] [--label NAME] -- CMD..." >&2; exit 2; }
+command -v nvidia-smi >/dev/null || { echo "gpuclk: no nvidia-smi" >&2; exit 2; }
+
+log=$(mktemp /tmp/gpuclk.XXXXXX)
+info=$(nvidia-smi --query-gpu=name,clocks.max.sm,power.limit --format=csv,noheader,nounits | head -n 1)
+nvidia-smi --query-gpu=clocks.sm,clocks.mem,power.draw,utilization.gpu --format=csv,noheader,nounits -lms "$interval" > "$log" 2>/dev/null &
+smi=$!
+"$@"
+rc=$?
+kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null
+IFS=, read -r name maxsm plimit <<< "$info"
+awk -F', *' -v label="$label" -v name="$name" -v maxsm="${maxsm// /}" -v plimit="${plimit// /}" '
+  $4 >= 50 { n++; sm += $1; mem += $2; pw += $3; ut += $4; if (min == 0 || $1 < min) min = $1 }
+  END {
+    if (n == 0) n = 1
+    printf "CLK {\"label\":\"%s\",\"name\":\"%s\",\"max_sm_mhz\":%s,\"sm_mhz_mean\":%.0f,\"sm_mhz_min\":%s,\"mem_mhz_mean\":%.0f,\"power_w_mean\":%.1f,\"power_limit_w\":%s,\"util_mean\":%.0f,\"samples\":%d}\n",
+      label, name, maxsm, sm / n, min + 0, mem / n, pw / n, plimit, ut / n, n
+  }' "$log"
+rm -f "$log"
+exit "$rc"
