@@ -382,7 +382,12 @@ impl GpuRunner3 {
             }
             done = end;
             if stop.is_none() {
-                ctl.accept(self.gpu.snapshot()?, done, cfl_host);
+                // the controller's snapshot is a download to host memory: counted with the state downloads of the point's timing
+                let t_snap = Instant::now();
+                let snapshot = self.gpu.snapshot()?;
+                tm.downloads += 1;
+                tm.download_s += t_snap.elapsed().as_secs_f64();
+                ctl.accept(snapshot, done, cfl_host);
             }
             // the state leaves the device only at a chunk where a snapshot is due
             let on_grid = done.is_multiple_of(SYNC);
