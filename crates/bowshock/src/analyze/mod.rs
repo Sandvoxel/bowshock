@@ -566,7 +566,7 @@ impl State {
         let asked = refine.or(force).unwrap_or(CfdGrid::Coarse);
         // The coarse solve of a table that is missing or stale goes through the draft grid first (a result in a fraction of the time, then the coarse table replaces it); the
         // solve that follows a draft table goes straight to its grid.
-        let draft_first = refine.is_none() && cfd::draft_first(asked, &self.solve_status());
+        let draft_first = refine.is_none() && cfd::draft_first(asked, &self.cfd.status);
         let (grid, then) = if draft_first { (CfdGrid::Draft, Some(asked)) } else { (asked, None) };
         let job = Arc::new(cfd::Job {
             plan: plan.clone(),
@@ -682,6 +682,11 @@ impl State {
                     None if refining => ctx.notify(cfd::refine_cancelled()),
                     None => ctx.notify("CFD solve cancelled"),
                 }
+            }
+            // the draft solve failed (the draft grid is the less robust one): the coarse solve it was a first look for goes ahead on its own
+            Err(e) if solving.then.is_some() => {
+                ctx.notify(cfd::draft_failed(&e));
+                self.cfd.refine = solving.then;
             }
             Err(e) => {
                 ctx.notify(format!("CFD solve stopped: {e}"));

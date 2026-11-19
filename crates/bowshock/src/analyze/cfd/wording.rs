@@ -339,6 +339,11 @@ pub fn draft_ready(brief: &str) -> String {
     format!("Draft table: {brief} · refining on the coarse grid")
 }
 
+/// The toast of a draft solve that failed: the coarse solve goes ahead.
+pub fn draft_failed(why: &str) -> String {
+    format!("Draft solve stopped: {why}; solving on the coarse grid")
+}
+
 /// The toast of a refinement that was cancelled: the draft table stays.
 pub fn refine_cancelled() -> &'static str {
     "Refinement cancelled; the draft table stays"

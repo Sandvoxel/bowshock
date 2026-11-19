@@ -469,8 +469,8 @@ pub fn solves_3d() -> bool {
 /// `BOWSHOCK_DRAFT_FIRST=off` turns the draft-first flow off (a solve for the coarse grid then goes straight to it).
 pub const DRAFT_FIRST_ENV: &str = "BOWSHOCK_DRAFT_FIRST";
 
-/// Whether a solve for `grid` goes through the draft grid first (DESIGN3D item 57): the 3D engine, a coarse solve, and no fresh table on screen to keep until the coarse one is in
-/// (`verdict`: [`Status::Missing`] or [`Status::Stale`]; a re-solve of a fresh table replaces nothing quicker than itself). The draft table is stored when it finishes, the plots
+/// Whether a solve for `grid` goes through the draft grid first (DESIGN3D item 57): the 3D engine, a coarse solve, and no fresh drag table on screen to keep until the coarse one is in
+/// (`verdict`, the drag table's [`status`](super::fresh::status): [`Status::Missing`] or [`Status::Stale`]; a table that is fresh, of any grid, is not replaced by a quicker, rougher one). The draft table is stored when it finishes, the plots
 /// and the table show it, and the coarse solve of the same job follows and replaces it.
 pub fn draft_first(grid: CfdGrid, verdict: &Status) -> bool {
     draft_first_rule(solves_3d(), std::env::var(DRAFT_FIRST_ENV).is_ok_and(|v| v.eq_ignore_ascii_case("off")), grid, verdict)
