@@ -555,8 +555,17 @@ pub fn drag_note(ctx: &Ctx, spec: &Spec) -> Option<String> {
         return None;
     }
     let rocket = ctx.doc.rocket();
-    let fallback = (1..=rocket.stages().len().max(1)).find_map(|stage| drag_table(rocket, ctx, stage).err());
-    fallback.or_else(|| has_cd_override(rocket).then(|| "Cd overrides apply to Extended drag only.".to_string()))
+    let stages = 1..=rocket.stages().len().max(1);
+    let fallback = stages.clone().find_map(|stage| drag_table(rocket, ctx, stage).err());
+    // a stack whose table has no power-on part for the motor it flies (the table was solved before the motor changed, or without one) takes the exit area out of the base drag
+    let no_jet = || {
+        stages.clone().any(|stage| {
+            drag_table(rocket, ctx, stage).is_ok_and(|t| t.power_on.is_empty()) && ctx.physics.cfd_plan(stage).is_some_and(|p| p.as_ref().is_ok_and(|p| p.motor.is_some()))
+        })
+    };
+    fallback
+        .or_else(|| has_cd_override(rocket).then(|| "Cd overrides apply to Extended drag only.".to_string()))
+        .or_else(|| no_jet().then(|| "The CFD table has no solved jet for this motor: while it burns the motor's exit area is taken out of the base drag. Re-solve in Analyze > CFD table.".to_string()))
 }
 
 /// Whether any part of `rocket` (a pod's included) has a drag override.

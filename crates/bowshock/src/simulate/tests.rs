@@ -910,6 +910,13 @@ fn current_geometry(app: &App) -> u64 {
     crate::analyze::cfd::plan(rocket, &v, app.ctx().units).unwrap().geometry
 }
 
+/// The jet the motor of the example's whole stack gives now (what a table's power-on part must have been solved with to be flown).
+fn current_jet(app: &App) -> bowshock_model::CfdJet {
+    let rocket = app.ctx().doc.rocket();
+    let v = bowshock_sim::from_model::vehicle(rocket, app.ctx().physics.motors(), bowshock_sim::from_model::Phase::Full).unwrap();
+    crate::analyze::cfd::plan(rocket, &v, app.ctx().units).unwrap().jet().expect("the example has a motor")
+}
+
 #[test]
 fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
     let mut app = App::with_example();
@@ -930,6 +937,24 @@ fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
     assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry)));
     let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
     assert_eq!(input.drag_tables[0].as_ref().map(|t| t.points.len()), Some(3));
+    assert!(flight::drag_note(app.ctx(), &spec).unwrap().contains("no solved jet"), "a table without a power-on part says the exit area is taken out");
+
+    // a power-on part solved for the motor it flies is used (and the note goes); one for another motor is not
+    let power = |jet| bowshock_model::CfdPowerOn {
+        jet,
+        solved_at: 0,
+        solve_seconds: 1.0,
+        points: vec![bowshock_model::CfdPowerPoint { mach: 0.5, friction: 1.0, pressure: 1.0, base: 1.5, quality: bowshock_model::CfdQuality::Converged }],
+        notes: Vec::new(),
+    };
+    let jet = current_jet(&app);
+    let other = bowshock_model::CfdJet { exit_diameter: 1.1 * jet.exit_diameter, ..jet };
+    assert!(app.ctx_mut().doc.store_cfd_table(bowshock_model::CfdTable { power_on: Some(Box::new(power(other))), ..cfd_table(geometry) }));
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert!(input.drag_tables[0].as_ref().unwrap().power_on.is_empty(), "another motor's jet is not used");
+    assert!(app.ctx_mut().doc.store_cfd_table(bowshock_model::CfdTable { power_on: Some(Box::new(power(jet))), ..cfd_table(geometry) }));
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert_eq!(input.drag_tables[0].as_ref().map(|t| t.power_on.len()), Some(1));
     assert_eq!(flight::drag_note(app.ctx(), &spec), None);
 
     let extended = Spec { drag: bowshock_model::DragSource::Extended, ..spec };
