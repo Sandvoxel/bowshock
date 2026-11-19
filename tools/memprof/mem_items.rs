@@ -3,7 +3,7 @@
 //! back), for a chain of runners in one process.
 //!
 //! ```text
-//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim]
+//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim] [--run-on N]
 //! ```
 //! `anf` (default) is `finned_table --anf --tier coarse`; `gf1` the G-F1 sector of `mem_stages`; `anfhalf` the ANF half domain at 2 degrees (Lift tier, `Between`); `half` the same with the G-F1 fins.
 //! `--reclaim` gives the idle pool back after every row (measures the steady state; without it the rows show the natural footprint, pool included).
@@ -128,6 +128,13 @@ fn main() -> Result<(), String> {
         row(&ctx, &format!("{which}: after run_monitored({iters})"), reclaim);
         r.wall_forces().map_err(|e| e.to_string())?;
         row(&ctx, &format!("{which}: after wall_forces (eager)"), reclaim);
+        // the product path: `run_on` (CFL controller snapshots, limiter phases, the stop rule's force reads) for N iterations from the free stream
+        if let Some(n) = value("--run-on").map(|v| v.parse::<usize>().map_err(|e| e.to_string())).transpose()? {
+            let mut c = case.clone();
+            c.numerics.max_iter = n;
+            let p = r.run_on(&c, false).map_err(|e| e.to_string())?;
+            row(&ctx, &format!("{which}: after run_on({n}): {} iterations, stop {:?}, {} cfl events", p.iterations, p.stop_reason, p.cfl_events.len()), reclaim);
+        }
         if keep {
             kept.push(r);
         } else {
