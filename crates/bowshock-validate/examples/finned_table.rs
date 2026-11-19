@@ -152,6 +152,29 @@ fn main() -> Result<(), String> {
             Case3::sector(mach, Case3::anf_body(), fins, tier, 0)
         };
     }
+    if args.iter().any(|a| a == "--rabia") {
+        // the Rabia short-fin-can rocket of the flight-validation fixtures (`assets/validation/flights/rabia-short-fin-can.json`, inches; DESIGN3D item 56), straightened: 13.25 in cone behind a
+        // 0.031 in blunt tip (`--blunt-in X` overrides, 0 sharp), a 3.126 in cylinder to the 97.25 in length (the 1 in shoulder and the 3.19 in fin can left out), three rounded fins (root
+        // chord 10.5 in, tip 0, span 4.25 in, sweep 9.625 in, 0.1875 in thick) 1 in ahead of the base; Re_c of the Mach 0.8 flight at 1 036 m, the grid sized for Mach 3
+        let d = 3.126;
+        let blunt: f64 = value("--blunt-in").map_or(Ok(0.031), |v| v.parse()).map_err(|e| format!("--blunt-in: {e}"))?;
+        let nose = if blunt > 0.0 { bowshock_core::engine::body_grid::Family::Cone.blunted(13.25 / d, blunt / d).ok_or("no blunt cone")? } else { Nose::cone_fineness(13.25 / d) };
+        let body = BaseBody::cylinder(Body { nose }, (97.25 - 13.25) / d);
+        let fins = Fins3 {
+            count: 3,
+            root_chord: 10.5 / d,
+            tip_chord: 0.0,
+            span: 4.25 / d,
+            sweep: 9.625 / d,
+            thickness: 0.1875 / d,
+            te_to_base: 1.0 / d,
+            profile: FinProfile::Rounded,
+            planform: None,
+        };
+        let flow = WallFlow { re_c: 1.6e6, mach_max: 3.0, ks_body, ks_fin, sutherland: SUTHERLAND_SEA_LEVEL };
+        let tier = if tier_name == "draft" { Tier::draft(flow) } else { Tier::Coarse(flow) };
+        case = Case3::sector(mach, body, fins, tier, 0);
+    }
     if tier_name == "draft-safe" {
         case = case.draft_subsonic();
     }
