@@ -17,6 +17,16 @@ pub(super) const DRAG_TOLERANCE: f64 = 0.002;
 /// time warm and the kernel compile of every point but the first when the cache is cold, but moves Cd by +2.5 % at M 0.1 and +0.7 % at
 /// M 1.0 (base drag; the tolerance is 0.5 %). Turning it on needs a `SOLVER_REV` bump.
 pub(super) const SHARED_GRID: bool = false;
+/// Mach number of the jet at the nozzle exit of the power-on solve: a hobby motor's nozzle expands its exhaust to about 2.5 (expansion ratio 6-8, `gamma` 1.2 in the real gas).
+pub(super) const JET_EXIT_MACH: f64 = 2.5;
+/// Total temperature of the jet (K): the flame temperature of an ammonium-perchlorate composite propellant (2 800-3 300 K) in the air model of the solver.
+pub(super) const JET_TOTAL_TEMPERATURE: f64 = 3000.0;
+/// The nozzle exit is sized from the thrust (the exit matched to sea level, see [`jet_of`]) but kept between these fractions of the motor case's diameter: the motor files
+/// (RASP, RockSim) carry no nozzle dimensions, and the nozzle exits of the commercial 29-98 mm cases are 0.5-0.8 of the case.
+pub(super) const JET_EXIT_FRACTION: (f64, f64) = (0.5, 0.8);
+/// The Mach numbers a power-on solve takes, where the table has them (they are table nodes, so the power-off solution is there to compare with); a table range that holds none
+/// takes its middle node. The solver's jet changes the base flow, and its effect on the drag is read between these nodes and held beyond them.
+pub(super) const POWER_ON_NODES: [f64; 4] = [0.5, 0.9, 1.3, 2.3];
 /// The Mach range the solver accepts.
 pub const SOLVER_MACH: (f64, f64) = (0.1, 3.0);
 /// The highest altitude the solver's standard atmosphere has (m).
@@ -101,6 +111,9 @@ pub struct Plan {
     pub notes: Vec<String>,
     /// Hash of the geometry (the body, the fins and what the build-up adds).
     pub geometry: u64,
+    /// The jet of the stack's motor ([`jet_of`]): what the power-on part of the table is solved with; `None` for a stack without a motor. Not part of the geometry: a new motor makes
+    /// the power-on part stale, not the drag table.
+    pub motor: Option<solver::MotorSpec>,
 }
 
 /// The solver's nose family for the document's, `None` when there is none; the second value says the nose was approximated.
@@ -219,6 +232,36 @@ pub(super) fn wetted_mean_roughness(segments: &[bowshock_sim::BodySegment]) -> f
         0.0
     }
 }
+/// The jet of the motor in the lowest stage of `vehicle` for the power-on solve: an air jet (the solver's model, `bowshock_core::MotorSpec`) at [`JET_EXIT_MACH`] and
+/// [`JET_TOTAL_TEMPERATURE`] whose thrust is the motor's average thrust (impulse over burn time).
+///
+/// The motor files give a case diameter and a thrust curve and no nozzle, so the exit is derived. The static thrust is `F = p_e A_e (1 + gamma M_e^2) - p_sl A_e`; with the exit
+/// matched to sea level (`p_e = p_sl`, how a hobby nozzle is tuned) `A_e = F / (gamma M_e^2 p_sl)`, kept between [`JET_EXIT_FRACTION`] of the case diameter and inside the base,
+/// and the exit pressure follows from the thrust at that area: `p_e = (F / A_e + p_sl) / (1 + gamma M_e^2)`. The thrust is the motor's static one, so the jet is independent
+/// of the flight's altitude (the solver puts it in the free stream's units: the jet's pressure ratio rises as the rocket climbs). `None` without a motor or a burn.
+pub(super) fn jet_of(vehicle: &Vehicle) -> Option<solver::MotorSpec> {
+    const P_SEA_LEVEL: f64 = 101_325.0;
+    const GAMMA: f64 = 1.4;
+    let motor = vehicle.stages.first()?.motor.as_ref()?;
+    let base = vehicle.body.last()?;
+    let burn = motor.curve.burn_time();
+    let thrust = motor.curve.total_impulse() / burn;
+    if !(thrust.is_finite() && thrust > 0.0 && motor.curve.diameter > 0.0) {
+        return None;
+    }
+    let gm2 = GAMMA * JET_EXIT_MACH * JET_EXIT_MACH;
+    let matched = (4.0 * thrust / (std::f64::consts::PI * gm2 * P_SEA_LEVEL)).sqrt();
+    let upper = (JET_EXIT_FRACTION.1 * motor.curve.diameter).min(0.9 * 2.0 * base.aft_radius);
+    let exit_diameter = matched.clamp(JET_EXIT_FRACTION.0 * motor.curve.diameter, upper.max(1e-6));
+    let area = std::f64::consts::FRAC_PI_4 * exit_diameter * exit_diameter;
+    Some(solver::MotorSpec {
+        exit_diameter,
+        exit_mach: JET_EXIT_MACH,
+        exit_pressure_pa: (thrust / area + P_SEA_LEVEL) / (1.0 + gm2),
+        total_temperature_k: JET_TOTAL_TEMPERATURE,
+    })
+}
+
 /// Maps the vehicle of one flying stack of `rocket` (the document supplies the nose family the vehicle rounds to its five) to
 /// what the solver takes. The error says why the geometry cannot be solved at all, with lengths in `units`.
 pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Plan, String> {
@@ -340,12 +383,22 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
         "Walls solved smooth (the parts' finish is polished).".to_string()
     });
 
-    let mut plan = Plan { body, fins, outline, body_roughness, rest, notes, geometry: 0 };
+    let mut plan = Plan { body, fins, outline, body_roughness, rest, notes, geometry: 0, motor: jet_of(vehicle) };
     plan.geometry = plan.hash();
     Ok(plan)
 }
 
 impl Plan {
+    /// The jet of the power-on solve in the form a stored table keeps it.
+    pub fn jet(&self) -> Option<bowshock_model::CfdJet> {
+        self.motor.map(|m| bowshock_model::CfdJet {
+            exit_diameter: m.exit_diameter,
+            exit_mach: m.exit_mach,
+            exit_pressure_pa: m.exit_pressure_pa,
+            total_temperature_k: m.total_temperature_k,
+        })
+    }
+
     /// Hash of the geometry the table depends on: the body, the solved fins and what the build-up adds.
     fn hash(&self) -> u64 {
         let mut h = Fnv::new();
@@ -437,6 +490,16 @@ pub fn nodes(range: (f64, f64)) -> Option<Vec<f64>> {
     out.extend(INTERIOR.iter().copied().filter(|m| *m > lo + NODE_GAP && *m < hi - NODE_GAP));
     out.push(hi);
     Some(out)
+}
+
+/// The Mach numbers of the power-on solve for a table solved at `nodes` ([`POWER_ON_NODES`] among them, else the middle node).
+pub fn power_on_nodes(nodes: &[f64]) -> Vec<f64> {
+    let own: Vec<f64> = POWER_ON_NODES.iter().copied().filter(|m| nodes.iter().any(|n| (n - m).abs() < 1e-9)).collect();
+    if own.is_empty() {
+        nodes.get(nodes.len() / 2).map(|&m| vec![m]).unwrap_or_default()
+    } else {
+        own
+    }
 }
 
 /// The key of a table: the geometry, the altitude that sets the Reynolds number and the Mach nodes.

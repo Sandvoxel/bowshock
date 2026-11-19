@@ -44,7 +44,7 @@ pub use assembly::{
 };
 
 pub use bands::StabilityBands;
-pub use cfd::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdRestart, CfdStore, CfdTable, MAX_CFD_TABLES};
+pub use cfd::{CfdGrid, CfdJet, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdPowerOn, CfdPowerPoint, CfdQuality, CfdRestart, CfdStore, CfdTable, MAX_CFD_TABLES};
 pub use config::{Ballast, ConfigError, ConfigId, Configuration, EventKind, MotorMount, MotorRef, MotorSlot, RecoveryTiming, StageEvent, StageTrigger};
 pub use expr::{dim_from_key, dim_key, dim_kind, EvalError, Expr, ExprError, FieldRef, Formula, FormulaError, FormulaStatus, Kind, Op, Value};
 pub use fin_tab::{TabIssue, TabTarget};

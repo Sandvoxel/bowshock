@@ -84,6 +84,7 @@ fn perf_2d_table_example() {
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
@@ -110,6 +111,7 @@ fn perf_3d_lift_example() {
         compute: Default::default(),
         cpu_only: false,
         stability: lift_nodes((0.1, 3.0)).unwrap(),
+        power_on: Vec::new(),
     };
     let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
@@ -144,6 +146,7 @@ fn perf_2d_table_grid_ab() {
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let iters = Arc::new(Mutex::new(Vec::new()));
     let sink = iters.clone();
@@ -358,6 +361,7 @@ fn engine3d_finned_timing() {
         compute: Default::default(),
         cpu_only: false,
         stability: lift_nodes((0.1, 3.0)).unwrap(),
+        power_on: Vec::new(),
     };
     let _ = solver::engine::timing::take_timings();
     let _ = solver::take_facade_timings();
@@ -734,8 +738,21 @@ fn finned_drag_split() {
         std::env::var("BOWSHOCK_MACHS").map(|v| v.split(',').map(|m| m.trim().parse().unwrap()).collect()).unwrap_or_else(|_| nodes((0.1, 3.0)).unwrap());
     let grid = if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse };
     println!("GRID {grid:?}");
+    // BOWSHOCK_POWER=1: the nodes with the jet of the example's motor on (`NodeKind::PowerOn`, `plan.motor`), the power-on part of the app's table
+    let kind = if std::env::var_os("BOWSHOCK_POWER").is_some() { NodeKind::PowerOn } else { NodeKind::Drag };
+    println!("KIND {} JET {:?}", if kind == NodeKind::PowerOn { "power on" } else { "power off" }, plan.motor);
     let grid_mach = machs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let job = Job { plan, altitude: 120.0, nodes: machs.clone(), stage: 1, grid, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: machs.clone(),
+        stage: 1,
+        grid,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+        power_on: Vec::new(),
+    };
     let session = Session::Local { backend: solver::Backend::Gpu };
     println!("ENGINE {:?}", solver::Engine::from_env());
     println!(
@@ -744,7 +761,7 @@ fn finned_drag_split() {
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let t_all = Instant::now();
     for &mach in &machs {
-        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d()).unwrap_or_else(|_| panic!("the node analysis"));
+        let analysis = node_analysis(&job, kind, &session, 120.0, grid_mach, solves_3d()).unwrap_or_else(|_| panic!("the node analysis"));
         let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
         let polar = analysis.run(&[mach]).expect("the point solves");
@@ -779,8 +796,17 @@ fn finned_subsonic_failure_path() {
     let mach: f64 = std::env::var("BOWSHOCK_MACH").ok().and_then(|m| m.parse().ok()).unwrap_or(0.5);
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let job =
-        Job { plan, altitude: 120.0, nodes: vec![mach], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: vec![mach],
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+        power_on: Vec::new(),
+    };
     let _ = solver::engine::timing::take_timings();
     let t = Instant::now();
     let table =

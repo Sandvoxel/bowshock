@@ -481,7 +481,7 @@ fn table_from_buildup(aero: &Aero, k: f64) -> DragTable {
             DragTablePoint { mach: m, friction: k * d.friction, pressure: k * d.pressure, base: k * d.base, fins: k * d.fins, other: k * d.protuberances }
         })
         .collect();
-    DragTable { points, altitude: TABLE_ALT }
+    DragTable { points, altitude: TABLE_ALT, power_on: Vec::new() }
 }
 
 fn close(a: f64, b: f64) {

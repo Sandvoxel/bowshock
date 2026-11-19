@@ -7,7 +7,7 @@ use super::wording;
 use crate::analyze::solve::{Iteration, MachineInfo, MachineState, Outcome, PointDone, Slot, Tracker};
 use crate::app::settings::{Compute, Where};
 use bowshock_core as solver;
-use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdQuality, CfdRestart, CfdTable};
+use bowshock_model::{CfdGrid, CfdLiftPoint, CfdLiftTable, CfdPoint, CfdPowerOn, CfdPowerPoint, CfdQuality, CfdRestart, CfdTable};
 use bowshock_sim::{vs_mach, Atmosphere};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +33,8 @@ pub struct Job {
     pub cpu_only: bool,
     /// The Mach numbers of the stability part, solved at [`LIFT_ALPHAS`] ([`lift_nodes`]), ascending; empty: the drag table alone.
     pub stability: Vec<f64>,
+    /// The Mach numbers of the power-on part ([`power_on_nodes`]), solved with the jet of [`Plan::motor`] after the stability part, ascending; empty: no power-on solve.
+    pub power_on: Vec<f64>,
 }
 
 impl Job {
@@ -41,9 +43,10 @@ impl Job {
         Tracker::solve_units(&self.nodes, &self.stability, &LIFT_ALPHAS)
     }
 
-    /// Work items for the machines: one per drag node, then one per stability node (its angles run warm one after the other).
+    /// Work items for the machines: one per drag node, then one per stability node (its angles run warm one after the other), then one per power-on node. The power-on
+    /// nodes are not units of the screen's tracker: they report nothing but their cancel.
     pub fn work_items(&self) -> usize {
-        self.nodes.len() + self.stability.len()
+        self.nodes.len() + self.stability.len() + self.power_on.len()
     }
 }
 
@@ -376,6 +379,7 @@ pub(in crate::analyze) fn table_from(job: &Job, tally: Tally, attempted: usize, 
         points,
         grid: job.grid,
         lift: None,
+        power_on: None,
     }
 }
 
@@ -473,6 +477,8 @@ pub(super) enum NodeKind {
     Drag,
     /// A Mach number at the angles of attack.
     Lift,
+    /// A Mach number at zero incidence with the motor jet on ([`Plan::motor`]); the grid and the stop rule are the drag nodes'.
+    PowerOn,
 }
 
 /// The [`solver::Analysis`] of one node of either kind: the body, the fins with their outline, the resolution (a drag node's is the job's grid, the angles are always solved
@@ -491,14 +497,17 @@ pub(super) fn node_analysis(
         .resolution(match (kind, job.grid) {
             // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
             (NodeKind::Lift, _) | (_, CfdGrid::Coarse) => solver::Resolution::Coarse,
-            (NodeKind::Drag, CfdGrid::Medium) => solver::Resolution::Medium,
-            (NodeKind::Drag, CfdGrid::Draft) => solver::Resolution::Draft,
+            (_, CfdGrid::Medium) => solver::Resolution::Medium,
+            (_, CfdGrid::Draft) => solver::Resolution::Draft,
         })
         .backend(session.backend())
         .keep_fields(true);
     analysis = analysis.viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } }).roughness(job.plan.body_roughness);
-    if kind == NodeKind::Drag {
+    if kind != NodeKind::Lift {
         analysis = analysis.drag_tolerance(DRAG_TOLERANCE);
+    }
+    if let (NodeKind::PowerOn, Some(motor)) = (kind, job.plan.motor) {
+        analysis = analysis.motor(motor);
     }
     if shared_grid {
         analysis = analysis.grid_mach(grid_mach);
@@ -522,10 +531,18 @@ struct LiftNode {
     cpu: bool,
 }
 
+/// A Mach number of the power-on part, solved with the jet: its point (none when the solver gave none) and where.
+struct PowerNode {
+    mach: f64,
+    point: Option<CfdPowerPoint>,
+    cpu: bool,
+}
+
 /// What a machine solved of a work item (see [`Job::work_items`]).
 enum Node {
     Drag(DragNode),
     Lift(LiftNode),
+    Power(PowerNode),
 }
 
 impl Node {
@@ -533,8 +550,42 @@ impl Node {
         match self {
             Node::Drag(n) => n.cpu,
             Node::Lift(n) => n.cpu,
+            Node::Power(n) => n.cpu,
         }
     }
+}
+
+/// Solves the power-on node at `mach`: the drag node's analysis (grid, tolerance, seed) with the jet of the plan's motor on ([`NodeKind::PowerOn`]). It is no unit of the screen's
+/// tracker and reports nothing but the cancel. The point is `None` when the solver gave none.
+fn solve_power_node(job: &Job, grid_mach: f64, shared_grid: bool, mach: f64, session: &mut Session, cancel: &Arc<AtomicBool>) -> Result<PowerNode, Failed> {
+    let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
+    let analysis = node_analysis(job, NodeKind::PowerOn, session, altitude, grid_mach, shared_grid)?;
+    let progress = {
+        let cancel = cancel.clone();
+        move |_: &solver::Progress| if cancel.load(Ordering::Relaxed) { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+    };
+    let polar = match session {
+        Session::Remote(r) => {
+            analysis.spec().map_err(|e| Failed::local(mach, e)).and_then(|spec| r.solve(&spec, &[solver::Condition::from(mach)], &progress))?
+        }
+        Session::Local { backend } => {
+            let polar = analysis.on_progress(progress).run(&[mach]).map_err(|e| Failed::local(mach, e))?;
+            if polar.backend == solver::BackendUsed::Cpu {
+                *backend = solver::Backend::Cpu;
+            }
+            polar
+        }
+    };
+    let p = &polar.points[0];
+    let point = quality(p.quality).filter(|_| p.drag.total.is_finite()).map(|quality| CfdPowerPoint {
+        mach,
+        friction: p.drag.friction.unwrap_or(0.0),
+        pressure: p.drag.forebody_pressure,
+        base: p.drag.base,
+        fins: p.drag.fins.map_or(0.0, |f| f.friction + f.pressure),
+        quality,
+    });
+    Ok(PowerNode { mach, point, cpu: polar.backend == solver::BackendUsed::Cpu })
 }
 
 /// Solves the stability node at `mach`: every angle of [`LIFT_ALPHAS`] in one `run` (the second warm-started from the first), on the
@@ -614,6 +665,7 @@ pub(super) fn solve_sized(
     let send: Outbox = Arc::new(progress);
     let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
     let n_drag = job.nodes.len();
+    let n_stability = job.stability.len();
     let total = job.work_items();
     let mut notes = job.plan.notes.clone();
     if job.altitude > SOLVER_CEILING {
@@ -622,6 +674,9 @@ pub(super) fn solve_sized(
     let work = {
         let (job, cancel, send) = (Arc::new(job.clone()), cancel.clone(), send.clone());
         move |session: &mut Session, machine: usize, node: usize| -> Result<Node, Failed> {
+            if node >= n_drag + n_stability {
+                return solve_power_node(&job, grid_mach, shared_grid, job.power_on[node - n_drag - n_stability], session, &cancel).map(Node::Power);
+            }
             if node >= n_drag {
                 return solve_lift_node(&job, grid_mach, shared_grid, job.stability[node - n_drag], session, machine, started, &cancel, &send).map(Node::Lift);
             }
@@ -696,6 +751,7 @@ pub(super) fn solve_sized(
     let mut tally = Tally { points: Vec::with_capacity(n_drag), notes, gpu: 0, cpu: 0, fallback: None };
     tally.notes.extend(lost_notes(&fleet));
     let mut raw: Vec<solver::PolarPoint> = Vec::new();
+    let mut power: Vec<CfdPowerPoint> = Vec::new();
     for (k, (_, node)) in fleet.done.results.iter().enumerate() {
         match node {
             Node::Drag(node) => {
@@ -716,6 +772,10 @@ pub(super) fn solve_sized(
                 }
             }
             Node::Lift(node) => raw.extend(node.points.iter().cloned()),
+            Node::Power(node) => match node.point {
+                Some(point) => power.push(point),
+                None => tally.notes.push(wording::power_on_left_out(node.mach)),
+            },
         }
     }
     if tally.points.len() < 2 && n_drag >= 2 {
@@ -748,6 +808,22 @@ pub(super) fn solve_sized(
     });
     if table.lift.is_none() {
         table.notes.extend(stability_notes);
+    }
+    if let (false, Some(jet)) = (job.power_on.is_empty(), job.plan.jet()) {
+        power.sort_by(|a, b| a.mach.total_cmp(&b.mach));
+        if power.is_empty() {
+            table.notes.push(wording::power_on_none().to_string());
+        } else {
+            let ratios: Vec<(f64, f64)> = power
+                .iter()
+                .filter_map(|p| {
+                    let off = table.points.iter().find(|o| (o.mach - p.mach).abs() < 1e-9)?;
+                    (off.base > 1e-9).then(|| (p.mach, p.base / off.base))
+                })
+                .collect();
+            table.notes.push(wording::power_on_note(&jet, &ratios));
+            table.power_on = Some(CfdPowerOn { jet, solved_at: now(), solve_seconds: seconds, points: power, notes: Vec::new() });
+        }
     }
     Ok(table)
 }

@@ -570,6 +570,8 @@ impl State {
             compute: ctx.compute.clone(),
             cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu,
             stability: if self.cfd.angles { cfd::lift_nodes(self.cond.mach).unwrap_or_default() } else { Vec::new() },
+            // the stack's motor burns: the table also has the base flow with the jet in it
+            power_on: if plan.motor.is_some() { cfd::power_on_nodes(&nodes) } else { Vec::new() },
         });
         let tracker = solve::Tracker::new(job.units());
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::events(demo, &job));

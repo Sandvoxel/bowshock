@@ -12,7 +12,8 @@
 //! and tips; on the GPU reduced on the device), the wall pressures of [`wall_samples`] and the solved state (the guards of [`quality3`]). Coefficients
 //! are on the nose-base area the engine works on, rescaled to the reference area in one place ([`Analysis::area_ratio`]).
 //!
-//! What the engine does not do yet fails loudly: a motor request is an error under [`Engine::Solver3`], never a silent run without the jet. The viscous knobs
+//! A motor ([`Analysis::motor`]) is the jet patch of the engine (`Case3::with_motor`, DESIGN3D items 20 and 58): the nozzle rows of the base-wake grid, the exit state of
+//! [`MotorSpec`] in the free stream's units, on every domain (the seeds of the sectors carry it too); the base drag is then the annulus around the exit. The viscous knobs
 //! ([`Analysis::viscous`], roughness, a drag tolerance) map onto the engine's [`Tier`]s through [`Analysis::wall_flow`] and [`Analysis::tier3`]; both backends solve them.
 
 //!
@@ -414,10 +415,6 @@ impl Analysis {
 
     /// The input checks of the route.
     fn check_solver3(&self, conditions: &[Condition]) -> Result<(), Error> {
-        // the jet patch of the 3D solver does not exist yet: a motor-on request fails whatever else the engine solves
-        if self.motor.is_some() && self.flight.is_some() {
-            return Err(Error::Unsupported("Engine::Solver3 has no motor jet yet".into()));
-        }
         if self.flight.is_none() {
             if self.drag_tolerance.is_some() {
                 return Err(Error::InvalidInput("drag_tolerance needs Analysis::viscous".into()));
@@ -428,6 +425,15 @@ impl Analysis {
             if self.motor.is_some() {
                 return Err(Error::InvalidInput("motor-on analysis needs Analysis::viscous".into()));
             }
+        }
+        if let Some(m) = &self.motor {
+            if self.wake == Some(Wake::Sting) {
+                return Err(Error::InvalidInput("motor-on analysis needs the base wake".into()));
+            }
+            if !self.dimensional {
+                return Err(Error::InvalidInput("motor-on analysis needs a dimensional BodySpec".into()));
+            }
+            m.validate(self.body.base_radius() * 2.0 * self.d_nose)?;
         }
         for c in conditions {
             let (range, what) = if c.alpha_deg == 0.0 { (MACH_RANGE, "") } else { (LIFT_MACH_RANGE, " for a condition with an angle of attack") };
@@ -485,7 +491,7 @@ impl Analysis {
         if self.fins.is_none() {
             return Ok(());
         }
-        let case = self.solver3_case(Condition::from(2.0), 0, Tier::Euler, false);
+        let case = self.solver3_case(Condition::from(2.0), 0, Tier::Euler, false)?;
         case.build_solver_cached().map(|_| ())
     }
 
@@ -517,12 +523,13 @@ impl Analysis {
     }
 
     /// The case of condition `c` at grid `level`, with the numerics overrides, progress, snapshots and the test hook applied.
-    fn solver3_case(&self, c: Condition, level: u32, tier: Tier, snapshots: bool) -> Case3 {
+    fn solver3_case(&self, c: Condition, level: u32, tier: Tier, snapshots: bool) -> Result<Case3, Error> {
         self.case_of(self.kind_of(c), c, level, tier, snapshots)
     }
 
-    /// The case of `c` on the domain `kind` (the one of the condition, or the wedge of a seed).
-    fn case_of(&self, kind: Kind, c: Condition, level: u32, tier: Tier, snapshots: bool) -> Case3 {
+    /// The case of `c` on the domain `kind` (the one of the condition, or the wedge of a seed); with a motor, the nozzle rows and the jet state of
+    /// [`Analysis::motor`] in the free stream's units (after the tier: the nozzle rows are sized from the wall spacing).
+    fn case_of(&self, kind: Kind, c: Condition, level: u32, tier: Tier, snapshots: bool) -> Result<Case3, Error> {
         let body = self.body.clone();
         let mut case = match kind {
             Kind::Wedge => Case3::wedge(c.mach, body, level).with_tier(tier),
@@ -534,6 +541,9 @@ impl Analysis {
         }
         if self.wake == Some(Wake::Sting) {
             case.grid.base = None;
+        }
+        if let Some(jet) = self.rans(&[c.mach])?.and_then(|r| r.jet) {
+            case = case.with_motor(jet)?;
         }
         if let Some(n) = &self.numerics {
             case.numerics.limiter = n.limiter;
@@ -552,16 +562,16 @@ impl Analysis {
         if let Some(hook) = self.case3_hook {
             hook(&mut case);
         }
-        case
+        Ok(case)
     }
 
     /// The axisymmetric counterpart of the finned case `case` of `c`: the wedge of its body, Mach number and tier (`case.tier`: the meridian of the wall-resolved tiers is the
     /// same), with the numerics overrides and the test hook of the analysis, silent (no progress, no snapshots) and capped at [`SEED_MAX_ITERATIONS`].
-    fn seed_case(&self, case: &Case3, c: Condition, level: u32) -> Case3 {
-        let mut wedge = self.case_of(Kind::Wedge, c, level, case.tier, false);
+    fn seed_case(&self, case: &Case3, c: Condition, level: u32) -> Result<Case3, Error> {
+        let mut wedge = self.case_of(Kind::Wedge, c, level, case.tier, false)?;
         wedge.progress = None;
         wedge.numerics.max_iter = wedge.numerics.max_iter.min(SEED_MAX_ITERATIONS);
-        wedge
+        Ok(wedge)
     }
 
     /// Whether the cold runs of `kind` start from the axisymmetric wedge: the finned sector at zero incidence, unless [`Analysis::seed_axisymmetric`] is off (or `BOWSHOCK_NO_SEED`
@@ -591,7 +601,7 @@ impl Analysis {
         let key = format!("{:016x}|{:?}", c.mach.to_bits(), case.tier);
         if !seeds.contains_key(&key) {
             let t = std::time::Instant::now();
-            let seed = runner.seed(&self.seed_case(case, c, level))?;
+            let seed = runner.seed(&self.seed_case(case, c, level)?)?;
             tm.seed_s = t.elapsed().as_secs_f64();
             tm.seed_iters = seed.as_ref().map_or(0, |s| s.iterations);
             seeds.insert(key.clone(), seed);
@@ -651,7 +661,7 @@ impl Analysis {
             slots[k] = Some(p);
         }
         let points = slots.into_iter().map(|p| p.expect("every condition has a result")).collect();
-        Ok(Polar { points, backend, fallback, motor_on: false })
+        Ok(Polar { points, backend, fallback, motor_on: self.motor.is_some() })
     }
 
     /// `sorted` on `backend`: the points, the backend that ran them and, under [`Backend::Auto`], why the GPU was not used.
@@ -711,7 +721,7 @@ impl Analysis {
             }
             (at, last) = (Some((kind, c.mach)), c);
             let t_case = Instant::now();
-            let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), keep);
+            let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), keep)?;
             let mut tm = FacadeTiming {
                 what: "point",
                 mach: c.mach,

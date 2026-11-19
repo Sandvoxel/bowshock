@@ -440,6 +440,7 @@ mod tests {
             points: vec![point(0.5), point(1.0)],
             grid: Default::default(),
             lift: None,
+            power_on: None,
         };
         let (revision, steps) = (doc.revision(), doc.undo.len());
         assert!(doc.store_cfd_table(table.clone()));

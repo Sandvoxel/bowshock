@@ -5,7 +5,7 @@ use super::{
     LUG_ROUGHNESS,
 };
 use crate::atmosphere::Atmosphere;
-use crate::drag_table::{DragTable, DragTablePoint};
+use crate::drag_table::{DragTable, DragTablePoint, PowerRatio};
 use crate::tube_fins::TubeFinCalc;
 use crate::vehicle::{Protuberance, Vehicle};
 use std::f64::consts::PI;
@@ -244,12 +244,15 @@ impl Aero {
         self
     }
 
-    /// Drag from the CFD table; see [`Aero::with_table`].
+    /// Drag from the CFD table; see [`Aero::with_table`]. With the motor on and a table solved with the jet, each part is the table's times the jet's effect at this Mach number
+    /// ([`DragTable::power_ratio`]: the base annulus around the exit with the jet on over the whole base without it); without one the build-up takes the exit area out of the base
+    /// drag.
     fn tabulated(&self, table: &DragTable, mach: f64, re_per_m: f64, motor_on: bool) -> DragBreakdown {
         let m = mach.max(0.0);
         let air = Atmosphere::standard().at_msl(table.altitude);
         let re_tab = |m: f64| m * air.speed_of_sound * air.density / air.viscosity;
-        let now = self.buildup(m, re_per_m, motor_on);
+        let jet = if motor_on { table.power_ratio(m) } else { None };
+        let now = self.buildup(m, re_per_m, motor_on && jet.is_none());
         let tab = self.buildup(m, re_tab(m), false);
         let t = table.inside(m).unwrap_or_else(|| {
             let (first, last) = (&table.points[0], &table.points[table.points.len() - 1]);
@@ -272,11 +275,12 @@ impl Aero {
                 other: scale(end.other, tab.protuberances, at_end.protuberances),
             }
         });
-        let friction = (t.friction + now.friction - tab.friction).max(0.0);
-        let pressure = (t.pressure + now.pressure - tab.pressure).max(0.0);
-        let fins = (t.fins + now.fins - tab.fins).max(0.0);
+        let jet = jet.unwrap_or(PowerRatio { mach: m, friction: 1.0, pressure: 1.0, base: 1.0, fins: 1.0 });
+        let friction = (t.friction * jet.friction + now.friction - tab.friction).max(0.0);
+        let pressure = (t.pressure * jet.pressure + now.pressure - tab.pressure).max(0.0);
+        let fins = (t.fins * jet.fins + now.fins - tab.fins).max(0.0);
         let protuberances = (t.other + now.protuberances - tab.protuberances).max(0.0);
-        let base = if tab.base < 1e-12 { t.base } else { t.base * now.base / tab.base }.max(0.0);
+        let base = if tab.base < 1e-12 { t.base * jet.base } else { t.base * jet.base * now.base / tab.base }.max(0.0);
         DragBreakdown { friction, pressure, base, fins, protuberances, total: friction + pressure + base + fins + protuberances }
     }
 

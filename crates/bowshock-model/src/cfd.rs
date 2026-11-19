@@ -80,6 +80,74 @@ pub enum CfdGrid {
     Medium,
 }
 
+/// The motor jet a power-on solve was run with: the cold-air model of `bowshock_core::MotorSpec` (the nozzle exit of the motor's stage, see the app's `plan`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdJet {
+    /// Diameter of the nozzle exit (m).
+    pub exit_diameter: f64,
+    /// Mach number of the jet at the exit.
+    pub exit_mach: f64,
+    /// Static pressure at the exit (Pa).
+    pub exit_pressure_pa: f64,
+    /// Total temperature of the jet (K).
+    pub total_temperature_k: f64,
+}
+
+impl CfdJet {
+    /// Whether `other` is the same jet to the precision the app derives it at (a motor edited and put back reads as the same).
+    pub fn same_as(&self, other: &CfdJet) -> bool {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-4 * a.abs().max(b.abs());
+        close(self.exit_diameter, other.exit_diameter)
+            && close(self.exit_mach, other.exit_mach)
+            && close(self.exit_pressure_pa, other.exit_pressure_pa)
+            && close(self.total_temperature_k, other.total_temperature_k)
+    }
+}
+
+/// The zero-lift drag of one Mach number solved with the motor jet on: the same parts as [`CfdPoint`] (reference area of the vehicle; `base` is the base annulus around the nozzle
+/// exit, whose pressure force is the jet's, not drag; the parts the solver does not model are not repeated here, the power-off point's stay).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdPowerPoint {
+    /// Mach number.
+    pub mach: f64,
+    /// Skin friction of the body.
+    pub friction: f64,
+    /// Pressure drag of the nose and the aft body.
+    pub pressure: f64,
+    /// Base drag of the annulus around the exit.
+    pub base: f64,
+    /// Fin drag.
+    pub fins: f64,
+    /// Trust in the point.
+    pub quality: CfdQuality,
+}
+
+/// The power-on part of a drag table: the points solved with the jet of the stack's motor. It rides on the table like the 3D stability solve ([`CfdLiftTable`]): kept when a new drag table
+/// replaces it, and fresh while its [`jet`](CfdPowerOn::jet) is the one the motor gives now.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdPowerOn {
+    /// The jet the points were solved with.
+    pub jet: CfdJet,
+    /// When it finished: seconds since the Unix epoch.
+    pub solved_at: u64,
+    /// Wall time of the solve (s).
+    pub solve_seconds: f64,
+    /// The solved Mach numbers, ascending.
+    pub points: Vec<CfdPowerPoint>,
+    /// Notes on points left out.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl CfdPowerOn {
+    fn is_sound(&self) -> bool {
+        !self.points.is_empty()
+            && self.solve_seconds.is_finite()
+            && self.points.windows(2).all(|w| w[0].mach < w[1].mach)
+            && self.points.iter().all(|p| [p.mach, p.friction, p.pressure, p.base, p.fins].iter().all(|v| v.is_finite()))
+    }
+}
+
 /// The 3D Euler result of one solved (Mach, angle of attack): normal force and centre of pressure.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CfdLiftPoint {
@@ -161,6 +229,9 @@ pub struct CfdTable {
     /// The 3D stability solve (normal force and CP), when there is one.
     #[serde(default)]
     pub lift: Option<CfdLiftTable>,
+    /// The drag with the motor jet on, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_on: Option<CfdPowerOn>,
 }
 
 impl CfdTable {
@@ -204,6 +275,10 @@ impl Rocket {
             // A new drag table keeps the stack's 3D solve: its own key says whether it is still fresh.
             table.lift = self.cfd.0.iter().find(|t| t.stage == table.stage).and_then(|t| t.lift.clone());
         }
+        if table.power_on.is_none() {
+            // and its power-on part: the jet it was solved with says whether it is still the motor's
+            table.power_on = self.cfd.0.iter().find(|t| t.stage == table.stage).and_then(|t| t.power_on.clone());
+        }
         self.cfd.0.retain(|t| t.stage != table.stage);
         self.cfd.0.push(table);
         let excess = self.cfd.0.len().saturating_sub(MAX_CFD_TABLES);
@@ -227,6 +302,9 @@ impl Rocket {
         for t in &mut self.cfd.0 {
             if t.lift.as_ref().is_some_and(|l| !l.is_sound()) {
                 t.lift = None;
+            }
+            if t.power_on.as_ref().is_some_and(|p| !p.is_sound()) {
+                t.power_on = None;
             }
         }
         let excess = self.cfd.0.len().saturating_sub(MAX_CFD_TABLES);
@@ -267,6 +345,7 @@ mod tests {
             points: vec![point(0.3), point(0.9), point(2.0)],
             grid: CfdGrid::Coarse,
             lift: None,
+            power_on: None,
         }
     }
 

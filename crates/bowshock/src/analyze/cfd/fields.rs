@@ -198,6 +198,7 @@ mod tests {
                 .collect(),
             grid: CfdGrid::Coarse,
             lift: None,
+            power_on: None,
         }
     }
 

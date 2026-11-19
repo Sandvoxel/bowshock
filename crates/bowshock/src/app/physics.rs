@@ -346,7 +346,7 @@ impl Physics {
             return Err("No CFD table for this rocket yet: solve one in Analyze > CFD table. Flying on Extended.".to_string());
         };
         match self.cfd_plan(stage) {
-            Some(Ok(plan)) if plan.geometry == table.geometry => Ok(bowshock_sim::DragTable::from_cfd(table)),
+            Some(Ok(plan)) if plan.geometry == table.geometry => Ok(bowshock_sim::DragTable::from_cfd(table, plan.jet().as_ref())),
             Some(Ok(_)) | None => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),
             Some(Err(why)) => Err(format!("CFD cannot model this rocket ({why}): flying on Extended.")),
         }
