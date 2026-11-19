@@ -21,7 +21,7 @@
 //!
 //! With `BOWSHOCK_ENGINE=3d` the whole app already runs on this engine (`cfd/run.rs` `node_analysis`, `cfd/plan.rs` fin counts and `*_REV_3D` keys, `cfd/wording.rs`
 //! `Words(true)`, the shared grid), so the flip is: `Engine::DEFAULT = Solver3` (`analysis.rs`); the app already sends
-//! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds, and `tier3` maps them; the Jet patch (the motor request here); then delete the legacy
+//! `viscous`, roughness, the drag tolerance and `grid_mach` to both node kinds, and `tier3` maps them (the Jet patch is in: the motor request here); then delete the legacy
 //! path (the route comment in `analysis.rs` lists it), `Words(false)`, `SOLVER_REV` / `LIFT_REV` (the `_3D` numbers take their place) and the app's two-engine branches
 //! (`solves_3d`, `shared_grid`).
 
