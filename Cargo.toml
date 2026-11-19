@@ -16,7 +16,7 @@ bowshock-cfd = { path = "crates/bowshock-cfd", version = "0.1.0", default-featur
 bowshock-reference = { path = "crates/bowshock-reference", version = "0.1.0" }
 bowshock-cases = { path = "crates/bowshock-cases" }
 bowshock-gpu-cases = { path = "crates/bowshock-gpu-cases" }
-luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "7fafed6ebb58adfe5415c3d81b3143e35b263660" }
+luma = { git = "https://github.com/flipnoteman/Luma.git", rev = "231c98697467c666be09e100ed558c27a19cfa62" }
 rayon = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 gif = "0.13"
