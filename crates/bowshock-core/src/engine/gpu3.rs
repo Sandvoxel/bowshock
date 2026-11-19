@@ -45,16 +45,24 @@ fn make_room(ctx: &luma::Context, host: &Solver3, prec: Precision) -> Result<(),
     fits(cells, need, m.resident_bytes, m.budget_bytes)
 }
 
-/// `Err` ("grid of N cells needs ~X GiB, device budget Y GiB") when `need` bytes do not fit in the `budget` (`None`: no limit) less the `resident` bytes already held.
+/// Luma keeps 80 % of the device's memory as its budget for array data (`ContextOptions::memory_budget`), and the trace of a loop takes the rest: the 6.8 M-cell sector peaked at
+/// 22.1 GiB on the 24 GiB 3090 with a budget of 18.9 GiB (DESIGN3D item 49). The guard lets a solver use the device, 5/4 of the budget, less 5 % for the driver and the desktop.
+const DEVICE_PER_BUDGET: (u64, u64) = (5, 4);
+const DEVICE_USABLE: (u64, u64) = (19, 20);
+
+/// `Err` ("grid of N cells needs ~X GiB, device budget Y GiB") when `need` bytes do not fit in the device that the `budget` (`None`: no limit) belongs to, less the `resident` bytes
+/// already held.
 fn fits(cells: usize, need: u64, resident: u64, budget: Option<u64>) -> Result<(), Error> {
     let gib = |b: u64| b as f64 / f64::from(1u32 << 30);
     match budget {
-        Some(budget) if need.saturating_add(resident) > budget => Err(Error::Gpu(format!(
-            "grid of {cells} cells needs ~{:.1} GiB, device budget {:.1} GiB{}",
-            gib(need),
-            gib(budget),
-            if resident > 0 { format!(" ({:.1} GiB already held)", gib(resident)) } else { String::new() }
-        ))),
+        Some(budget) if need.saturating_add(resident) > budget / DEVICE_PER_BUDGET.1 * DEVICE_PER_BUDGET.0 / DEVICE_USABLE.1 * DEVICE_USABLE.0 => {
+            Err(Error::Gpu(format!(
+                "grid of {cells} cells needs ~{:.1} GiB, device budget {:.1} GiB{}",
+                gib(need),
+                gib(budget),
+                if resident > 0 { format!(" ({:.1} GiB already held)", gib(resident)) } else { String::new() }
+            )))
+        }
         _ => Ok(()),
     }
 }
@@ -429,10 +437,13 @@ mod tests {
     fn the_memory_guard_compares_the_estimate_with_the_free_budget() {
         assert!(fits(1_000_000, 4 * GIB, 0, Some(19 * GIB)).is_ok());
         assert!(fits(1_000_000, 4 * GIB, 15 * GIB, Some(19 * GIB)).is_ok());
+        // the device is 5/4 of the budget, 95 % of it usable: 22.5 GiB of a 19 GiB budget
+        assert!(fits(5_000_000, 22 * GIB, 0, Some(19 * GIB)).is_ok());
+        assert!(fits(5_000_000, 23 * GIB, 0, Some(19 * GIB)).is_err());
         let e = fits(6_920_000, 30 * GIB, 0, Some(19 * GIB)).unwrap_err().to_string();
         assert_eq!(e, "grid of 6920000 cells needs ~30.0 GiB, device budget 19.0 GiB");
-        let e = fits(2_000_000, 8 * GIB, 12 * GIB, Some(19 * GIB)).unwrap_err().to_string();
-        assert_eq!(e, "grid of 2000000 cells needs ~8.0 GiB, device budget 19.0 GiB (12.0 GiB already held)");
+        let e = fits(2_000_000, 8 * GIB, 16 * GIB, Some(19 * GIB)).unwrap_err().to_string();
+        assert_eq!(e, "grid of 2000000 cells needs ~8.0 GiB, device budget 19.0 GiB (16.0 GiB already held)");
         assert!(fits(usize::MAX, u64::MAX, u64::MAX, None).is_ok());
     }
 }

@@ -67,14 +67,27 @@ pub enum Precision {
     Extended,
 }
 
-/// Device bytes per cell a [`GpuSolver3`] needs at its peak, the compile of its loop (DESIGN3D item 49; ANF sector, RTX 3090, Luma 231c986).
-const BYTES_PER_CELL3: f64 = 5400.0;
+/// Peak device bytes per cell of a [`GpuSolver3`] (f32, SST, `sub_iters` 2) and the other settings' factors, measured by the process figure of `nvidia-smi -lms 5` less the 256 MiB
+/// CUDA context, on the Finner sector at refinements 1 to 2.25 (0.69 to 6.8 M cells), the half domain (1.35 M) and G-F1, Luma 231c986 (DESIGN3D item 49): 2950 to 4091 B per cell
+/// (the power-of-two size classes of the line-solve scratch and the plan make it jump with the cell count); the largest is the bound. `sub_iters` 1 / 3 / 4 measured 93 / 101 / 102 % of
+/// `sub_iters` 2, double-float 143 %, Euler 85 %.
+const BYTES_PER_CELL3: f64 = 4100.0;
+const EXTENDED_FACTOR3: f64 = 1.45;
+const EULER_FACTOR3: f64 = 0.86;
+/// The CUDA context and the kernels of the process.
+const CONTEXT_BYTES3: u64 = 300 << 20;
 
-/// The device memory (bytes) a 3D solver of `cells` cells needs at its peak, which is the trace of its loop: persistent arrays and the plan Luma keeps, plus the intermediates of
-/// the step while they are recorded. Linear in the cells; `sub_iters` and the SST terms add to the transients, double-float state doubles the persistent state.
+/// The device memory (bytes) a 3D solver of `cells` cells needs at its peak, which is the trace of its loop (persistent arrays, the plan Luma keeps and the intermediates of the step while
+/// they are recorded). Linear in the cells, an upper bound of everything measured; `sub_iters` above 3 and `Precision::Extended` raise it, a solver without the SST terms lowers it.
 pub fn device_bytes3(cells: usize, prec: Precision, sub_iters: usize, rans: bool) -> u64 {
-    let _ = (prec, sub_iters, rans);
-    (cells as f64 * BYTES_PER_CELL3) as u64
+    let mut per_cell = BYTES_PER_CELL3 + 100.0 * sub_iters.saturating_sub(3) as f64;
+    if prec == Precision::Extended {
+        per_cell *= EXTENDED_FACTOR3;
+    }
+    if !rans {
+        per_cell *= EULER_FACTOR3;
+    }
+    CONTEXT_BYTES3 + (cells as f64 * per_cell) as u64
 }
 
 /// Iterations of one `iterate_until_all` submission inside [`GpuSolver::run`]: the host waits once per `RUN_SYNC` iterations.
@@ -786,5 +799,31 @@ impl GpuSolver3 {
     /// Pressure forces `[Fx, Fz, Mz]` per class reduced on the device (`2 n_classes` triples: all faces, then the faces flagged `cut`); no state download.
     pub fn wall_forces(&self, p_inf: f64) -> Result<Vec<[f64; 3]>> {
         Ok(on3!(self, s => s.wall_forces(p_inf)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: f64 = (1u64 << 30) as f64;
+
+    /// The estimate is linear in the cells and reproduces the measured peaks of item 49 from above: the Finner sector (688 k cells, 2.54 GiB), refinement 2.0 (4.8 M, 17.9 GiB) and
+    /// 2.25 (6.8 M, 21.9 GiB) in f32 with SST, and orders the settings: more `sub_iters`, double-float state and the SST terms cost, Euler saves.
+    #[test]
+    fn the_device_estimate_bounds_the_measured_peaks() {
+        let est = |cells: usize, prec, sub, rans| device_bytes3(cells, prec, sub, rans) as f64 / GIB;
+        for (cells, peak_gib) in
+            [(687_960usize, 2.54 - 0.25), (1_350_048, 4.48 - 0.25), (2_155_608, 8.2 - 0.25), (4_823_000, 17.87 - 0.25), (6_802_432, 21.86 - 0.25)]
+        {
+            assert!(est(cells, Precision::F32, 2, true) >= peak_gib, "{cells} cells need {peak_gib} GiB, estimated {}", est(cells, Precision::F32, 2, true));
+            assert!(est(cells, Precision::F32, 2, true) < peak_gib * 1.4 + 0.5, "{cells} cells: the estimate is not far above the measurement");
+        }
+        let (a, b) = (device_bytes3(1_000_000, Precision::F32, 2, true), device_bytes3(2_000_000, Precision::F32, 2, true));
+        assert_eq!(b - a, a - CONTEXT_BYTES3);
+        assert!(device_bytes3(1_000_000, Precision::F32, 5, true) > a);
+        assert!(device_bytes3(1_000_000, Precision::Extended, 2, true) > a);
+        assert!(device_bytes3(1_000_000, Precision::F32, 2, false) < a);
+        assert_eq!(device_bytes3(1_000_000, Precision::F32, 1, true), a);
     }
 }
