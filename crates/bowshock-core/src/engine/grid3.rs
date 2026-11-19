@@ -55,6 +55,10 @@ pub struct Fins3 {
     pub planform: Option<Planform>,
 }
 
+/// The width of the zone that absorbs the move of the leading and trailing edge along the rows of a swept or tapered fin, in units of the largest move: the cells in it are
+/// stretched (or shrunk) by at most `1 + 1 / ZONE_REACH`.
+const ZONE_REACH: f64 = 3.0;
+
 /// The chord at which a pointed or elliptical planform is cut at the tip, as a fraction of the root chord.
 pub const TIP_CHORD_FLOOR: f64 = 0.04;
 
@@ -271,6 +275,8 @@ struct FinPlan {
     /// Node range `a..=b` of the rebuilt segments under the fin root (one tube, or several segments).
     i_seg0: usize,
     i_seg1: usize,
+    /// The node where the nose ends: the farthest the sweep zone ([`ZONE_REACH`]) reaches upstream.
+    i_floor: usize,
     i_le: usize,
     i_te: usize,
     j_tip: usize,
@@ -843,10 +849,12 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         Some(pf) => pf.x_extent_up_to(span),
         None => (f.sweep.min(0.0), (f.sweep + f.tip_chord).max(f.root_chord)),
     };
-    if x_le_root + x_front < x_a - 1e-9 {
+    let x_floor = xs[host.n_up + host.n_nose];
+    if x_le_root + x_front < x_floor + ZONE_REACH.recip() * (x_le_root - x_floor) {
         return Err(Error::Unsupported(format!(
-            "the fin outline reaches {:.4} d ahead of its root leading edge, past the start of the aft segments under the root",
-            -x_front
+            "the fin outline reaches {:.4} d ahead of its root leading edge, too close to the end of the nose ({:.4} d ahead of the root)",
+            -x_front,
+            x_le_root - x_floor
         )));
     }
     if x_le_root + x_back > x_te_root + room {
@@ -856,7 +864,21 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
             if i_te == i_seg1 { " (flush with the base)" } else { "" }
         )));
     }
-    Ok(FinPlan { i_seg0: a, i_seg1, i_le, i_te, j_tip, x_le_root, x_te_root, r_t, r_tip: r_ref + span, span, planform: f.planform.clone(), sj })
+    Ok(FinPlan {
+        i_seg0: a,
+        i_seg1,
+        i_floor: host.n_up + host.n_nose,
+        i_le,
+        i_te,
+        j_tip,
+        x_le_root,
+        x_te_root,
+        r_t,
+        r_tip: r_ref + span,
+        span,
+        planform: f.planform.clone(),
+        sj,
+    })
 }
 
 /// Azimuth span and symmetry of the domain of `p`.
@@ -1030,20 +1052,32 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 None => (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac),
             }
         };
-        // sweep and taper: piecewise-linear remap of the segment nodes
+        // sweep and taper: piecewise-linear remap of the segment nodes. The nodes ahead of the leading edge and behind the trailing edge absorb what the edges move by
+        // (the leading edge of the tip row is `sweep` aft of the root's): over a zone [`ZONE_REACH`] times the largest move wide, so that no cell takes it alone. The zone
+        // starts at the segment's end nodes (the cells of the fan and of the segment) and goes on past them, upstream to the end of the nose and downstream into the wake, when
+        // the segment has less room than that: a fin that starts at the start of its segment (a fin can) stretched the one cell ahead of it by the whole sweep (2.6 d for 3.1 d
+        // of sweep, 2 400 times the volume of the cell behind it)
         let nodes0: Vec<f64> = xs.clone();
+        let (mut up, mut down) = (0.0f64, 0.0f64);
+        for jj in 0..=pl.j_tip {
+            let (_, x_le, chord) = row(jj);
+            up = up.max((x_le - pl.x_le_root).abs());
+            down = down.max((x_le + chord - pl.x_te_root).abs());
+        }
+        let i_up = (pl.i_floor..=pl.i_seg0).rev().find(|&i| pl.x_le_root - nodes0[i] >= ZONE_REACH * up).unwrap_or(pl.i_floor);
+        let i_down = (pl.i_seg1..=ni).find(|&i| nodes0[i] - pl.x_te_root >= ZONE_REACH * down).unwrap_or(ni);
         for jj in 0..=(pl.j_tip + 3).min(nj - j_off) {
             let j = j_off + jj;
             let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / 4.0 };
             let (_, x_le, chord) = row(jj);
-            let mut knots = vec![(pl.i_seg0, nodes0[pl.i_seg0], nodes0[pl.i_seg0])];
-            if pl.i_le == pl.i_seg0 {
-                knots.clear();
+            let mut knots = Vec::new();
+            if i_up < pl.i_le {
+                knots.push((i_up, nodes0[i_up], nodes0[i_up]));
             }
             knots.push((pl.i_le, pl.x_le_root, x_le));
             knots.push((pl.i_te, pl.x_te_root, x_le + chord));
-            if pl.i_te != pl.i_seg1 {
-                knots.push((pl.i_seg1, nodes0[pl.i_seg1], nodes0[pl.i_seg1]));
+            if i_down > pl.i_te {
+                knots.push((i_down, nodes0[i_down], nodes0[i_down]));
             }
             for w in knots.windows(2) {
                 for i in w[0].0..=w[1].0 {
@@ -1362,7 +1396,6 @@ pub fn print_quality(label: &str, g: &Grid3) {
     let mut fluid = 0usize;
     let mut aspect_hist = [0usize; 5];
     let mut vol_sum = 0.0;
-    let r_max = (0..g.y.len()).map(|n| g.y[n].hypot(g.z[n])).fold(0.0, f64::max);
     let dims = |i: usize, j: usize, k: usize| {
         let m = |a: [f64; 3], b: [f64; 3]| len3(sub3(a, b));
         [m(node(i + 1, j, k), node(i, j, k)), m(node(i, j + 1, k), node(i, j, k)), m(node(i, j, k + 1), node(i, j, k))]
@@ -1397,7 +1430,7 @@ pub fn print_quality(label: &str, g: &Grid3) {
                 }
                 let l = [len3(e[0]), len3(e[1]), len3(e[2])];
                 // the cells on the axis are degenerate by construction: the aspect and the ratios are of the others
-                if g.xc[c][1].hypot(g.xc[c][2]) < 0.01 * r_max {
+                if g.is_axis(i, j) {
                     continue;
                 }
                 let asp = l.iter().cloned().fold(0.0, f64::max) / l.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1438,7 +1471,7 @@ pub fn print_quality(label: &str, g: &Grid3) {
         }
     }
     println!(
-        "GRID {label}: {ni} x {nj} x {nk} = {} cells, {fluid} fluid, fluid volume {vol_sum:.4e} (aspect and ratios without the cells within 1 % of the axis)",
+        "GRID {label}: {ni} x {nj} x {nk} = {} cells, {fluid} fluid, fluid volume {vol_sum:.4e} (aspect, angles and ratios without the axis cells)",
         ni * nj * nk
     );
     println!("GRID {label}: min volume {:.3e} at {}", vol_min.0, at(vol_min.1, vol_min.2, vol_min.3));

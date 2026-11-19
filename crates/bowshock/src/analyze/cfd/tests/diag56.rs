@@ -21,6 +21,11 @@ fn hook(c: &mut solver::engine::case3::Case3) {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
         let label = std::env::var("DIAG_ROCKET").unwrap_or_default();
         solver::engine::grid3::print_quality(&label, &g);
+        if let (Some(j), Some(k)) = (env_f("DIAG_ROW_J"), env_f("DIAG_ROW_K")) {
+            let (j, k) = (j as usize, k as usize);
+            let xs: Vec<String> = (0..=g.ni).map(|i| format!("{:.4}", g.x[(k * (g.nj + 1) + j) * (g.ni + 1) + i])).collect();
+            println!("ROW j {j} k {k} x nodes: {}", xs.join(" "));
+        }
     }
     if let Some(from) = env_f("DIAG_SNAP") {
         let every = env_f("DIAG_SNAP_EVERY").unwrap_or(50.0) as usize;
