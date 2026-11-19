@@ -818,7 +818,15 @@ mod tests {
     fn the_device_estimate_bounds_the_measured_peaks() {
         let est = |cells: usize, prec, sub, rans| device_bytes3(cells, prec, sub, rans) as f64 / MIB;
         // (cells, process peak MiB, `fast_peak`): the 3090 jobs `1-20261119-132953-27426` (688 k, 825 k, 1.35 M, 2.16 M, 4.8 M, 6.8 M), the 3080L `0-20261119-142733-17544` (3.29 M)
-        for (cells, peak) in [(687_960usize, 1890.0), (824_850, 1954.0), (1_350_048, 3490.0), (2_155_608, 6370.0), (3_290_496, 6562.0), (4_823_000, 13474.0), (6_802_432, 15010.0)] {
+        for (cells, peak) in [
+            (687_960usize, 1890.0),
+            (824_850, 1954.0),
+            (1_350_048, 3490.0),
+            (2_155_608, 6370.0),
+            (3_290_496, 6562.0),
+            (4_823_000, 13474.0),
+            (6_802_432, 15010.0),
+        ] {
             let e = est(cells, Precision::F32, 2, true);
             assert!(e >= peak, "{cells} cells peak at {peak} MiB, estimated {e}");
             assert!(e < peak * 1.2, "{cells} cells: the estimate {e} MiB is not within 20 % of the measurement {peak}");
