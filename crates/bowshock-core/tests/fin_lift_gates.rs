@@ -436,10 +436,10 @@ fn fins_of(n: u32) -> Fins3 {
 /// resolves the fin's leading and trailing edge with two cells across (the mirror image) and the half domain with one: the leading-edge face then differs by 4.5 % at 64 chord cells.
 /// The stack tiers take 2 cells across in both, which are the same cells (the sector's grid is the half domain's mirrored, node for node: `gs_diag grid`).
 ///
-/// **Mach 0.8 is a documented discrepancy, not a grid difference** (item 52): the half domain's whole fins are free to shed asymmetrically from their blunt trailing edge (0.08 d), the
-/// sector's fin mid-plane is a symmetry plane and its wake steady. At 64 chord cells (trailing-edge cells 0.0047 d) the half domain's free fins have a trailing-edge drag 6-10 % above the
-/// sector's (the half fin of the in-plane N = 3 half domain, on a symmetry plane, is within 1.2 % of the sector's) and a persistent oscillation of CA of 0.3-1 %; at 32 chord cells the
-/// wake stays symmetric and the two domains agree to 0.6 %. The 1 % band stays; the line prints `FAIL KNOWN`.
+/// **Mach 0.8 is a documented discrepancy, not a grid difference** (item 52): the half domain's whole fins are free to have an asymmetric, oscillating wake behind their blunt trailing edge (0.08 d),
+/// the sector's fin mid-plane is a symmetry plane and its wake steady. At 64 chord cells (trailing-edge cells 0.0047 d) the half domain's free fins have a trailing-edge drag 6-10 % above the
+/// sector's (the half fin of the in-plane N = 3 half domain, on a symmetry plane, is within 1.2 % of the sector's) and a persistent oscillation of CA of 0.3-1 %; at 32 chord cells (trailing-edge
+/// cells twice as long) the trailing-edge drags agree and the two domains to 0.6 %. The 1 % band stays; the line prints `FAIL KNOWN`.
 #[test]
 #[ignore = "validation: stack grids need the GPU (sector 0.5 M cells, half domain 2-3 M); Euler cases run on the CPU in minutes"]
 fn gate_s_sector_vs_half_on_the_stack_grids() {
@@ -491,7 +491,7 @@ fn gate_s_sector_vs_half_on_the_stack_grids() {
                 );
                 let (gate, id_cd) = (is_gate(kind, &case), format!("{id}:cd_total"));
                 if m < 1.0 {
-                    let why = "the half domain's free fins shed from the blunt trailing edge, the sector's symmetric wake cannot: DESIGN3D item 52";
+                    let why = "the half domain's free fins have an asymmetric, oscillating trailing-edge wake that the sector's symmetric one cannot: DESIGN3D item 52";
                     lines.check_known(gate, "G-S", &id_cd, ts, th, Band::Rel(0.01), why);
                 } else {
                     lines.check(gate, "G-S", &id_cd, ts, th, Band::Rel(0.01));
