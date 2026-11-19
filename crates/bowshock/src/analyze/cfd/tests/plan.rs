@@ -302,3 +302,38 @@ fn a_blunted_nose_is_solved_as_the_blunted_profile() {
         assert!((solved - first.radius_at(z)).abs() < 1e-9, "z {z}: solver {solved} vs sim {}", first.radius_at(z));
     }
 }
+
+#[test]
+fn the_power_on_nodes_are_the_table_nodes_the_jet_is_solved_at() {
+    assert_eq!(power_on_nodes(&nodes((0.1, 3.0)).unwrap()), POWER_ON_NODES.to_vec());
+    assert_eq!(power_on_nodes(&nodes((0.1, 1.2)).unwrap()), vec![0.5, 0.9]);
+    // a range with none of them takes its middle node
+    let near = nodes((0.1, 0.4)).unwrap();
+    assert_eq!(power_on_nodes(&near), vec![near[near.len() / 2]]);
+}
+
+#[test]
+fn the_jet_is_the_motors_average_thrust_in_the_solvers_air_model() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let jet = plan.motor.expect("the example has a motor");
+    let motor = &vehicle.stages[0].motor.as_ref().unwrap().curve;
+    let thrust = motor.total_impulse() / motor.burn_time();
+    // the static thrust of the jet is the motor's average: momentum plus pressure thrust at the sea-level ambient pressure
+    let area = std::f64::consts::FRAC_PI_4 * jet.exit_diameter * jet.exit_diameter;
+    let f = jet.exit_pressure_pa * area * (1.0 + 1.4 * jet.exit_mach * jet.exit_mach) - 101_325.0 * area;
+    assert!((f / thrust - 1.0).abs() < 1e-9, "{f} N against {thrust} N");
+    // between the fractions of the case and inside the base
+    assert!(jet.exit_diameter >= JET_EXIT_FRACTION.0 * motor.diameter - 1e-12 && jet.exit_diameter <= JET_EXIT_FRACTION.1 * motor.diameter + 1e-12);
+    assert!(jet.validate(2.0 * vehicle.body.last().unwrap().aft_radius).is_ok());
+    // the motor is not part of the geometry: the drag table stays fresh when it changes
+    assert_eq!(plan.jet().map(|j| j.exit_mach), Some(JET_EXIT_MACH));
+    let mut other = vehicle.clone();
+    other.stages[0].motor.as_mut().unwrap().curve.points.iter_mut().for_each(|p| p.1 *= 2.0);
+    let again = super::super::plan(&rocket, &other, UnitSystem::default()).unwrap();
+    assert_eq!(again.geometry, plan.geometry);
+    assert_ne!(again.motor, plan.motor);
+    // no motor, no jet
+    other.stages.iter_mut().for_each(|s| s.motor = None);
+    assert!(super::super::plan(&rocket, &other, UnitSystem::default()).unwrap().motor.is_none());
+}

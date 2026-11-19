@@ -352,6 +352,9 @@ fn engine3d_finned_timing() {
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     assert!(plan.fins.is_some());
     let shared = std::env::var("BOWSHOCK_SHARED_GRID").is_ok();
+    // the power-on part of the app's table (the motor's jet at the nodes of `POWER_ON_NODES`) is part of the full solve; BOWSHOCK_NO_POWER_ON=1 leaves it out (the baseline)
+    let jet = plan.jet();
+    let power_on = if plan.motor.is_some() && std::env::var_os("BOWSHOCK_NO_POWER_ON").is_none() { power_on_nodes(&nodes((0.1, 3.0)).unwrap()) } else { Vec::new() };
     let job = Job {
         plan,
         altitude: 120.0,
@@ -361,7 +364,7 @@ fn engine3d_finned_timing() {
         compute: Default::default(),
         cpu_only: false,
         stability: lift_nodes((0.1, 3.0)).unwrap(),
-        power_on: Vec::new(),
+        power_on,
     };
     let _ = solver::engine::timing::take_timings();
     let _ = solver::take_facade_timings();
@@ -389,6 +392,22 @@ fn engine3d_finned_timing() {
         for p in &l.points {
             println!("LIFT M {:.2} alpha {:.0} CN {:.4} x_cp {:.4} cd {:?} {:?}", p.mach, p.alpha_deg, p.cn, p.x_cp, p.cd, p.quality);
         }
+    }
+    if let Some(on) = &table.power_on {
+        println!("JET {:?}", on.jet);
+        for p in &on.points {
+            println!(
+                "POWER M {:.2} friction {:.5} pressure {:.5} base {:.5} fins {:.5} {:?} (power off base {:.5})",
+                p.mach,
+                p.friction,
+                p.pressure,
+                p.base,
+                p.fins,
+                p.quality,
+                table.points.iter().find(|o| (o.mach - p.mach).abs() < 1e-9).map_or(f64::NAN, |o| o.base)
+            );
+        }
+        super::power_on::print_apogee_effect("example", &rocket, &table, jet.as_ref());
     }
     println!("| dim | Mach | alpha | cells | iters (stop/exec) | stop | build | ctx | upload | reset | first chunk | rest chunks n | rest s | ms/iter | monitor forces | final |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
@@ -731,6 +750,10 @@ fn finned_drag_split() {
         if let Some(f) = plan.fins.as_mut() {
             f.roughness = 0.0;
         }
+    }
+    // BOWSHOCK_FINLESS=1: the body alone (the axisymmetric wedge), for the jet's effect on the wedge against the sector's
+    if std::env::var_os("BOWSHOCK_FINLESS").is_some() {
+        plan.fins = None;
     }
     println!("ROUGHNESS body {:.1} um, fins {:.1} um", plan.body_roughness * 1e6, plan.fins.as_ref().map_or(0.0, |f| f.roughness * 1e6));
     // BOWSHOCK_MACHS=1.0,1.1 picks the Mach numbers (default: the table's ten), BOWSHOCK_GRID=draft the quick grid

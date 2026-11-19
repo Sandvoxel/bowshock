@@ -10,6 +10,7 @@ mod diag13;
 mod interp;
 mod openrocket;
 mod perf;
+mod power_on;
 mod plan;
 mod run;
 
