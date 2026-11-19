@@ -256,7 +256,9 @@ impl State {
     /// wanted now.
     pub(crate) fn solve_status(&self) -> cfd::Status {
         let lift = cfd::lift_status(&self.cfd.plan, self.cfd.table.as_ref().and_then(|t| t.lift.as_ref()), self.cond.mach);
-        cfd::solve_status(&self.cfd.status, &lift, self.cfd.angles)
+        // a draft table has no 3D angles and the coarse solve that follows it brings them: they are not missing while that solve is on its way
+        let refining = self.cfd.refine.is_some() || (self.cfd.solving.is_some() && self.cfd.table.as_ref().is_some_and(|t| t.grid == CfdGrid::Draft));
+        cfd::solve_status(&self.cfd.status, &lift, self.cfd.angles && !refining)
     }
 
     /// Handles one of the screen's messages.
@@ -563,8 +565,8 @@ impl State {
         let serial = self.cfd.serial;
         let asked = refine.or(force).unwrap_or(CfdGrid::Coarse);
         // The coarse solve of a table that is missing or stale goes through the draft grid first (a result in a fraction of the time, then the coarse table replaces it); the
-        // solve that follows a draft table, and a scripted demo, go straight to their grid.
-        let draft_first = refine.is_none() && self.cfd.demo.is_empty() && cfd::draft_first(asked, &self.solve_status());
+        // solve that follows a draft table goes straight to its grid.
+        let draft_first = refine.is_none() && cfd::draft_first(asked, &self.solve_status());
         let (grid, then) = if draft_first { (CfdGrid::Draft, Some(asked)) } else { (asked, None) };
         let job = Arc::new(cfd::Job {
             plan: plan.clone(),
@@ -574,7 +576,8 @@ impl State {
             grid,
             compute: ctx.compute.clone(),
             cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu,
-            stability: if self.cfd.angles { cfd::lift_nodes(self.cond.mach).unwrap_or_default() } else { Vec::new() },
+            // the draft grid solves the drag alone (its angles are not worth their time, DESIGN3D item 57): the stability stays on Extended until the coarse solve brings the 3D angles
+            stability: if self.cfd.angles && grid != CfdGrid::Draft { cfd::lift_nodes(self.cond.mach).unwrap_or_default() } else { Vec::new() },
         });
         let tracker = solve::Tracker::new(job.units());
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::events(demo, &job));

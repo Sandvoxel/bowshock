@@ -109,7 +109,8 @@ fn perf_3d_lift_example() {
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
-        stability: lift_nodes((0.1, 3.0)).unwrap(),
+        // as the app: the draft grid solves the drag alone; `BOWSHOCK_NO_ANGLES` leaves the angles out of a coarse solve (the drag table alone)
+        stability: if std::env::var_os("BOWSHOCK_NO_ANGLES").is_some() || std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { Vec::new() } else { lift_nodes((0.1, 3.0)).unwrap() },
     };
     let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
@@ -438,6 +439,66 @@ fn engine3d_finned_timing() {
     println!("SUM {} runs, {iterations} iterations: iterating {run_total:.1} s of {wall:.1} s wall; fixed costs per point (build, context, upload, reset, first chunk, facade) {fixed:.1} s; points at the iteration cap: {capped:?} = {capped_s:.1} s", runs.len());
     let all = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, iterations];
     println!("PERF {}", serde_json_perf(wall, all[13]));
+}
+
+/// The draft-first flow as the app runs it (DESIGN3D item 57), through the app path on the finned example rocket: the draft solve (the drag at every Mach node, no angles) and then
+/// the coarse solve of the same job (drag and the 3D angles), in one process like the app's two solves. Prints the time to the first result, the total, the two drag tables and
+/// their difference per Mach number, the coarse angles, and a `PERF` line. `BOWSHOCK_DRAFT_ONLY=1` stops after the draft solve (a time on a slow device or backend).
+/// `tools/gpuq/gpuq submit --host local --name draft-first -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock engine3d_draft_first --run-ignored only --no-capture`.
+#[test]
+#[ignore = "BOWSHOCK_ENGINE=3d: solves the finned example's draft and coarse tables on the GPU"]
+fn engine3d_draft_first() {
+    assert_eq!(solver::Engine::from_env(), solver::Engine::Solver3, "run with BOWSHOCK_ENGINE=3d");
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = |grid: CfdGrid| Job {
+        plan: plan.clone(),
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: if grid == CfdGrid::Draft { Vec::new() } else { lift_nodes((0.1, 3.0)).unwrap() },
+    };
+    let solve = |grid: CfdGrid| {
+        let t = Instant::now();
+        let table = solve_sized(&job(grid), &Arc::new(AtomicBool::new(false)), |_| (), true).expect("the example solves");
+        (table, t.elapsed().as_secs_f64())
+    };
+    let (draft, t_draft) = solve(CfdGrid::Draft);
+    println!("DRAFT-FIRST first result: {} points on {} in {t_draft:.1} s", draft.points.len(), draft.backend);
+    if std::env::var_os("BOWSHOCK_DRAFT_ONLY").is_some() {
+        for p in &draft.points {
+            println!("DRAFT M {:.2} cd {:.5} friction {:.5} pressure {:.5} base {:.5} fins {:.5} {:?}", p.mach, p.cd, p.friction, p.pressure, p.base, p.fins, p.quality);
+        }
+        println!("PERF {{\"case\":\"3d-engine-draft-only\",\"precision\":\"f32\",\"cells\":null,\"iters\":0,\"us_per_iter\":0,\"wall_s\":{t_draft:.3}}}");
+        return;
+    }
+    let (coarse, t_coarse) = solve(CfdGrid::Coarse);
+    println!("DRAFT-FIRST final result: {} points and {} angle points in {t_coarse:.1} s; total {:.1} s ({:.0} % over the coarse solve alone)", coarse.points.len(), coarse.lift.as_ref().map_or(0, |l| l.points.len()), t_draft + t_coarse, 100.0 * t_draft / t_coarse);
+    println!("| Mach | CD draft | CD coarse | diff % | friction % | pressure % | base % | fins % |");
+    println!("|---|---|---|---|---|---|---|---|");
+    let pct = |d: f64, c: f64| 100.0 * (d - c) / c;
+    for (d, c) in draft.points.iter().zip(&coarse.points) {
+        println!(
+            "| {:.2} | {:.5} | {:.5} | {:+.1} | {:+.1} | {:+.1} | {:+.1} | {:+.1} |",
+            c.mach,
+            d.cd,
+            c.cd,
+            pct(d.cd, c.cd),
+            pct(d.friction, c.friction),
+            pct(d.pressure, c.pressure),
+            pct(d.base, c.base),
+            pct(d.fins, c.fins)
+        );
+    }
+    if let Some(l) = &coarse.lift {
+        for p in &l.points {
+            println!("LIFT M {:.2} alpha {:.0} CN {:.4} x_cp {:.4} {:?}", p.mach, p.alpha_deg, p.cn, p.x_cp, p.quality);
+        }
+    }
+    println!("PERF {{\"case\":\"3d-engine-draft-first\",\"precision\":\"f32\",\"cells\":null,\"iters\":0,\"us_per_iter\":0,\"wall_s\":{:.3}}}", t_draft + t_coarse);
 }
 
 fn serde_json_perf(wall: f64, iters: f64) -> String {

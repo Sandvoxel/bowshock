@@ -473,7 +473,31 @@ pub const DRAFT_FIRST_ENV: &str = "BOWSHOCK_DRAFT_FIRST";
 /// (`verdict`: [`Status::Missing`] or [`Status::Stale`]; a re-solve of a fresh table replaces nothing quicker than itself). The draft table is stored when it finishes, the plots
 /// and the table show it, and the coarse solve of the same job follows and replaces it.
 pub fn draft_first(grid: CfdGrid, verdict: &Status) -> bool {
-    solves_3d() && grid == CfdGrid::Coarse && matches!(verdict, Status::Missing | Status::Stale) && std::env::var(DRAFT_FIRST_ENV).map_or(true, |v| !v.eq_ignore_ascii_case("off"))
+    draft_first_rule(solves_3d(), std::env::var(DRAFT_FIRST_ENV).is_ok_and(|v| v.eq_ignore_ascii_case("off")), grid, verdict)
+}
+
+/// [`draft_first`] with its two switches given: the 3D engine, and the opt-out.
+fn draft_first_rule(three_d: bool, opted_out: bool, grid: CfdGrid, verdict: &Status) -> bool {
+    three_d && !opted_out && grid == CfdGrid::Coarse && matches!(verdict, Status::Missing | Status::Stale)
+}
+
+#[cfg(test)]
+mod draft_first_tests {
+    use super::*;
+
+    /// Only a coarse solve on the 3D engine with nothing fresh on screen goes through the draft grid; Quick, Refine, a fresh table, the legacy engine and the opt-out do not.
+    #[test]
+    fn only_a_coarse_solve_with_no_fresh_table_goes_through_the_draft_grid() {
+        let rule = |three_d, off, grid, verdict: Status| draft_first_rule(three_d, off, grid, &verdict);
+        assert!(rule(true, false, CfdGrid::Coarse, Status::Missing));
+        assert!(rule(true, false, CfdGrid::Coarse, Status::Stale));
+        assert!(!rule(true, false, CfdGrid::Coarse, Status::Fresh));
+        assert!(!rule(true, false, CfdGrid::Draft, Status::Missing));
+        assert!(!rule(true, false, CfdGrid::Medium, Status::Missing));
+        assert!(!rule(false, false, CfdGrid::Coarse, Status::Missing));
+        assert!(!rule(true, true, CfdGrid::Coarse, Status::Missing));
+        assert!(!rule(true, false, CfdGrid::Coarse, Status::Unsupported("x".into())));
+    }
 }
 
 /// What a node needs solved.
@@ -499,11 +523,10 @@ pub(super) fn node_analysis(
     let mut analysis = solver::Analysis::new(&job.plan.body)
         .map_err(|e| Failed::Message(e.to_string()))?
         .resolution(match (kind, job.grid) {
-            // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different. The angles are solved coarse, and
-            // on the Draft grid on the Draft tier's half domain.
-            (NodeKind::Lift, CfdGrid::Coarse | CfdGrid::Medium) | (NodeKind::Drag, CfdGrid::Coarse) => solver::Resolution::Coarse,
+            // Coarse is the default, for exploring; Medium (Refine) is about 3.5x slower per point and its Cd about 1 % different.
+            (NodeKind::Lift, _) | (_, CfdGrid::Coarse) => solver::Resolution::Coarse,
             (NodeKind::Drag, CfdGrid::Medium) => solver::Resolution::Medium,
-            (_, CfdGrid::Draft) => solver::Resolution::Draft,
+            (NodeKind::Drag, CfdGrid::Draft) => solver::Resolution::Draft,
         })
         .backend(session.backend())
         .keep_fields(true);

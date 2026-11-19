@@ -504,13 +504,11 @@ impl Analysis {
         }))
     }
 
-    /// The engine's tier of condition `c`: Euler without wall flow; with it `Draft` for [`Resolution::Draft`] (at any incidence: the half domain of the Draft tier is about half the
-    /// cells of the lift tier's, DESIGN3D item 57), otherwise the lift tier at an angle of attack and, at zero incidence, `Coarse` for [`Resolution::Coarse`] and `Fine` for the
-    /// finer resolutions.
+    /// The engine's tier of condition `c`: Euler without wall flow; with it the lift tier at an angle of attack and, at zero incidence, `Coarse` for
+    /// [`Resolution::Coarse`], `Draft` for [`Resolution::Draft`] and `Fine` for the finer resolutions.
     fn tier3(c: Condition, resolution: Resolution, flow: Option<WallFlow>) -> Tier {
         match flow {
             None => Tier::Euler,
-            Some(f) if resolution == Resolution::Draft => Tier::draft(f),
             Some(f) if c.alpha_deg != 0.0 => Tier::Lift(f),
             Some(f) if resolution == Resolution::Coarse => Tier::Coarse(f),
             Some(f) => Tier::Fine(f),
@@ -919,6 +917,26 @@ mod tests {
         // an explicit reference diameter is the facade's own business
         let b = Analysis::new(&spec).unwrap().reference_diameter(0.1);
         assert!((b.area_ratio() - 1.0).abs() < 1e-12);
+    }
+
+    /// The Draft tier takes its safe subsonic variant (`Case3::draft_subsonic`: the full domain and wake) below Mach 0.8, in the case of the facade and in the wedge that seeds a
+    /// sector, and keeps the Draft grid (5 L / 3 L domain) from Mach 0.8 up; the other tiers are not touched.
+    #[test]
+    fn the_draft_tier_is_safe_below_mach_08() {
+        use crate::engine::case3::SUTHERLAND_SEA_LEVEL;
+        let a = tiny_finned();
+        let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let domain = |c: &Case3| {
+            let b = c.grid.base.as_ref().expect("the base-wake grid");
+            (b.x_up, b.x_down)
+        };
+        let draft = |mach: f64| a.solver3_case(Condition::from(mach), 0, Tier::draft(flow), false);
+        let (slow, fast) = (draft(0.5), draft(0.8));
+        assert!(domain(&slow).0 > 2.0 * domain(&fast).0 && domain(&slow).1 > 1.5 * domain(&fast).1, "{:?} {:?}", domain(&slow), domain(&fast));
+        assert_eq!(domain(&slow), domain(&a.seed_case(&slow, Condition::from(0.5), 0)));
+        let coarse = |mach: f64| a.solver3_case(Condition::from(mach), 0, Tier::Coarse(flow), false);
+        assert_eq!(domain(&coarse(0.5)), domain(&coarse(0.8)));
+        assert_eq!(domain(&slow), domain(&coarse(0.5)), "the safe variant is the full domain of the wall-resolved tiers");
     }
 
     /// The ANF-like rocket on the tiny sting grid (20 k cells), Euler, CPU: a sector at zero incidence and a half domain at 4 degrees.

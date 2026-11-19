@@ -344,8 +344,8 @@ pub fn refine_cancelled() -> &'static str {
     "Refinement cancelled; the draft table stays"
 }
 
-/// The note on a draft table, in the table's list (the table is a first look; the coarse solve of the same job follows it unless it was asked for alone).
-pub const DRAFT_NOTE: &str = "Draft grid: wall functions and about a quarter of the cells, a first look; the coarse grid is the table to rely on.";
+/// The line under a draft table while the coarse solve that replaces it runs (the stability is still Extended's: the draft solve takes the drag alone).
+pub const REFINING_NOTE: &str = "A draft table, a first look (wall functions, about a quarter of the cells); the coarse solve now running replaces it and adds the 3D angles.";
 
 /// The note for a point that converged only after the solver took the run back to an earlier state and restarted it at a lower CFL limit (the 3D solver's controller).
 pub fn restart_note(mach: f64, r: &bowshock_model::CfdRestart) -> String {

@@ -290,6 +290,9 @@ pub(super) fn cfd_lines(state: &State) -> Vec<String> {
         };
         let below = info.scaled_below.map_or_else(String::new, |m| format!(" · M<{m:.1} scaled from Extended"));
         lines.push(format!("{stale}{points} · solved on {} · {grid} grid · {}{below}", info.backend, cfd::ago(info.solved_at)));
+        if info.grid == CfdGrid::Draft && cfd.solving.is_some() {
+            lines.push(cfd::REFINING_NOTE.to_string());
+        }
         if partial.is_some() || angles_partial.is_some() {
             lines.push(cfd::PARTIAL_ACTION.to_string());
         } else if verdict == cfd::Status::Stale {
