@@ -363,6 +363,32 @@ fn gpu_solver3_handle_and_timing() {
     }
 }
 
+/// A snapshot of the implicit loop state is a copy in host memory (the CFL controller keeps up to seven; nothing of it stays on the device): `restore` gives the conserved state,
+/// the iteration count and the CFL ramp back bit for bit, in both precisions, and the same iterations from there reproduce the state they reached the first time.
+#[test]
+fn a_host_snapshot_restores_the_implicit_run_exactly() {
+    let grid = tiny_anf_grid();
+    let cfg = Config3 { scheme: Scheme3::Implicit(implicit_params(false)), ..config(2.0, 2.0, Limiter::Minmod, false) };
+    let ctx = context();
+    for prec in [Precision::F32, Precision::Extended] {
+        let mut gpu = GpuSolver3::new(&ctx, &grid, &cfg, prec).unwrap();
+        gpu.run(20).unwrap();
+        let (u0, it0) = (gpu.state_f64().unwrap(), gpu.iter());
+        let snap = gpu.snapshot().unwrap();
+        gpu.run(20).unwrap();
+        let u1 = gpu.state_f64().unwrap();
+        gpu.restore(&snap, None).unwrap();
+        assert_eq!(gpu.iter(), it0);
+        assert_eq!(gpu.state_f64().unwrap(), u0, "{prec:?}: the restored state");
+        gpu.run(20).unwrap();
+        assert_eq!(gpu.state_f64().unwrap(), u1, "{prec:?}: the run after the restore reaches the state it reached the first time");
+        // a snapshot holds no device arrays: the resident bytes do not change with the snapshots kept
+        let resident = ctx.memory_stats().resident_bytes;
+        let kept: Vec<_> = (0..3).map(|_| gpu.snapshot().unwrap()).collect();
+        assert_eq!(ctx.memory_stats().resident_bytes, resident, "{prec:?}: {} snapshots kept", kept.len());
+    }
+}
+
 /// One SSP-RK3 step of the tiny ANF case as the `eval` loop launches it, kernel by kernel (labels cut to 90 characters): where the launches of a step go.
 /// Informational; nothing is asserted beyond the step running.
 #[test]

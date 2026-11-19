@@ -412,3 +412,22 @@ impl GpuRunner3 {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::fits;
+
+    const GIB: u64 = 1 << 30;
+
+    /// The guard refuses what exceeds the budget less the resident bytes, says how big the grid is and what the device has, and lets everything through without a budget.
+    #[test]
+    fn the_memory_guard_compares_the_estimate_with_the_free_budget() {
+        assert!(fits(1_000_000, 4 * GIB, 0, Some(19 * GIB)).is_ok());
+        assert!(fits(1_000_000, 4 * GIB, 15 * GIB, Some(19 * GIB)).is_ok());
+        let e = fits(6_920_000, 30 * GIB, 0, Some(19 * GIB)).unwrap_err().to_string();
+        assert_eq!(e, "grid of 6920000 cells needs ~30.0 GiB, device budget 19.0 GiB");
+        let e = fits(2_000_000, 8 * GIB, 12 * GIB, Some(19 * GIB)).unwrap_err().to_string();
+        assert_eq!(e, "grid of 2000000 cells needs ~8.0 GiB, device budget 19.0 GiB (12.0 GiB already held)");
+        assert!(fits(usize::MAX, u64::MAX, u64::MAX, None).is_ok());
+    }
+}
