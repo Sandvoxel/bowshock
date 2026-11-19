@@ -431,18 +431,29 @@ fn fins_of(n: u32) -> Fins3 {
 /// even `n`, `InPlane` for odd), N = 4 and N = 3 on the stack grids at level 0 (`BOWSHOCK_FIN_TIER=coarse`), Mach 0.8 and 2: total drag within 1 %. On the Euler tier
 /// (the default: uniform azimuthal cells, `nk 6` per sector and the cell count of the half domain that replicates the sector grid) the lines are INFO: the same
 /// numbers as the CPU / GPU Euler stop-gap (`examples/sector_vs_half`).
+///
+/// **Equal resolution** (DESIGN3D item 52): the sector's half fin owns `max(n / 2, 1)` cells across its thickness, a whole fin of the half domain `n`, so with the default 1 the sector
+/// resolves the fin's leading and trailing edge with two cells across (the mirror image) and the half domain with one: the leading-edge face then differs by 4.5 % at 64 chord cells.
+/// The stack tiers take 2 cells across in both, which are the same cells (the sector's grid is the half domain's mirrored, node for node: `gs_diag grid`).
+///
+/// **Mach 0.8 is a documented discrepancy, not a grid difference** (item 52): the half domain's whole fins are free to shed asymmetrically from their blunt trailing edge (0.08 d), the
+/// sector's fin mid-plane is a symmetry plane and its wake steady. At 64 chord cells (trailing-edge cells 0.0047 d) the half domain's free fins have a trailing-edge drag 6-10 % above the
+/// sector's (the half fin of the in-plane N = 3 half domain, on a symmetry plane, is within 1.2 % of the sector's) and a persistent oscillation of CA of 0.3-1 %; at 32 chord cells the
+/// wake stays symmetric and the two domains agree to 0.6 %. The 1 % band stays; the line prints `FAIL KNOWN`.
 #[test]
 #[ignore = "validation: stack grids need the GPU (sector 0.5 M cells, half domain 2-3 M); Euler cases run on the CPU in minutes"]
 fn gate_s_sector_vs_half_on_the_stack_grids() {
     let kind = tier_kind();
     let items: Vec<(u32, f64)> = [4u32, 3].iter().flat_map(|&n| machs(&[0.8, 2.0]).into_iter().map(move |m| (n, m))).collect();
     let nk_s = 6usize;
+    let across = if kind == TierKind::Euler { 1 } else { 2 };
     let flow = |m: f64| WallFlow { re_c: re_c_sea_level(0.03), mach_max: m.max(2.0), ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let runs = par_map(&items, |&(n, m)| -> Result<(Solved, Solved, Case3), String> {
         let mut sector = Case3::sector(m, Case3::anf_body(), fins_of(n), tier(kind, flow(m)), 0);
         let mut half = Case3::base_half(m, 0.0, Case3::anf_body(), Some(fins_of(n)), tier(kind, flow(m)), 0);
         let even = n % 2 == 0;
         half.grid.domain = Domain3::Half { phase: if even { FinPhase::Between } else { FinPhase::InPlane } };
+        (sector.grid.fin_cells_across, half.grid.fin_cells_across) = (across, across);
         if kind == TierKind::Euler {
             sector.grid.nk = nk_s;
             half.grid.nk = n as usize * nk_s - if even { 2 } else { 1 };
@@ -461,20 +472,30 @@ fn gate_s_sector_vs_half_on_the_stack_grids() {
                     "G-S",
                     &format!("{id}:parts"),
                     &format!(
-                        "sector total {ts:+.5} (nose {:+.5} base {:+.5} fins {:+.5}; {}), half {th:+.5} (nose {:+.5} base {:+.5} fins {:+.5}; {}); nk {} / {}",
+                        "sector total {ts:+.5} (nose {:+.5} base {:+.5} fins {:+.5}: LE {:+.5} TE {:+.5}; {}), half {th:+.5} (nose {:+.5} base {:+.5} fins {:+.5}: LE {:+.5} TE {:+.5}; {}); nk {} / {}",
                         rs.parts.nose,
                         rs.parts.base,
                         rs.fin_pressure(),
+                        rs.parts.fin_le,
+                        rs.parts.fin_te,
                         rs.stop(),
                         rh.parts.nose,
                         rh.parts.base,
                         rh.fin_pressure(),
+                        rh.parts.fin_le,
+                        rh.parts.fin_te,
                         rh.stop(),
                         case.grid.nk,
                         n
                     ),
                 );
-                lines.check(is_gate(kind, &case), "G-S", &format!("{id}:cd_total"), ts, th, Band::Rel(0.01));
+                let (gate, id_cd) = (is_gate(kind, &case), format!("{id}:cd_total"));
+                if m < 1.0 {
+                    let why = "the half domain's free fins shed from the blunt trailing edge, the sector's symmetric wake cannot: DESIGN3D item 52";
+                    lines.check_known(gate, "G-S", &id_cd, ts, th, Band::Rel(0.01), why);
+                } else {
+                    lines.check(gate, "G-S", &id_cd, ts, th, Band::Rel(0.01));
+                }
             }
             Err(e) => {
                 println!("GATE G-S {id} n/a n/a n/a FAIL ({e})");
