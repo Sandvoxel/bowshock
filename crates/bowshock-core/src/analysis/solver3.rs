@@ -35,6 +35,9 @@ use bowshock_cfd::gas3::{cons_to_prim3, prim_to_cons3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
 use bowshock_cfd::sst::WallThermal;
 
+/// Cells across the thickness of a fin on the half domain of the lift tier.
+const HALF_FIN_CELLS_ACROSS: usize = 2;
+
 /// The solved domain of a condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -529,6 +532,10 @@ impl Analysis {
             Kind::Sector => Case3::sector(c.mach, body, self.fins3_solver3().expect("checked").expect("a sector has fins"), tier, level),
             Kind::Half => Case3::base_half(c.mach, c.alpha_deg.to_radians(), body, self.fins3_solver3().expect("checked"), tier, level),
         };
+        // two cells across the fin on the wall-resolved half domain, as the sector's half fin has (DESIGN3D items 52, 53): one cell over-estimates the leading-edge drag
+        if kind == Kind::Half && matches!(case.tier, Tier::Lift(_)) {
+            case.grid.fin_cells_across = HALF_FIN_CELLS_ACROSS;
+        }
         if let Some(t) = self.wall_temperature_ratio {
             case.wall_thermal = WallThermal::Isothermal(t);
         }
