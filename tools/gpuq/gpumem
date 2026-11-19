@@ -11,6 +11,8 @@
 #
 #   MEM {"label":NAME,"proc_peak_mib":P,"device_baseline_mib":B,"device_peak_mib":D,"device_delta_mib":D-B,"samples":N,"interval_ms":MS}
 #
+# `fast_peak_mib` is the same figure from one `nvidia-smi -lms 10` process that runs for the whole command (a spike of 20 ms, like the end of a Luma recording, is seen; the
+# loop above starts nvidia-smi twice per sample and misses it); it is >= `proc_peak_mib` (up to the sampling of both).
 # `proc_peak_mib` is the number to quote (it does not move when the desktop or another session allocates); the device figures are the cross-check. The exit
 # status is CMD's. Use it inside a gpuq job on the built binary, not on `cargo run`:
 #   gpuq submit --host local -- bash -c 'cargo build --release -p P --example E && tools/gpuq/gpumem --label X -- "$CARGO_TARGET_DIR"/release/examples/E ARGS'
@@ -36,8 +38,12 @@ tree() { ps -eo pid=,ppid= | awk -v root="$1" '{ p[$1] = $2 } END { for (c in p)
 
 base=$(for _ in 1 2 3; do used; sleep 0.1; done | sort -n | head -n 1)
 base=${base:-0}
+fast=$(mktemp /tmp/gpumem-fast.XXXXXX)
+nvidia-smi --query-compute-apps=timestamp,pid,used_memory --format=csv,noheader,nounits -lms 10 > "$fast" 2>/dev/null &
+fast_pid=$!
 "$@" &
 child=$!
+seen=" "
 dev_peak=0
 proc_peak=0
 n=0
@@ -45,14 +51,19 @@ step=$(awk -v ms="$interval" 'BEGIN { printf "%.3f", ms / 1000 }')
 while kill -0 "$child" 2>/dev/null; do
   d=$(used)
   [ -n "$d" ] && [ "$d" -gt "$dev_peak" ] && dev_peak=$d
+  pids=$(tree "$child" | tr '\n' ' ')
+  seen="$seen$pids"
   p=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null | tr -d ' \r' \
-    | awk -F, -v pids="$(tree "$child" | tr '\n' ' ')" 'BEGIN { n = split(pids, a, " "); for (i = 1; i <= n; i++) m[a[i]] = 1 } ($1 in m) { s += $2 } END { print s + 0 }')
+    | awk -F, -v pids="$pids" 'BEGIN { n = split(pids, a, " "); for (i = 1; i <= n; i++) m[a[i]] = 1 } ($1 in m) { s += $2 } END { print s + 0 }')
   [ "$p" -gt "$proc_peak" ] && proc_peak=$p
   n=$((n + 1))
   sleep "$step"
 done
 wait "$child"
 rc=$?
-printf 'MEM {"label":"%s","proc_peak_mib":%s,"device_baseline_mib":%s,"device_peak_mib":%s,"device_delta_mib":%s,"samples":%s,"interval_ms":%s}\n' \
-  "$label" "$proc_peak" "$base" "$dev_peak" "$((dev_peak - base))" "$n" "$interval"
+kill "$fast_pid" 2>/dev/null; wait "$fast_pid" 2>/dev/null
+fast_peak=$(awk -F', ' -v pids="$seen" 'BEGIN { n = split(pids, a, " "); for (i = 1; i <= n; i++) m[a[i]] = 1 } ($2 in m) { s[$1] += $3 } END { mx = 0; for (t in s) if (s[t] > mx) mx = s[t]; print mx }' "$fast")
+rm -f "$fast"
+printf 'MEM {"label":"%s","proc_peak_mib":%s,"fast_peak_mib":%s,"device_baseline_mib":%s,"device_peak_mib":%s,"device_delta_mib":%s,"samples":%s,"interval_ms":%s}\n' \
+  "$label" "$proc_peak" "${fast_peak:-0}" "$base" "$dev_peak" "$((dev_peak - base))" "$n" "$interval"
 exit "$rc"

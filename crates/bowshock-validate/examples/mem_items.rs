@@ -39,11 +39,27 @@ fn smi() -> u64 {
 
 static PEAK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Samples the process figure of nvidia-smi in the background and keeps the maximum since the last row.
+/// Samples the process figure of nvidia-smi in the background (one `nvidia-smi -lms 5` process: a spike of 20 ms, the end of a recording, is seen; a poll that starts one `nvidia-smi` per
+/// sample takes 40 ms or more and misses it) and keeps the maximum since the last row.
 fn start_sampler() {
-    std::thread::spawn(|| loop {
-        PEAK.fetch_max(smi(), std::sync::atomic::Ordering::Relaxed);
-        std::thread::sleep(std::time::Duration::from_millis(40));
+    use std::io::{BufRead, BufReader};
+    let me = u64::from(std::process::id());
+    let child = Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits", "-lms", "5"])
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else { return };
+    let Some(out) = child.stdout.take() else { return };
+    std::thread::spawn(move || {
+        let _child = child;
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            let mut it = line.split(',').map(|x| x.trim().parse::<u64>());
+            if let (Some(Ok(pid)), Some(Ok(m))) = (it.next(), it.next()) {
+                if pid == me {
+                    PEAK.fetch_max(m, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
     });
 }
 
