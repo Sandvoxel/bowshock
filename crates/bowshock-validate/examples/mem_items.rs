@@ -61,17 +61,32 @@ fn row(ctx: &luma::Context, tag: &str, reclaim: bool) {
     } else {
         0
     };
-    println!("MEMITEM {tag:<64} smi {before:>6} MiB (peak since last row {peak:>6})  luma resident {:>6} MiB  idle pool {:>6} MiB  smi after reclaim {after:>6} MiB", res >> 20, idle >> 20);
+    println!(
+        "MEMITEM {tag:<64} smi {before:>6} MiB (peak since last row {peak:>6})  luma resident {:>6} MiB  idle pool {:>6} MiB  smi after reclaim {after:>6} MiB",
+        res >> 20,
+        idle >> 20
+    );
 }
 
 fn case_of(which: &str, mach: f64, sub: Option<usize>) -> Result<Case3, String> {
-    let fins = Fins3 { count: 4, root_chord: 0.5, tip_chord: 0.5, span: 0.5, sweep: 0.0, thickness: 0.01, te_to_base: 0.0, profile: FinProfile::DoubleWedge, planform: None };
+    let fins = Fins3 {
+        count: 4,
+        root_chord: 0.5,
+        tip_chord: 0.5,
+        span: 0.5,
+        sweep: 0.0,
+        thickness: 0.01,
+        te_to_base: 0.0,
+        profile: FinProfile::DoubleWedge,
+        planform: None,
+    };
     let flow = WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     // `finned_table --anf --tier coarse`: the Army-Navy Basic Finner with the sourced fin section, grid sized for Mach 3.147
     let anf_flow = WallFlow { re_c: 1.225 * 340.294 * 0.03 / 1.7894e-5, mach_max: 3.147, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let mut case = match which {
         "wedge" => {
-            let body = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }, aft: vec![AftSpec::Tube { length: 0.9134 }] };
+            let body =
+                BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.2286, diameter: 0.0762 }, aft: vec![AftSpec::Tube { length: 0.9134 }] };
             Case3::wedge_of(&engine_case(&body, 0.5, true, Resolution::Coarse), 0)
         }
         "anfwedge" => Case3::wedge(mach, Case3::anf_body(), 0).with_tier(Tier::Coarse(flow)),
@@ -116,7 +131,15 @@ fn main() -> Result<(), String> {
         let mut r = GpuRunner3::new(&case, if args.iter().any(|a| a == "--ext") { Precision::Extended } else { Precision::F32 }).map_err(|e| e.to_string())?;
         let cells = r.host.grid.ni * r.host.grid.nj * r.host.grid.nk;
         let persistent: usize = r.gpu.memory_report().iter().map(|(_, b)| b).sum();
-        println!("MEMITEM == {which}: {cells} cells ({} x {} x {}), sub_iters {}, ledger of persistent arrays {} MiB ({:.0} B/cell)", r.host.grid.ni, r.host.grid.nj, r.host.grid.nk, case.numerics.implicit.sub_iters, persistent >> 20, persistent as f64 / cells as f64);
+        println!(
+            "MEMITEM == {which}: {cells} cells ({} x {} x {}), sub_iters {}, ledger of persistent arrays {} MiB ({:.0} B/cell)",
+            r.host.grid.ni,
+            r.host.grid.nj,
+            r.host.grid.nk,
+            case.numerics.implicit.sub_iters,
+            persistent >> 20,
+            persistent as f64 / cells as f64
+        );
         row(&ctx, &format!("{which}: after GpuRunner3::new"), reclaim);
         r.gpu.run_monitored(1).map_err(|e| e.to_string())?;
         row(&ctx, &format!("{which}: after the compile (run_monitored(1))"), reclaim);
@@ -140,7 +163,11 @@ fn main() -> Result<(), String> {
             let mut c = case.clone();
             c.numerics.max_iter = n;
             let p = r.run_on(&c, false).map_err(|e| e.to_string())?;
-            row(&ctx, &format!("{which}: after run_on({n}): {} iterations, stop {:?}, {} cfl events", p.iterations, p.stop_reason, p.cfl_events.len()), reclaim);
+            row(
+                &ctx,
+                &format!("{which}: after run_on({n}): {} iterations, stop {:?}, {} cfl events", p.iterations, p.stop_reason, p.cfl_events.len()),
+                reclaim,
+            );
         }
         if keep {
             kept.push(r);
