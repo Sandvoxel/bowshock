@@ -7,7 +7,8 @@ cd "$(dirname "$0")/../.."
 cargo build --release -p bowshock-validate --example mem_items >/dev/null 2>&1 || cargo build --release -p bowshock-validate --example mem_items || exit 1
 bin=${CARGO_TARGET_DIR:-target}/release/examples/mem_items
 export BOWSHOCK_GPU_MEM_GUARD=off
-for p in ${1:-"sector:1 sector:1.5 sector:1.75 half:1 half:2"}; do
+list=${1:-sector:1 sector:1.5 sector:1.75 half:1 half:2}
+for p in $list; do
   kind=${p%%:*}; v=${p#*:}; extra=""
   case $v in *:*) extra=${v#*:}; v=${v%%:*}; extra=${extra//,/ } ;; esac
   case $kind in
