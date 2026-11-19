@@ -16,6 +16,6 @@ for v in $variants; do
   esac
   for chain in anf anfhalf; do
     echo "=== variant $v chain $chain"
-    env "${e[@]}" tools/gpuq/gpumem --label "$v-$chain" -- "$bin" --chain "$chain" --sub 2 --reclaim --run-on 300 2>&1 | grep -E "MEMITEM|MEM " 
+    env "${e[@]}" tools/gpuq/gpumem --label "$v-$chain" -- "$bin" --chain "$chain" ${MEM_ARGS:-} --sub 2 --reclaim --run-on 300 2>&1 | grep -E "MEMITEM|MEM " 
   done
 done
