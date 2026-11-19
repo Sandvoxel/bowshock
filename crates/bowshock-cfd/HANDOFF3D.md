@@ -52,6 +52,7 @@ to about 4" and items 43-44.
   - Tunnel like-for-like (item 51): G-L1 tunnel points at `Re_L` 4e6 with the 0.63 sting; slope definition, Re and sting move subsonic CN_alpha by only about -1.5 %.
   - G-S at 64 chord cells (item 52): 2 cells across the fin in both domains; Mach 0.8 is `FAIL KNOWN` (+2.3 / +4.6 %): the half domain's free fins carry an
     asymmetric, oscillating trailing-edge wake the symmetric sector cannot; Mach 2 agrees to 0.003 %.
+- **2026-11-19 (branch `flightval`, DESIGN3D item 56):** diameter steps are solved by the 3D engine (`AftSpec::Step`, plan maps them, legacy refuses) with CPU tests and a GPU Mach 0.8 point that settles; flight-data harness and six fixtures committed, build-up apogee errors measured (mean +11.9 %), CFD-table columns still to run (queue). Open: a 3 in rocket (Rabia SFC, blunt 0.01 d tip) takes 19 000 iterations and 8 CFL restarts at Mach 0.8, step or no step.
 - **Still open:**
   - subsonic CN_alpha: +13.4 % against the tunnel at Mach 0.79 in-plane (G-L1 FAIL, 13 % band), +11 % against free flight (±14-17 % in the data); at the steady-RANS /
     data limit (items 46, 51);
