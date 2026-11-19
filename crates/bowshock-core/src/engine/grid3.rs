@@ -1940,7 +1940,9 @@ mod tests {
         let mut stacked_in_plane = params(0, Some(anf_fins(FinProfile::Square)));
         stacked_in_plane.fin_stack = Some(stack);
         stacked_in_plane.domain = Domain3::Half { phase: FinPhase::InPlane };
-        let coarse = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(fl), 0).grid;
+        // the fingerprint is the one-cell grid of the first mesher: its 32 chord cells (the Coarse tier's default is 64 since DESIGN3D item 47) are pinned
+        let mut coarse = Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), Tier::Coarse(fl), 0).grid;
+        coarse.fin_chord_cells = Some(32);
         let all = [params(0, Some(anf_fins(FinProfile::Square))), params(0, Some(three)), sector, stacked_sector, stacked_half, stacked_in_plane, coarse];
         let got: Vec<u64> = all.iter().map(|p| fingerprint(&body_grid3(p).unwrap())).collect();
         eprintln!("fingerprints {got:x?}");
