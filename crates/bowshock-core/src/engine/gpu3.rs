@@ -20,6 +20,45 @@ use std::time::Instant;
 /// Iterations between two synchronisations (the CN sampling interval).
 pub const SYNC: usize = SAMPLE_EVERY;
 
+/// The grid shape and precision of the last solver built in this process: the idle buffers Luma pools are sized for it (see [`make_room`]).
+static LAST_SHAPE: std::sync::Mutex<Option<([usize; 3], Precision)>> = std::sync::Mutex::new(None);
+
+/// Before a 3D solver is built on `ctx`: gives the idle buffers of the other grid shapes back to the device (`Context::trim`; a solver of the same shape as the last one finds its
+/// buffers in the pool and keeps them: a table rebuilds its solver for every node) and refuses a grid that the device cannot hold ([`bowshock_cfd::gpu::device_bytes3`]
+/// against the context's budget less what the solvers still alive hold), with the error "grid of N cells needs ~X GiB, device budget Y GiB" instead of a failed allocation.
+fn make_room(ctx: &luma::Context, host: &Solver3, prec: Precision) -> Result<(), Error> {
+    let shape = ([host.grid.ni, host.grid.nj, host.grid.nk], prec);
+    let changed = LAST_SHAPE.lock().map_err(|_| Error::Internal("the shape of the last GPU solver is poisoned".into()))?.replace(shape) != Some(shape);
+    if changed {
+        ctx.trim()?;
+    }
+    let cells = host.grid.ni * host.grid.nj * host.grid.nk;
+    let sub_iters = match host.cfg.scheme {
+        Scheme3::Implicit(p) => p.sub_iters,
+        Scheme3::Explicit => 0,
+    };
+    if std::env::var_os("BOWSHOCK_GPU_MEM_GUARD").is_some_and(|v| v == "off") {
+        return Ok(());
+    }
+    let need = bowshock_cfd::gpu::device_bytes3(cells, prec, sub_iters, host.rans().is_some());
+    let m = ctx.memory_stats();
+    fits(cells, need, m.resident_bytes, m.budget_bytes)
+}
+
+/// `Err` ("grid of N cells needs ~X GiB, device budget Y GiB") when `need` bytes do not fit in the `budget` (`None`: no limit) less the `resident` bytes already held.
+fn fits(cells: usize, need: u64, resident: u64, budget: Option<u64>) -> Result<(), Error> {
+    let gib = |b: u64| b as f64 / f64::from(1u32 << 30);
+    match budget {
+        Some(budget) if need.saturating_add(resident) > budget => Err(Error::Gpu(format!(
+            "grid of {cells} cells needs ~{:.1} GiB, device budget {:.1} GiB{}",
+            gib(need),
+            gib(budget),
+            if resident > 0 { format!(" ({:.1} GiB already held)", gib(resident)) } else { String::new() }
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// GPU solver plus the host solver (grid and config) of one 3D case.
 pub struct GpuRunner3 {
     pub gpu: GpuSolver3,
@@ -54,6 +93,7 @@ impl GpuRunner3 {
         if ctx.is_cpu() {
             return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
         }
+        make_room(&ctx, &host, prec)?;
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
         let upload_seconds = t1.elapsed().as_secs_f64();
@@ -283,7 +323,7 @@ impl GpuRunner3 {
         let mut done = 0usize;
         let mut stop: Option<usize> = None;
         // the CFL controller by rollback ([`CflControl`], DESIGN3D "A CFL controller by rollback"): the stable CFL differs by case and a fixed cap leaves a factor of two to five on the table.
-        // The state after every good chunk is kept (two of them: the device buffers are shared, nothing is copied); a chunk with a residual that is not finite or above
+        // The state after every good chunk is kept, downloaded to host memory (`GpuSolver3::snapshot`: nothing of it stays on the device); a chunk with a residual that is not finite or above
         // `ROLLBACK_RESIDUAL`, or a non-finite force monitor, is not fed to the stop rule: the run returns to the last snapshot (to the one before it when the failure follows a
         // restore), `cfl_max` is multiplied by `CFL_BACKOFF` and the chunk is run again. The cap only goes down; the converged state does not depend on it. The CFL in force is
         // tracked on the host (the device's ramp, `cfl0 growth^k` up to the cap) and told to the stop rule, whose windows lengthen as the CFL falls below `Numerics3::cfl_ref`.

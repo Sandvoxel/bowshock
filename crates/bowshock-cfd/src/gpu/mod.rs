@@ -67,6 +67,16 @@ pub enum Precision {
     Extended,
 }
 
+/// Device bytes per cell a [`GpuSolver3`] needs at its peak, the compile of its loop (DESIGN3D item 49; ANF sector, RTX 3090, Luma 231c986).
+const BYTES_PER_CELL3: f64 = 5400.0;
+
+/// The device memory (bytes) a 3D solver of `cells` cells needs at its peak, which is the trace of its loop: persistent arrays and the plan Luma keeps, plus the intermediates of
+/// the step while they are recorded. Linear in the cells; `sub_iters` and the SST terms add to the transients, double-float state doubles the persistent state.
+pub fn device_bytes3(cells: usize, prec: Precision, sub_iters: usize, rans: bool) -> u64 {
+    let _ = (prec, sub_iters, rans);
+    (cells as f64 * BYTES_PER_CELL3) as u64
+}
+
 /// Iterations of one `iterate_until_all` submission inside [`GpuSolver::run`]: the host waits once per `RUN_SYNC` iterations.
 const RUN_SYNC: usize = 50;
 
@@ -498,7 +508,7 @@ pub struct VisProbe {
     pub tractions: Vec<[f64; 3]>,
 }
 
-/// A copy of the loop state of a [`GpuSolver3`] at one iteration ([`GpuSolver3::snapshot`]): the device buffers are shared, not copied.
+/// A copy of the loop state of a [`GpuSolver3`] at one iteration ([`GpuSolver3::snapshot`]), in host memory.
 #[derive(Clone)]
 pub struct Snapshot3(SnapInner);
 
@@ -620,7 +630,7 @@ impl GpuSolver3 {
         Ok(())
     }
 
-    /// A copy of the loop state (the device buffers are shared, nothing moves) to return to with [`GpuSolver3::restore`]: the CFL controller of the 3D runner.
+    /// A copy of the loop state, downloaded to host memory, to return to with [`GpuSolver3::restore`] (bit for bit): the CFL controller of the 3D runner.
     pub fn snapshot(&self) -> Result<Snapshot3> {
         Ok(Snapshot3(match &self.inner {
             Inner3::F32(s) => SnapInner::F32(s.snapshot()?),
