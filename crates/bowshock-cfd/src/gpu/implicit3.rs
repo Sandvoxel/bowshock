@@ -692,10 +692,9 @@ impl LazySolver3 {
         }
     }
 
-    /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))`
-    /// (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is the one-element array of the
-    /// loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`, or `2 min(L_i, L_j)`).
-    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>) -> F {
+    /// The rates `L_d` of the first `n_dirs` directions of every cell (f32): half the sum of `(|u.n| + c) S` over the two faces (the low-Mach `|u'| + c'` with `lm`), plus the
+    /// diffusive rate `diff[d]` of a viscous run.
+    fn dt_rates3(&self, wk: &V5, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>, n_dirs: usize) -> Vec<F> {
         let g = &self.lg;
         let dims = self.dims3();
         let c2 = cf(GAMMA) * &wk[4] / &wk[0];
@@ -715,10 +714,23 @@ impl LazySolver3 {
                 }
             }
         };
-        let l: Vec<F> = (0..if self.no_dt_k { 2 } else { 3 }).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)) + diff.map_or_else(|| 0.0f32 * &g.one, |d| d[dir].clone())).collect();
+        (0..n_dirs).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)) + diff.map_or_else(|| 0.0f32 * &g.one, |d| d[dir].clone())).collect()
+    }
+
+    /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`), `cfl V / (L_i + L_j + min(L_k, L_i + L_j))`
+    /// (`DtMode::SumCapK`) or `cfl V / (3 min(L_i, L_j, L_k))` (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is
+    /// the one-element array of the loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`, or `2 min(L_i, L_j)`).
+    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>) -> F {
+        let g = &self.lg;
+        let cs = (cf(GAMMA) * &wk[4] / &wk[0]).sqrt();
+        let l = self.dt_rates3(wk, diff, lm, if self.no_dt_k { 2 } else { 3 });
         let dt = match (mode, l.as_slice()) {
             (DtMode::Sum, [a, b, c]) => cfl * &g.vol / (a + b + c),
-            (DtMode::Sum, [a, b]) => cfl * &g.vol / (a + b),
+            (DtMode::SumCapK, [a, b, c]) => {
+                let ab = a + b;
+                cfl * &g.vol / (&ab + c.minimum(&ab))
+            }
+            (DtMode::Sum | DtMode::SumCapK, [a, b]) => cfl * &g.vol / (a + b),
             (DtMode::MinDirection, [a, b, c]) => cfl * &g.vol / (3.0f32 * a.minimum(b).minimum(c)),
             (DtMode::MinDirection, [a, b]) => cfl * &g.vol / (2.0f32 * a.minimum(b)),
             _ => unreachable!("two or three directions"),

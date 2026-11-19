@@ -647,7 +647,7 @@ impl LazySolver {
             None => (li, lj),
         };
         match mode {
-            DtMode::Sum => cfl * &g.area / (&li + &lj),
+            DtMode::Sum | DtMode::SumCapK => cfl * &g.area / (&li + &lj),
             DtMode::MinDirection => cfl * &g.area / (2.0f32 * li.minimum(&lj)),
         }
     }

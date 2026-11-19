@@ -39,6 +39,70 @@ fn example_fins() -> Fins3 {
     }
 }
 
+/// The `--dt-diag` report (see `main`).
+fn dt_diag(run: &GpuRunner3, cfl: f64, label: &str) -> Result<(), String> {
+    let g = &run.host.grid;
+    let l = run.gpu.dt_rates().map_err(|e| e.to_string())?;
+    let u = run.gpu.state_f64().map_err(|e| e.to_string())?;
+    let fluid = |c: usize| g.part[c] == bowshock_cfd::grid3::PART_FLUID;
+    let x_base = (0..g.xc.len()).filter(|&c| !fluid(c)).map(|c| g.xc[c][0]).fold(f64::MIN, f64::max);
+    println!("DTDIAG {label}: base plane x = {x_base:.3}, cfl {cfl}");
+    let edges = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0];
+    let regions: [(&str, Box<dyn Fn(usize) -> bool>); 3] = [
+        ("fluid", Box::new(fluid)),
+        ("wake", Box::new(|c| fluid(c) && g.xc[c][0] > x_base && g.xc[c][1].hypot(g.xc[c][2]) < 1.0)),
+        ("base-wake", Box::new(|c| fluid(c) && g.xc[c][0] > x_base && g.xc[c][0] < x_base + 2.0 && g.xc[c][1].hypot(g.xc[c][2]) < 0.5)),
+    ];
+    let pct = |v: &mut Vec<f64>, q: f64| -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[((v.len() - 1) as f64 * q).round() as usize]
+    };
+    for (name, inside) in &regions {
+        let cells: Vec<usize> = (0..g.xc.len()).filter(|&c| inside(c)).collect();
+        if cells.is_empty() {
+            continue;
+        }
+        let ratio = |c: usize| l[2][c] / (l[0][c] + l[1][c]);
+        let mut hist = vec![0usize; edges.len() + 1];
+        for &c in &cells {
+            hist[edges.iter().position(|&e| ratio(c) < e).unwrap_or(edges.len())] += 1;
+        }
+        let n = cells.len() as f64;
+        let cols: Vec<String> = hist.iter().enumerate().map(|(b, h)| format!("{}{}: {:.1}%", if b < edges.len() { "<" } else { ">=" }, edges[b.min(edges.len() - 1)], 100.0 * *h as f64 / n)).collect();
+        println!("DTDIAG {label} {name}: {} cells; L_k/(L_i+L_j) histogram {}", cells.len(), cols.join(", "));
+        let mut r: Vec<f64> = cells.iter().map(|&c| ratio(c)).collect();
+        let above = r.iter().filter(|&&x| x > 1.0).count() as f64 / n;
+        println!("DTDIAG {label} {name}: L_k/(L_i+L_j) p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}; share above 1: {:.1}%", pct(&mut r, 0.1), pct(&mut r, 0.5), pct(&mut r, 0.9), pct(&mut r, 0.99), pct(&mut r, 1.0), 100.0 * above);
+        // the step of the sum and of the capped sum (units of the solver), their ratio, and the convective CFL `dt |u_d| / h_d` (`h_d = V / mean face area of direction d`) of the sum's step
+        let dts = |c: usize| cfl * g.vol[c] / (l[0][c] + l[1][c] + l[2][c]);
+        let dtc = |c: usize| cfl * g.vol[c] / (l[0][c] + l[1][c] + l[2][c].min(l[0][c] + l[1][c]));
+        let mut gain: Vec<f64> = cells.iter().map(|&c| dtc(c) / dts(c)).collect();
+        println!("DTDIAG {label} {name}: dt_capk / dt_sum p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}", pct(&mut gain, 0.1), pct(&mut gain, 0.5), pct(&mut gain, 0.9), pct(&mut gain, 0.99), pct(&mut gain, 1.0));
+        let cc = |c: usize, dt: f64| {
+            let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
+            let q = u[c];
+            let v = [q[1] / q[0], q[2] / q[0], q[3] / q[0]];
+            let fa = [&g.iface[(k * g.nj + j) * (g.ni + 1) + i], &g.iface[(k * g.nj + j) * (g.ni + 1) + i + 1], &g.jface[(k * (g.nj + 1) + j) * g.ni + i], &g.jface[(k * (g.nj + 1) + j) * g.ni + i + g.ni], &g.kface[c], &g.kface[c + g.ni * g.nj]];
+            let mut worst = 0.0f64;
+            for d in 0..3 {
+                let (a, b) = (fa[2 * d], fa[2 * d + 1]);
+                let h = g.vol[c] / (0.5 * (a.area + b.area));
+                let un = (0..3).map(|m| v[m] * 0.5 * (a.n[m] + b.n[m])).sum::<f64>().abs();
+                worst = worst.max(dt * un / h);
+            }
+            worst
+        };
+        for (what, f) in [("sum", &dts as &dyn Fn(usize) -> f64), ("capk", &dtc as &dyn Fn(usize) -> f64)] {
+            let mut v: Vec<f64> = cells.iter().map(|&c| cc(c, f(c))).collect();
+            println!("DTDIAG {label} {name}: max-direction convective CFL dt|u|/h ({what}) p50 {:.2} p90 {:.2} p99 {:.2} max {:.2}", pct(&mut v, 0.5), pct(&mut v, 0.9), pct(&mut v, 0.99), pct(&mut v, 1.0));
+        }
+        let mut d: Vec<f64> = cells.iter().map(|&c| dts(c)).collect();
+        let mut dcap: Vec<f64> = cells.iter().map(|&c| dtc(c)).collect();
+        println!("DTDIAG {label} {name}: dt (cfl-scaled, solver units) sum p01 {:.3e} p50 {:.3e} p99 {:.3e}; capk p01 {:.3e} p50 {:.3e} p99 {:.3e}", pct(&mut d, 0.01), pct(&mut d, 0.5), pct(&mut d, 0.99), pct(&mut dcap, 0.01), pct(&mut dcap, 0.5), pct(&mut dcap, 0.99));
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
@@ -128,12 +192,13 @@ fn main() -> Result<(), String> {
     if let Some(d) = value("--dis-boost") {
         case.numerics.implicit.lhs_dis_boost = d.parse().map_err(|e| format!("--dis-boost: {e}"))?;
     }
-    // `--dt-mode sum|min`: `DtMode::Sum` (`CFL V / (L_i + L_j + L_k)`) or `DtMode::MinDirection` (`CFL V / (3 min L_d)`, the weakest direction sizes the step)
+    // `--dt-mode sum|sum-capk|min`: `DtMode::Sum` (`CFL V / (L_i + L_j + L_k)`), `DtMode::SumCapK` (`CFL V / (L_i + L_j + min(L_k, L_i + L_j))`) or `DtMode::MinDirection` (`CFL V / (3 min L_d)`, the weakest direction sizes the step)
     match value("--dt-mode").as_deref() {
         None => {}
         Some("sum") => case.numerics.implicit.dt_mode = DtMode::Sum,
         Some("min") => case.numerics.implicit.dt_mode = DtMode::MinDirection,
-        Some(other) => return Err(format!("--dt-mode sum|min, not {other}")),
+        Some("sum-capk") => case.numerics.implicit.dt_mode = DtMode::SumCapK,
+        Some(other) => return Err(format!("--dt-mode sum|sum-capk|min, not {other}")),
     }
     if let Some(c) = value("--cfl-ref") {
         case.numerics.cfl_ref = c.parse().map_err(|e| format!("--cfl-ref: {e}"))?;
@@ -289,6 +354,11 @@ fn main() -> Result<(), String> {
             p.wasted_iterations(),
             list.join("; ")
         );
+    }
+    // `--dt-diag`: the pseudo-time step's directional rates at the final state (DESIGN3D item 60): histograms of `L_k / (L_i + L_j)` and the convective CFL `dt |u| / h` of the fluid cells,
+    // of the wake (`x` behind the base plane, `r < 1` caliber) and of the base wake (2 calibers behind the base, `r < 0.5`)
+    if args.iter().any(|a| a == "--dt-diag") {
+        dt_diag(&run, case.numerics.implicit.cfl_max, &format!("{tier_name} M{mach}"))?;
     }
     if args.iter().any(|a| a == "--worst") {
         // where the field is worst (run to a `--max-iter` before the blow-up): the fluid cells of lowest pressure and density, with their indices and centroids

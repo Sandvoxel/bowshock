@@ -276,6 +276,24 @@ impl LazySolver3 {
         self.wall_tractions3(&vis.fv)
     }
 
+    /// The directional rates `[L_i, L_j, L_k]` of the pseudo-time step ([`LazySolver3::dt_rates3`]: convective plus diffusive, f32 as the step sees them, the low-Mach
+    /// `|u'| + c'` of the scheme's preconditioning) of every cell of the current state, on the host (a diagnostic of the time step; solid cells hold whatever the state gives).
+    pub fn dt_rates_f64(&self) -> Result<[Vec<f64>; 3]> {
+        let Scheme3::Implicit(p) = self.cfg.scheme else {
+            return Err(luma::LumaError::Unsupported("the pseudo-time step rates belong to the implicit scheme".into()));
+        };
+        let r = self.residual_at_state3(false)?;
+        let wf = Self::lhs_rec3(&r.w);
+        let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
+        let diff: Option<[F; 3]> = r.vis.as_ref().map(|vis| {
+            let d = self.diffusion_rates3(&vis.cell, &vis.mu_t, &r.p[0]);
+            std::array::from_fn(|k| lhs(&d[k]))
+        });
+        let lm = LmGpu3::of(&p, &self.cfg.freestream);
+        let l = self.dt_rates3(&wk, diff.as_ref(), lm.as_ref(), 3);
+        Ok([to_f64(&from_lhs(&l[0]))?, to_f64(&from_lhs(&l[1]))?, to_f64(&from_lhs(&l[2]))?])
+    }
+
     /// One residual evaluation of the current loop state (its eddy viscosity included).
     fn residual_at_state3(&self, compute_dt: bool) -> Result<Resid3> {
         let u = unpack3(self.state.as_ref().ok_or_else(no_state)?);

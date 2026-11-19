@@ -356,7 +356,7 @@ impl Solver3 {
     }
 
     /// Local pseudo-time step into `self.dt` from the primitives of the last residual evaluation:
-    /// `CFL V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `CFL V / (3 min L_d)`; `L_d = (lam(lo) + lam(hi)) / 2`,
+    /// `CFL V / (L_i + L_j + L_k)` (`DtMode::Sum`), `CFL V / (L_i + L_j + min(L_k, L_i + L_j))` (`DtMode::SumCapK`) or `CFL V / (3 min L_d)`; `L_d = (lam(lo) + lam(hi)) / 2`,
     /// `lam(f) = (|u.n| + c) area`. Zero in solid cells. In the axis cells of a wedge at most [`WEDGE_AXIS_DT`]` r_c / c`.
     pub(crate) fn compute_dt(&mut self, cfl: f64, mode: DtMode) {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
@@ -391,6 +391,7 @@ impl Solver3 {
                     }
                     let dtc = match mode {
                         DtMode::Sum => cfl * grid.vol[c] / (li + lj + lk),
+                        DtMode::SumCapK => cfl * grid.vol[c] / (li + lj + lk.min(li + lj)),
                         DtMode::MinDirection if wedge => cfl * grid.vol[c] / (2.0 * li.min(lj)),
                         DtMode::MinDirection => cfl * grid.vol[c] / (3.0 * li.min(lj).min(lk)),
                     };
