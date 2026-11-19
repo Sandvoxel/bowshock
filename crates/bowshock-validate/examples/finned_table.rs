@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--drift-tol X] [--x-tr X] [--fin-tr F] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--grid-only] [--drift-tol X] [--x-tr X] [--fin-tr F] [--comp off|sarkar|wilcox|zeman|wilcox-shear] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -11,7 +11,7 @@
 
 use bowshock_cfd::gpu::Precision;
 use bowshock_cfd::implicit_params::DtMode;
-use bowshock_cfd::sst::WallThermal;
+use bowshock_cfd::sst::{Compressibility, WallThermal};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
 use bowshock_core::engine::gpu3::GpuRunner3;
@@ -103,6 +103,12 @@ fn main() -> Result<(), String> {
     let fin_tr = value("--fin-tr").map(|v| v.parse::<f64>().map_err(|e| format!("--fin-tr: {e}"))).transpose()?;
     if x_tr.is_some() || fin_tr.is_some() {
         case = case.with_transition(x_tr.unwrap_or(0.0), fin_tr.unwrap_or(0.0));
+    }
+    // `--comp off|sarkar|wilcox|zeman|wilcox-shear`: dilatation-dissipation compressibility correction of the SST model (`Case3::with_compressibility`, DESIGN3D item 54; default off)
+    if let Some(c) = value("--comp") {
+        case = case.with_compressibility(
+            Compressibility::parse(&c).ok_or_else(|| format!("--comp: unknown correction `{c}` (off|sarkar|wilcox|zeman|wilcox-shear)"))?,
+        );
     }
     // `--tw RATIO`: isothermal walls at `T_w = RATIO T_inf` (`Case3::with_wall_thermal`; adiabatic without)
     if let Some(t) = value("--tw") {

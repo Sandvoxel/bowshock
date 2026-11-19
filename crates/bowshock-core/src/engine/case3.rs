@@ -15,7 +15,7 @@ use bowshock_cfd::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver::{Bc, Scheme};
 use bowshock_cfd::solver3::{Config3, RansOpts3, Scheme3, Solver3};
-use bowshock_cfd::sst::{Turbulence, Viscous, WallThermal};
+use bowshock_cfd::sst::{Compressibility, Turbulence, Viscous, WallThermal};
 use bowshock_cfd::transition3::Transition;
 
 /// `cfl_max` of a wall-resolved (viscous) **3D** grid, a half domain or a sector (the wedge, one azimuthal cell, keeps `Numerics3::viscous`'s 50 below Mach 1 and 20 above): 10.
@@ -327,6 +327,8 @@ pub struct Case3 {
     /// Prescribed transition of the viscous equations ([`Case3::with_transition`]): laminar walls upstream of the given stations, turbulent downstream; `None` (default): fully
     /// turbulent from the nose tip.
     pub transition: Option<Transition>,
+    /// Dilatation-dissipation compressibility correction of the SST model ([`Case3::with_compressibility`], DESIGN3D item 54); `Off` (default): the plain model.
+    pub compressibility: Compressibility,
 }
 
 /// What the solver needs of the motor jet at the nozzle exit faces (`Wall::Jet`): the primitive state `[rho, u, v, w, p]` (axial, supersonic) and `[k, omega]`
@@ -358,6 +360,7 @@ impl Case3 {
             viscous: None,
             wall_thermal: WallThermal::Adiabatic,
             transition: None,
+            compressibility: Compressibility::Off,
         }
     }
 
@@ -514,6 +517,13 @@ impl Case3 {
         self
     }
 
+    /// This case with the compressibility correction `comp` of the SST model (`bowshock_cfd::sst::Compressibility`: Sarkar, Wilcox, Zeman, the shear-layer-only Wilcox variant). Opt-in:
+    /// `Off`, the default, leaves the model and the results unchanged.
+    pub fn with_compressibility(mut self, comp: Compressibility) -> Case3 {
+        self.compressibility = comp;
+        self
+    }
+
     /// This case sized for `tier`: the first cell of the body walls on both meridian grids for the body `y+`, the fin stack for the fin `y+` (the wall-resolved
     /// tiers; the lift tier keeps uniform azimuthal cells, `32 << level` over a half domain), the roughness of the body and of the fins carried on the grid.
     pub fn with_tier(mut self, tier: Tier) -> Case3 {
@@ -647,6 +657,7 @@ impl Case3 {
                     ks,
                     wall_thermal: self.wall_thermal,
                     transition: self.transition,
+                    compressibility: self.compressibility,
                     ..RansOpts3::default()
                 },
             );

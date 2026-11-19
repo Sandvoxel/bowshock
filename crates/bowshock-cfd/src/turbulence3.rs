@@ -101,7 +101,7 @@
 use crate::gas3::{Cons3, Prim3, GAMMA};
 use crate::grid3::Grid3;
 use crate::solver3::pidx3;
-use crate::sst::{aupoix_wall, IsoWall, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
+use crate::sst::{aupoix_wall, Compressibility, IsoWall, A1, BETA1, BETA2, BETA_STAR, GAMMA1, GAMMA2, NU_T_WALL_MAX, SIGMA_K1, SIGMA_K2, SIGMA_W1, SIGMA_W2};
 use crate::viscous3::{face_cells, face_mu_cells, face_of, face_shape, map_faces, FaceCells, FaceDirs3, Grad3, SideKind};
 use rayon::prelude::*;
 
@@ -460,6 +460,8 @@ pub struct CellIn<const N: usize> {
     pub s2: f64,
     /// Current eddy viscosity of the cell.
     pub mu_t: f64,
+    /// Squared speed of sound `gamma p / rho` of the cell (the turbulent Mach number of the compressibility correction, [`crate::sst::Compressibility`]).
+    pub a2: f64,
 }
 
 /// Blending function `F1` and the cross diffusion `X` of a cell (what the SST sources and the face `sigma` need; a model without blending returns `f1 = 1`).
@@ -509,14 +511,26 @@ pub fn strain2(g: &Grad3) -> f64 {
     2.0 * s - 2.0 / 3.0 * div * div
 }
 
-/// The Menter SST-2003 model: `[k, omega]`.
+/// The Menter SST-2003 model: `[k, omega]`, optionally with a dilatation-dissipation [`Compressibility`] correction.
 #[derive(Clone, Copy, Debug)]
 pub struct Sst {
     /// Reynolds number `rho_inf c_inf d / mu_inf` (free-stream `omega_inf = 1e-6 re_c`, the eddy-viscosity cap `1e5 / re_c`).
     pub re_c: f64,
+    /// Compressibility correction of the destruction terms (`Off`: the plain model).
+    pub comp: Compressibility,
 }
 
 impl Sst {
+    /// The plain SST model.
+    pub fn new(re_c: f64) -> Self {
+        Sst { re_c, comp: Compressibility::Off }
+    }
+
+    /// This model with the compressibility correction `comp`.
+    pub fn with_compressibility(self, comp: Compressibility) -> Self {
+        Sst { comp, ..self }
+    }
+
     /// Argument pieces `(sqrt(k) / (beta* omega d), 500 nu / (d^2 omega))` of the blending functions.
     #[inline]
     fn args(nu: f64, k: f64, om: f64, d: f64) -> (f64, f64) {
@@ -553,9 +567,17 @@ impl TurbModel<2> for Sst {
         let prod = (c.mu_t * c.s2).min(10.0 * BETA_STAR * c.rho * k * om);
         let beta = b.f1 * BETA1 + (1.0 - b.f1) * BETA2;
         let gamma = b.f1 * GAMMA1 + (1.0 - b.f1) * GAMMA2;
+        // dilatation dissipation (`Compressibility`): beta*_c = beta* (1 + xi F), beta_c = beta - beta* xi F; the identity for `Off`
+        let (beta_star, beta) = if self.comp == Compressibility::Off {
+            (BETA_STAR, beta)
+        } else {
+            let mt2 = 2.0 * k / c.a2 * if self.comp.masks_wall_layer() { 1.0 - b.f1 } else { 1.0 };
+            let xf = self.comp.xi_f(mt2);
+            (BETA_STAR * (1.0 + xf), (beta - BETA_STAR * xf).max(0.0))
+        };
         (
-            [prod - BETA_STAR * c.rho * om * k, gamma * c.rho * prod / c.mu_t.max(1e-30) - beta * c.rho * om * om + (1.0 - b.f1) * b.x],
-            [BETA_STAR * om, 2.0 * beta * om],
+            [prod - beta_star * c.rho * om * k, gamma * c.rho * prod / c.mu_t.max(1e-30) - beta * c.rho * om * om + (1.0 - b.f1) * b.x],
+            [beta_star * om, 2.0 * beta * om],
         )
     }
 
@@ -693,7 +715,7 @@ impl<const N: usize> TurbIn<'_, N> {
             }
             None => strain2(&self.grad[c]),
         };
-        CellIn { rho: w[0], nu, d: self.dwall[c], phi, grad, s2, mu_t: self.mu_t[c] }
+        CellIn { rho: w[0], nu, d: self.dwall[c], phi, grad, s2, mu_t: self.mu_t[c], a2: GAMMA * w[4] / w[0] }
     }
 
     /// Is the cell `c` turbulent (`gamma >= 1/2`; every cell without a prescribed field)?
@@ -1049,7 +1071,7 @@ pub fn update<M: TurbModel<N>, const N: usize>(cx: &TurbIn<N>, model: &M) -> Upd
 pub fn init<M: TurbModel<N>, const N: usize>(model: &M, solid: &[bool], rho: impl Fn(usize) -> f64 + Sync) -> (Vec<[f64; N]>, Vec<f64>) {
     let inf = model.inf();
     let turb = vec![inf; solid.len()];
-    let cell = |c: usize| CellIn { rho: rho(c), nu: 0.0, d: f64::INFINITY, phi: inf, grad: [[0.0; 3]; N], s2: 0.0, mu_t: 0.0 };
+    let cell = |c: usize| CellIn { rho: rho(c), nu: 0.0, d: f64::INFINITY, phi: inf, grad: [[0.0; 3]; N], s2: 0.0, mu_t: 0.0, a2: 1.0 };
     let mu_t: Vec<f64> = (0..solid.len()).map(|c| if solid[c] { 0.0 } else { model.eddy_viscosity(&cell(c)) }).collect();
     (turb, mu_t)
 }
@@ -1145,7 +1167,7 @@ mod tests {
                 });
                 v
             });
-            let model = Sst { re_c };
+            let model = Sst::new(re_c);
             let mu_t = mu_t.unwrap_or_else(|| {
                 (0..nc)
                     .map(|c| {
@@ -1155,7 +1177,7 @@ mod tests {
                         let rho = w
                             [pidx3(grid.ni, grid.nj, grid.nk, (c % grid.ni) as isize, ((c / grid.ni) % grid.nj) as isize, (c / (grid.ni * grid.nj)) as isize)]
                             [0];
-                        model.eddy_viscosity(&CellIn { rho, nu: mu[c] / rho, d: dwall[c], phi: turb[c], grad: [[0.0; 3]; 2], s2: strain2(&grad[c]), mu_t: 0.0 })
+                        model.eddy_viscosity(&CellIn { rho, nu: mu[c] / rho, d: dwall[c], phi: turb[c], grad: [[0.0; 3]; 2], s2: strain2(&grad[c]), mu_t: 0.0, a2: 1.0 })
                     })
                     .collect()
             });
@@ -1230,7 +1252,7 @@ mod tests {
     /// buffer / log layer (`y+ >= 8`), `omega` never touched.
     #[test]
     fn k_cap_of_the_wall_cell() {
-        let sst = Sst { re_c: 2.5e7 };
+        let sst = Sst::new(2.5e7);
         let (u_tau, nu) = (0.01, 4.0e-8);
         let k_big = 31.0 * u_tau * u_tau;
         assert!((sst.wall_cell(0, k_big, 0.5, u_tau, nu) / k_big - 1.0).abs() < 1e-6);
@@ -1531,7 +1553,7 @@ mod tests {
     /// the `rho k / omega` of the new scalars.
     #[test]
     fn free_stream_has_no_transport_residual_and_stays_uniform() {
-        let model = Sst { re_c: SST_RE };
+        let model = Sst::new(SST_RE);
         let g = box_grid([7, 6, 5], [0.1, 0.12, 0.09]);
         let nc = 7 * 6 * 5;
         let cells = vec![[1.1, 0.8, 0.1, -0.05, 0.9]; nc];
@@ -1546,7 +1568,7 @@ mod tests {
         for t in &terms {
             // sources of the free stream: no production (S = 0), decay -beta* rho omega k and -beta rho omega^2 (F1 = 0: the cells have no wall: beta2 / (1 - F1) X = 0)
             let (src, _) = model.terms(
-                &CellIn { rho, nu: 0.0, d: f64::INFINITY, phi: inf, grad: [[0.0; 3]; 2], s2: 0.0, mu_t: rho * inf[0] / inf[1] },
+                &CellIn { rho, nu: 0.0, d: f64::INFINITY, phi: inf, grad: [[0.0; 3]; 2], s2: 0.0, mu_t: rho * inf[0] / inf[1], a2: 1.0 },
                 &Blend { f1: 0.0, x: 0.0 },
             );
             for e in 0..2 {
@@ -1585,7 +1607,7 @@ mod tests {
                 turb,
                 SST_RE,
             );
-            let model = Sst { re_c: SST_RE };
+            let model = Sst::new(SST_RE);
             let cx = case.input();
             let a = update(&cx, &model);
             let b = update(&cx, &model);
@@ -1615,7 +1637,7 @@ mod tests {
     fn update_is_invariant_under_rotations_and_mirror_images() {
         let mut rng = Rng::new(5);
         let (nodes, n, cells, turb, ksv) = random_case(&mut rng, 5e-4);
-        let model = Sst { re_c: SST_RE };
+        let model = Sst::new(SST_RE);
         let bc = [ScalarBc::Inf, ScalarBc::Cell, ScalarBc::Cell, ScalarBc::Inf, ScalarBc::Inf, ScalarBc::Cell];
         let base = Case::new(grid_with_solid(&nodes, n), &cells, [false; 6], bc, &ksv, 0.3, turb.clone(), SST_RE);
         let a = update(&base.input(), &model);
@@ -1777,7 +1799,7 @@ mod tests {
                     }
                 }
             }
-            let up = update(&case.input(), &Sst { re_c: SST_RE });
+            let up = update(&case.input(), &Sst::new(SST_RE));
             // ---- compare
             let keep: Vec<bool> = (0..nc)
                 .map(|c| {
@@ -1879,7 +1901,7 @@ mod tests {
             })
             .collect();
         let w = padded(&g, &solid, &cells);
-        let model = Sst { re_c };
+        let model = Sst::new(re_c);
         let t = Instant::now();
         let dirs = face_dirs(&g, &solid, &[false; 6]);
         let t_dirs = t.elapsed();
@@ -2063,7 +2085,7 @@ mod tests {
     }
 
     fn two(c: &CellIn<3>) -> CellIn<2> {
-        CellIn { rho: c.rho, nu: c.nu, d: c.d, phi: [c.phi[0], c.phi[1]], grad: [c.grad[0], c.grad[1]], s2: c.s2, mu_t: c.mu_t }
+        CellIn { rho: c.rho, nu: c.nu, d: c.d, phi: [c.phi[0], c.phi[1]], grad: [c.grad[0], c.grad[1]], s2: c.s2, mu_t: c.mu_t, a2: c.a2 }
     }
 
     #[test]
@@ -2080,7 +2102,7 @@ mod tests {
             turb.clone(),
             SST_RE,
         );
-        let model2 = Sst { re_c: SST_RE };
+        let model2 = Sst::new(SST_RE);
         let model3 = WithPassive(model2);
         let a = update(&case.input(), &model2);
         let turb3: Vec<[f64; 3]> = turb.iter().enumerate().map(|(c, t)| [t[0], t[1], if case.solid[c] { 0.0 } else { 0.3 }]).collect();
@@ -2121,5 +2143,52 @@ mod tests {
                 b.turb[c][2]
             );
         }
+    }
+
+    /// The compressibility corrections ([`Compressibility`]) multiply the destruction of `k` by `1 + xi F` and lower the `omega` coefficient by `beta* xi F`; `Off` and every variant
+    /// below its threshold (`M_t < 1/4` Wilcox) are the plain model bit for bit; the shear-layer variant is plain where `F1 = 1`.
+    #[test]
+    fn compressibility_corrections_change_the_destruction_above_their_threshold() {
+        let plain = Sst::new(SST_RE);
+        let (rho, om, a2) = (1.1, 40.0, 1.5);
+        let cell = |mt2: f64| CellIn { rho, nu: 1e-3, d: 0.1, phi: [0.5 * mt2 * a2, om], grad: [[0.0; 3]; 2], s2: 0.0, mu_t: 1e-3, a2 };
+        let terms = |m: &Sst, mt2: f64, f1: f64| m.terms(&cell(mt2), &Blend { f1, x: 0.3 });
+        for comp in [Compressibility::Off, Compressibility::Sarkar, Compressibility::Wilcox, Compressibility::Zeman, Compressibility::WilcoxShear] {
+            let m = plain.with_compressibility(comp);
+            for f1 in [0.0, 0.4, 1.0] {
+                for mt2 in [1e-4, 0.04] {
+                    // (Sarkar acts at any M_t: its ratio is checked below)
+                    if comp == Compressibility::Sarkar {
+                        continue;
+                    }
+                    assert_eq!(terms(&m, mt2, f1), terms(&plain, mt2, f1), "{comp:?} below its threshold, F1 {f1}");
+                }
+            }
+        }
+        for (comp, mt2) in [(Compressibility::Sarkar, 0.3), (Compressibility::Wilcox, 0.5), (Compressibility::Zeman, 0.9), (Compressibility::WilcoxShear, 1.2)] {
+            let f1 = 0.0;
+            let k = 0.5 * mt2 * a2;
+            let xf = comp.xi_f(mt2);
+            assert!(xf > 0.0);
+            let ((src0, d0), (src1, d1)) = (terms(&plain, mt2, f1), terms(&plain.with_compressibility(comp), mt2, f1));
+            let beta = BETA2;
+            // k: destruction beta* (1 + xf) rho omega k; omega: beta - beta* xf
+            assert!((d1[0] / d0[0] - (1.0 + xf)).abs() < 1e-14, "{comp:?}: D_k ratio {}", d1[0] / d0[0]);
+            assert!(((src0[0] - src1[0]) - BETA_STAR * xf * rho * om * k).abs() < 1e-12 * src0[0].abs().max(1.0), "{comp:?}: k source");
+            assert!((d1[1] - 2.0 * (beta - BETA_STAR * xf).max(0.0) * om).abs() < 1e-14 * d0[1], "{comp:?}: D_omega");
+            assert!((src1[1] - src0[1] - (beta - (beta - BETA_STAR * xf).max(0.0)) * rho * om * om).abs() < 1e-10 * src0[1].abs().max(1.0), "{comp:?}: omega source");
+        }
+        // the closed forms of F: Sarkar M_t^2, Wilcox M_t^2 - 1/16, Zeman 1 - exp(-1) at M_t = M_t0 + Lambda
+        assert!((Compressibility::Sarkar.xi_f(0.3) - 0.3).abs() < 1e-15);
+        assert!((Compressibility::Wilcox.xi_f(0.5) - 1.5 * (0.5 - 0.0625)).abs() < 1e-15);
+        let mt = crate::sst::MT0_ZEMAN + crate::sst::LAMBDA_ZEMAN;
+        assert!((Compressibility::Zeman.xi_f(mt * mt) - 0.75 * (1.0 - (-1.0f64).exp())).abs() < 1e-14);
+        // the shear-layer variant: plain in a wall layer (F1 = 1), the Wilcox correction in the free shear layer (F1 = 0)
+        let shear = plain.with_compressibility(Compressibility::WilcoxShear);
+        assert_eq!(terms(&shear, 1.2, 1.0), terms(&plain, 1.2, 1.0));
+        assert_eq!(terms(&shear, 1.2, 0.0), terms(&plain.with_compressibility(Compressibility::Wilcox), 1.2, 0.0));
+        // beta_c never goes negative (the omega destruction stays a destruction at large M_t)
+        let (_, d) = terms(&plain.with_compressibility(Compressibility::Wilcox), 9.0, 1.0);
+        assert!(d[1] >= 0.0);
     }
 }

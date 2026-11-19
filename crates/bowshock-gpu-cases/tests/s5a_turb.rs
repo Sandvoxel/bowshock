@@ -10,7 +10,7 @@ use bowshock_cfd::gpu::Staging;
 use bowshock_cfd::grid3::{Grid3, Part, SolidBox, Symmetry, PART_FLUID};
 use bowshock_cfd::implicit_params::ImplicitParams;
 use bowshock_cfd::solver3::{Config3, Scheme3};
-use bowshock_cfd::sst::{IsoWall, Turbulence, Viscous, WallThermal};
+use bowshock_cfd::sst::{Compressibility, IsoWall, Turbulence, Viscous, WallThermal};
 use bowshock_cfd::turbulence3::{self as t3, Blend, CellIn, CellTerms, ScalarBc, ScalarSides, Sst, TFace, TurbIn, TurbModel, Update};
 use bowshock_cfd::viscous3::{self as v3, face_dirs, face_of, face_shape, face_sides3, Grad3, SymSides};
 use bowshock_cfd::walldist3::{wall_distance3, wall_faces};
@@ -162,6 +162,8 @@ struct Case {
     turb: Vec<[f64; 2]>,
     re_c: f64,
     iso: Option<IsoWall>,
+    /// The dilatation-dissipation correction of the model under test.
+    comp: Compressibility,
 }
 
 /// How the speed of the first cell row above the solid row `j = 0` is set: random, or a sweep of the `y+` of the wall cells over `i` (0.1 to 300).
@@ -211,7 +213,7 @@ impl Case {
         let solid: Vec<bool> = grid.part.iter().map(|&p| p != PART_FLUID).collect();
         let visc = Viscous { re_c, sutherland: 0.368, turbulence: Turbulence::Sst, wall_i_start: 0, roughness: 0.0 };
         let iso = thermal.iso(&visc);
-        let model = Sst { re_c };
+        let model = Sst::new(re_c);
         let mut cells: Vec<Prim3> =
             (0..nc).map(|_| [rng.range(0.8, 1.2), rng.range(-0.3, 0.9), rng.range(-0.3, 0.3), rng.range(-0.3, 0.3), rng.range(0.6, 1.1)]).collect();
         let dirs = face_dirs(&grid, &solid, &sym);
@@ -268,7 +270,7 @@ impl Case {
                     return 0.0;
                 }
                 let rho = rho_of(c);
-                model.eddy_viscosity(&CellIn { rho, nu: mu[c] / rho, d: dwall[c], phi: turb[c], grad: [[0.0; 3]; 2], s2: t3::strain2(&grad[c]), mu_t: 0.0 })
+                model.eddy_viscosity(&CellIn { rho, nu: mu[c] / rho, d: dwall[c], phi: turb[c], grad: [[0.0; 3]; 2], s2: t3::strain2(&grad[c]), mu_t: 0.0, a2: 1.0 })
             })
             .collect();
         // the mass flux of a face: the central `rho u.n` of its two sides (a far-field ghost carries the state of its cell)
@@ -323,6 +325,7 @@ impl Case {
             dt,
             turb,
             re_c,
+            comp: Compressibility::Off,
             iso,
         }
     }
@@ -351,6 +354,28 @@ impl Case {
             self.mu_t[c] *= self.gamma[c];
         }
         self.name = format!("{}, transition", self.name);
+        self
+    }
+
+    /// This case run with the compressibility correction `comp`: `k` of the fluid cells reset so that the turbulent Mach number `M_t^2 = 2 k / a^2` spans 0.01 .. 2.25 (`M_t`
+    /// 0.1 .. 1.5, geometrically over the cell index: below, around and above the Wilcox threshold 0.25) and the eddy viscosity recomputed from it.
+    fn with_compressibility(mut self, comp: Compressibility) -> Case {
+        self.comp = comp;
+        let model = Sst::new(self.re_c);
+        let nc = self.solid.len();
+        let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
+        for c in 0..nc {
+            if self.solid[c] {
+                continue;
+            }
+            let w = self.w[pidx3(ni, nj, nk, (c % ni) as isize, ((c / ni) % nj) as isize, (c / (ni * nj)) as isize)];
+            let a2 = GAMMA * w[4] / w[0];
+            let mt = 0.1 * 15f64.powf(((c * 7919) % nc) as f64 / nc as f64);
+            self.turb[c][0] = 0.5 * mt * mt * a2;
+            self.mu_t[c] =
+                model.eddy_viscosity(&CellIn { rho: w[0], nu: self.mu[c] / w[0], d: self.dwall[c], phi: self.turb[c], grad: [[0.0; 3]; 2], s2: t3::strain2(&self.grad[c]), mu_t: 0.0, a2 });
+        }
+        self.name = format!("{}, {comp:?}", self.name);
         self
     }
 
@@ -531,6 +556,24 @@ fn cases() -> Vec<Case> {
         17,
         cold,
     ));
+    // dilatation-dissipation compressibility corrections (`sst::Compressibility`): the turbulent Mach number spans 0.1 .. 1.5 over the fluid cells (`Case::with_compressibility`), so the
+    // threshold of the Wilcox forms, the quadratic Sarkar and the exponential Zeman form and the `1 - F1` mask of the shear-layer variant all act; boxes with the law of the wall and
+    // the sector (rough cells, `i` family walls) with the three corrections that differ most
+    let block = [SolidBox { i: 3..5, j: 0..3, k: 2..4 }];
+    let (s, bc) = box_sides(false);
+    for comp in [Compressibility::Sarkar, Compressibility::Wilcox, Compressibility::Zeman, Compressibility::WilcoxShear] {
+        v.push(
+            Case::new("box, Inf ghosts, law_strain", box_grid([8, 7, 6], &block, &mut Rng::new(11)), box_config(), s, bc, re_box, Flow::Random, true, true, false, 3)
+                .with_compressibility(comp),
+        );
+    }
+    for comp in [Compressibility::Wilcox, Compressibility::WilcoxShear] {
+        let c = sector_case(true, 4, 6);
+        v.push(
+            Case::new("sector N 4 (tiny)", body_grid3(&c.grid).expect("sector grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, false, false, 17)
+                .with_compressibility(comp),
+        );
+    }
     v
 }
 
@@ -546,7 +589,7 @@ struct CpuStages {
 }
 
 fn cpu_stages(case: &Case) -> CpuStages {
-    let model = Sst { re_c: case.re_c };
+    let model = Sst::new(case.re_c).with_compressibility(case.comp);
     let cx = case.input();
     let tg = t3::scalar_gradients(&cx, &model);
     let blend = t3::blends(&cx, &model, &tg);
@@ -568,7 +611,7 @@ macro_rules! gpu_probe {
         let ctx = luma::Context::new().map_err(|e| format!("context: {e}"))?;
         let mut lazy = bowshock_cfd::gpu::$module::LazySolver3::new(&ctx, &$case.grid, &$case.cfg).map_err(|e| format!("new: {e}"))?;
         lazy.staging = $staging;
-        let model = bowshock_cfd::gpu::$module::Sst3 { re_c: $case.re_c };
+        let model = bowshock_cfd::gpu::$module::Sst3::new($case.re_c).with_compressibility($case.comp);
         let p = lazy.turbulence_probe3(&model, &$case.input(), &$case.sym).map_err(|e| format!("probe: {e}"))?;
         (p.wall, p.tg, p.blend, p.faces, p.terms, p.update)
     }};
@@ -706,7 +749,7 @@ fn turbulence_kernels_match_cpu() {
         assert!(cpu.update.turb.iter().all(|t| t.iter().all(|x| x.is_finite())), "{}: the CPU update is not finite", case.name);
         if case.law_strain {
             // how many cells the law of the wall changes: the same CPU update without it
-            let model = Sst { re_c: case.re_c };
+            let model = Sst::new(case.re_c).with_compressibility(case.comp);
             let mut cx = case.input();
             cx.law_strain = false;
             let tg = t3::scalar_gradients(&cx, &model);
@@ -756,7 +799,7 @@ macro_rules! gpu_profile {
         let ctx = luma::Context::new().map_err(|e| format!("context: {e}"))?;
         let mut lazy = bowshock_cfd::gpu::$module::LazySolver3::new(&ctx, &$case.grid, &$case.cfg).map_err(|e| format!("new: {e}"))?;
         lazy.staging = $staging;
-        let model = bowshock_cfd::gpu::$module::Sst3 { re_c: $case.re_c };
+        let model = bowshock_cfd::gpu::$module::Sst3::new($case.re_c).with_compressibility($case.comp);
         lazy.turbulence_profile3(&model, &$case.input(), &$case.sym, 20).map_err(|e| format!("profile: {e}"))?
     }};
 }

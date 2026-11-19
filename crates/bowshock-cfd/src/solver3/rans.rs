@@ -59,7 +59,7 @@
 use super::Solver3;
 use crate::gas3::{Cons3, Prim3};
 use crate::grid3::Grid3;
-use crate::sst::{IsoWall, Turbulence, Viscous, WallThermal};
+use crate::sst::{Compressibility, IsoWall, Turbulence, Viscous, WallThermal};
 use crate::transition3::{gamma_field, Transition};
 use crate::turbulence3::{self, ScalarBc, ScalarSides, Sst, TurbIn};
 use crate::viscous3::{self, face_shape, FaceDirs3, Grad3, SymSides, WallTraction};
@@ -88,6 +88,9 @@ pub struct RansOpts3 {
     /// Prescribed transition (`transition3`; SST only): laminar walls upstream of the given stations, turbulent downstream. `None` (default): fully turbulent, bit-identical to a
     /// solver without the feature.
     pub transition: Option<Transition>,
+    /// Dilatation-dissipation compressibility correction of the SST model ([`Compressibility`], DESIGN3D item 54). `Off` (default): the plain model, bit-identical to a solver
+    /// without the feature.
+    pub compressibility: Compressibility,
 }
 
 impl Default for RansOpts3 {
@@ -100,6 +103,7 @@ impl Default for RansOpts3 {
             law_i_walls: false,
             wall_thermal: WallThermal::Adiabatic,
             transition: None,
+            compressibility: Compressibility::Off,
         }
     }
 }
@@ -166,7 +170,7 @@ impl Solver3 {
         };
         let nc = self.u.len();
         let sst = v.turbulence == Turbulence::Sst;
-        let model = Sst { re_c: v.re_c };
+        let model = Sst::new(v.re_c).with_compressibility(opts.compressibility);
         let dirs = viscous3::face_dirs(&self.grid, &self.solid, &opts.sym);
         let (mut turb, mut mu_t, mut dwall, mut wall) = (Vec::new(), vec![0.0; nc], Vec::new(), Vec::new());
         let mut ks = Vec::new();
