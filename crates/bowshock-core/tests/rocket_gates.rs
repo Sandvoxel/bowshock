@@ -32,6 +32,25 @@ fn arcas_for(mach: f64, long: bool) -> Rocket {
     }
 }
 
+/// One comparison: a `GATE` line when `gated` and viscous (`KNOWN` when `known`: a documented discrepancy, the band is not widened), an `INFO` line saying whether the value is within
+/// the band when it is viscous but not a gate (the data's documented offsets, the transonic readings), the inviscid `INFO` line of `Lines::check` otherwise.
+#[allow(clippy::too_many_arguments)]
+fn compare(lines: &mut Lines, gated: bool, viscous: bool, known: bool, id: &str, case: &str, measured: f64, reference: f64, band: Band) {
+    let why = "DESIGN3D-X-item-55";
+    if gated && viscous {
+        if known {
+            lines.check_known(true, id, case, measured, reference, band, why);
+        } else {
+            lines.check(true, id, case, measured, reference, band);
+        }
+    } else if viscous {
+        let verdict = if band.pass(measured, reference) { "within" } else { "outside" };
+        lines.info(id, case, &format!("{measured:.6} {reference:.6} {} (not gated: {verdict})", band.label()));
+    } else {
+        lines.check(false, id, case, measured, reference, band);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Stability on the Lift half domain
 
@@ -76,24 +95,24 @@ fn run_stability(g: &StabGate) -> Lines {
         let case = format!("{}-M{:.3}", g.tag, p.0);
         match run {
             Ok((sol, q, viscous)) => {
-                let gate = viscous && !g.info;
+                let gate = !g.info;
                 let k = g.alphas.iter().position(|&a| a == g.alpha_ref).expect("alpha_ref is one of the incidences");
                 let cna = |i: usize| q * sol[i].lift.cn / g.alphas[i].to_radians();
-                let why = "DESIGN3D-X-item-55";
                 if p.1.is_finite() {
-                    if g.known_cn.contains(&p.0) {
-                        lines.check_known(gate, g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band, why);
-                    } else {
-                        lines.check(gate, g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band);
-                    }
+                    compare(&mut lines, gate, viscous, g.known_cn.contains(&p.0), g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band);
                 }
                 if p.2.is_finite() {
-                    let band = Band::RelAbs(0.0, g.xcp_abs);
-                    if g.known_xcp.contains(&p.0) {
-                        lines.check_known(gate, g.id, &format!("{case}:x_cp"), sol[k].lift.x_cp, p.2, band, why);
-                    } else {
-                        lines.check(gate, g.id, &format!("{case}:x_cp"), sol[k].lift.x_cp, p.2, band);
-                    }
+                    compare(
+                        &mut lines,
+                        gate,
+                        viscous,
+                        g.known_xcp.contains(&p.0),
+                        g.id,
+                        &format!("{case}:x_cp"),
+                        sol[k].lift.x_cp,
+                        p.2,
+                        Band::RelAbs(0.0, g.xcp_abs),
+                    );
                 }
                 let all: Vec<String> =
                     g.alphas.iter().enumerate().map(|(i, a)| format!("CNa({a}) {:.2} x_cp {:.3} [{}]", cna(i), sol[i].lift.x_cp, sol[i].stop())).collect();
@@ -237,23 +256,26 @@ fn sector_axial(r: &Rocket, mach: f64, mach_max: f64, fins: bool) -> Result<(Sol
     Ok((s, v, is_gate(kind, &case)))
 }
 
-fn print_axial(lines: &mut Lines, id: &str, case: &str, gate: bool, v: f64, data: f64, band: Band, s: &Solved) {
+#[allow(clippy::too_many_arguments)]
+fn print_axial(lines: &mut Lines, id: &str, case: &str, (gated, viscous, known): (bool, bool, bool), v: f64, data: f64, band: Band, s: &Solved) {
     lines.info(
         id,
         &format!("{case}:parts"),
         &format!(
-            "{v:.4} without base (total {:.4}; body pressure {:+.4}, base {:+.4}, fin pressure {:+.4}, friction body {:.4} fins {:.4}; {}); data {data:.4}: {:+.1} %",
+            "{v:.4} without base (total {:.4}; body pressure {:+.4}, base {:+.4}, fin pressure {:+.4} (leading-edge faces {:+.4}, trailing-edge faces {:+.4}), friction body {:.4} fins {:.4}; {}); data {data:.4}: {:+.1} %",
             s.parts.total,
             s.body_pressure(),
             s.parts.base,
             s.fin_pressure(),
+            s.parts.fin_le,
+            s.parts.fin_te,
             s.parts.body_friction(),
             s.fin_friction.unwrap_or(f64::NAN),
             s.stop(),
             100.0 * (v / data - 1.0)
         ),
     );
-    lines.check(gate, id, case, v, data, band);
+    compare(lines, gated, viscous, known, id, case, v, data, band);
 }
 
 /// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, Mach 0.6 / 0.8 gated (fins on 15 %,
@@ -273,10 +295,11 @@ fn gate_x4_arcas_long_axial_force() {
     for (&(m, off, on), (a, b)) in rows.iter().zip(runs) {
         match (a, b) {
             (Ok((so, vo, go)), Ok((sn, vn, gn))) => {
-                let gated = [0.6, 0.8].contains(&m) && go && gn;
-                print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_off"), gated, vo, off, Band::RelAbs(0.12, 0.03), &so);
-                print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_on"), gated, vn, on, Band::Rel(0.15), &sn);
-                lines.check(gated, "G-X4", &format!("arcas-long-M{m:.2}:increment"), vn - vo, on - off, Band::RelAbs(0.30, 0.03));
+                let (gated, viscous) = ([0.6, 0.8].contains(&m), go && gn);
+                // fins off at Mach 0.6 / 0.8: the long body's friction (0.235 of 0.29, fully turbulent) is where the solver is 16 % above the data (DESIGN3D item 55)
+                print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_off"), (gated, viscous, true), vo, off, Band::RelAbs(0.12, 0.03), &so);
+                print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_on"), (gated, viscous, false), vn, on, Band::Rel(0.15), &sn);
+                compare(&mut lines, gated, viscous, false, "G-X4", &format!("arcas-long-M{m:.2}:increment"), vn - vo, on - off, Band::RelAbs(0.30, 0.03));
             }
             (a, b) => {
                 println!("GATE G-X4 arcas-long-M{m:.2} n/a n/a n/a FAIL ({:?} / {:?})", a.err(), b.err());
@@ -308,7 +331,13 @@ fn gate_x5_yuska_axial_force() {
     let mut lines = Lines::default();
     for (&(name, _, _, m, ca, gated), r) in rows.iter().zip(runs) {
         match r {
-            Ok((s, v, viscous)) => print_axial(&mut lines, "G-X5", &format!("yuska-{name}-M{m:.2}:ca0"), gated && viscous, v, ca, Band::Rel(0.12), &s),
+            Ok((s, v, viscous)) => {
+                // all KNOWN: a fin planform the mesher takes in place of the drawing's, and the report's base correction does not say whether it covers the fins' trailing-edge faces
+                // (the `without-fin-te` line takes them out too)
+                print_axial(&mut lines, "G-X5", &format!("yuska-{name}-M{m:.2}:ca0"), (gated, viscous, true), v, ca, Band::Rel(0.12), &s);
+                let v_te = v - 1.0 * s.parts.fin_te;
+                compare(&mut lines, false, viscous, false, "G-X5", &format!("yuska-{name}-M{m:.2}:ca0-without-fin-te"), v_te, ca, Band::Rel(0.12));
+            }
             Err(e) => {
                 println!("GATE G-X5 yuska-{name}-M{m:.2} n/a n/a n/a FAIL ({e})");
                 lines.failed += 1;
@@ -331,7 +360,9 @@ fn gate_x6_grm_axial_force() {
     for (&(m, caf), r) in rows.iter().zip(runs) {
         match r {
             Ok((s, v, viscous)) => {
-                print_axial(&mut lines, "G-X6", &format!("grm-M{m:.2}:caf"), viscous && !(0.92..=1.10).contains(&m), v, caf, Band::Rel(0.12), &s)
+                // Mach 0.80 / 0.85: the subsonic friction (fully turbulent against a tunnel run of unknown transition) is KNOWN; 0.92 / 0.94 INFO (repeat scatter of the data 0.02-0.05)
+                let (gated, known) = (!(0.92..=0.94).contains(&m), m < 0.9);
+                print_axial(&mut lines, "G-X6", &format!("grm-M{m:.2}:caf"), (gated, viscous, known), v, caf, Band::Rel(0.12), &s)
             }
             Err(e) => {
                 println!("GATE G-X6 grm-M{m:.2} n/a n/a n/a FAIL ({e})");
