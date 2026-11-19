@@ -270,7 +270,16 @@ impl Case {
                     return 0.0;
                 }
                 let rho = rho_of(c);
-                model.eddy_viscosity(&CellIn { rho, nu: mu[c] / rho, d: dwall[c], phi: turb[c], grad: [[0.0; 3]; 2], s2: t3::strain2(&grad[c]), mu_t: 0.0, a2: 1.0 })
+                model.eddy_viscosity(&CellIn {
+                    rho,
+                    nu: mu[c] / rho,
+                    d: dwall[c],
+                    phi: turb[c],
+                    grad: [[0.0; 3]; 2],
+                    s2: t3::strain2(&grad[c]),
+                    mu_t: 0.0,
+                    a2: 1.0,
+                })
             })
             .collect();
         // the mass flux of a face: the central `rho u.n` of its two sides (a far-field ghost carries the state of its cell)
@@ -372,8 +381,16 @@ impl Case {
             let a2 = GAMMA * w[4] / w[0];
             let mt = 0.1 * 15f64.powf(((c * 7919) % nc) as f64 / nc as f64);
             self.turb[c][0] = 0.5 * mt * mt * a2;
-            self.mu_t[c] =
-                model.eddy_viscosity(&CellIn { rho: w[0], nu: self.mu[c] / w[0], d: self.dwall[c], phi: self.turb[c], grad: [[0.0; 3]; 2], s2: t3::strain2(&self.grad[c]), mu_t: 0.0, a2 });
+            self.mu_t[c] = model.eddy_viscosity(&CellIn {
+                rho: w[0],
+                nu: self.mu[c] / w[0],
+                d: self.dwall[c],
+                phi: self.turb[c],
+                grad: [[0.0; 3]; 2],
+                s2: t3::strain2(&self.grad[c]),
+                mu_t: 0.0,
+                a2,
+            });
         }
         self.name = format!("{}, {comp:?}", self.name);
         self
@@ -563,15 +580,39 @@ fn cases() -> Vec<Case> {
     let (s, bc) = box_sides(false);
     for comp in [Compressibility::Sarkar, Compressibility::Wilcox, Compressibility::Zeman, Compressibility::WilcoxShear] {
         v.push(
-            Case::new("box, Inf ghosts, law_strain", box_grid([8, 7, 6], &block, &mut Rng::new(11)), box_config(), s, bc, re_box, Flow::Random, true, true, false, 3)
-                .with_compressibility(comp),
+            Case::new(
+                "box, Inf ghosts, law_strain",
+                box_grid([8, 7, 6], &block, &mut Rng::new(11)),
+                box_config(),
+                s,
+                bc,
+                re_box,
+                Flow::Random,
+                true,
+                true,
+                false,
+                3,
+            )
+            .with_compressibility(comp),
         );
     }
     for comp in [Compressibility::Wilcox, Compressibility::WilcoxShear] {
         let c = sector_case(true, 4, 6);
         v.push(
-            Case::new("sector N 4 (tiny)", body_grid3(&c.grid).expect("sector grid"), config(&c), wedge_sym, wedge_bc, 2.0e5, Flow::Random, true, false, false, 17)
-                .with_compressibility(comp),
+            Case::new(
+                "sector N 4 (tiny)",
+                body_grid3(&c.grid).expect("sector grid"),
+                config(&c),
+                wedge_sym,
+                wedge_bc,
+                2.0e5,
+                Flow::Random,
+                true,
+                false,
+                false,
+                17,
+            )
+            .with_compressibility(comp),
         );
     }
     v

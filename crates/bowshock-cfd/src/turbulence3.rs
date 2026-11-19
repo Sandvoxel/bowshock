@@ -1177,7 +1177,16 @@ mod tests {
                         let rho = w
                             [pidx3(grid.ni, grid.nj, grid.nk, (c % grid.ni) as isize, ((c / grid.ni) % grid.nj) as isize, (c / (grid.ni * grid.nj)) as isize)]
                             [0];
-                        model.eddy_viscosity(&CellIn { rho, nu: mu[c] / rho, d: dwall[c], phi: turb[c], grad: [[0.0; 3]; 2], s2: strain2(&grad[c]), mu_t: 0.0, a2: 1.0 })
+                        model.eddy_viscosity(&CellIn {
+                            rho,
+                            nu: mu[c] / rho,
+                            d: dwall[c],
+                            phi: turb[c],
+                            grad: [[0.0; 3]; 2],
+                            s2: strain2(&grad[c]),
+                            mu_t: 0.0,
+                            a2: 1.0,
+                        })
                     })
                     .collect()
             });
@@ -2165,7 +2174,8 @@ mod tests {
                 }
             }
         }
-        for (comp, mt2) in [(Compressibility::Sarkar, 0.3), (Compressibility::Wilcox, 0.5), (Compressibility::Zeman, 0.9), (Compressibility::WilcoxShear, 1.2)] {
+        for (comp, mt2) in [(Compressibility::Sarkar, 0.3), (Compressibility::Wilcox, 0.5), (Compressibility::Zeman, 0.9), (Compressibility::WilcoxShear, 1.2)]
+        {
             let f1 = 0.0;
             let k = 0.5 * mt2 * a2;
             let xf = comp.xi_f(mt2);
@@ -2176,7 +2186,10 @@ mod tests {
             assert!((d1[0] / d0[0] - (1.0 + xf)).abs() < 1e-14, "{comp:?}: D_k ratio {}", d1[0] / d0[0]);
             assert!(((src0[0] - src1[0]) - BETA_STAR * xf * rho * om * k).abs() < 1e-12 * src0[0].abs().max(1.0), "{comp:?}: k source");
             assert!((d1[1] - 2.0 * (beta - BETA_STAR * xf).max(0.0) * om).abs() < 1e-14 * d0[1], "{comp:?}: D_omega");
-            assert!((src1[1] - src0[1] - (beta - (beta - BETA_STAR * xf).max(0.0)) * rho * om * om).abs() < 1e-10 * src0[1].abs().max(1.0), "{comp:?}: omega source");
+            assert!(
+                (src1[1] - src0[1] - (beta - (beta - BETA_STAR * xf).max(0.0)) * rho * om * om).abs() < 1e-10 * src0[1].abs().max(1.0),
+                "{comp:?}: omega source"
+            );
         }
         // the closed forms of F: Sarkar M_t^2, Wilcox M_t^2 - 1/16, Zeman 1 - exp(-1) at M_t = M_t0 + Lambda
         assert!((Compressibility::Sarkar.xi_f(0.3) - 0.3).abs() < 1e-15);
