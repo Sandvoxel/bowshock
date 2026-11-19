@@ -29,7 +29,7 @@ static LAST_SHAPE: std::sync::Mutex<Option<([usize; 3], Precision)>> = std::sync
 fn make_room(ctx: &luma::Context, host: &Solver3, prec: Precision) -> Result<(), Error> {
     let shape = ([host.grid.ni, host.grid.nj, host.grid.nk], prec);
     let changed = LAST_SHAPE.lock().map_err(|_| Error::Internal("the shape of the last GPU solver is poisoned".into()))?.replace(shape) != Some(shape);
-    if changed {
+    if changed && std::env::var_os("BWTRIM_NOSHAPE").is_none() {
         ctx.trim()?;
     }
     let cells = host.grid.ni * host.grid.nj * host.grid.nk;

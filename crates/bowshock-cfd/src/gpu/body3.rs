@@ -1337,7 +1337,7 @@ impl LazySolver3 {
             if self.compiled.as_ref().is_none_or(|c| c.key != key || c.max < seg) {
                 // the plan being replaced is given back before the new trace (Luma frees its exact-size buffers only when the device is idle: left to the trace it adds its
                 // 1.1 GiB per 688k cells to the trace's 2.5), and the trace's spare buffers after it (the pool keeps them, 1.1 GiB idle per plan): `Context::trim`, DESIGN3D item 49
-                if self.compiled.take().is_some() {
+                if self.compiled.take().is_some() && std::env::var_os("BWTRIM_NOPRE").is_none() {
                     self.ctx.trim()?;
                 }
                 let init = self.state.as_ref().ok_or_else(no_state)?;
@@ -1346,7 +1346,9 @@ impl LazySolver3 {
                     Err(luma::LumaError::Unsupported(_)) => {}
                     Err(e) => return Err(e),
                 }
-                self.ctx.trim()?;
+                if std::env::var_os("BWTRIM_NOPOST").is_none() {
+                    self.ctx.trim()?;
+                }
             }
             let init = self.state.take().ok_or_else(no_state)?;
             let run = match &mut self.compiled {
