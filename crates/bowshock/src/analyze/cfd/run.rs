@@ -481,25 +481,6 @@ fn draft_first_rule(three_d: bool, opted_out: bool, grid: CfdGrid, verdict: &Sta
     three_d && !opted_out && grid == CfdGrid::Coarse && matches!(verdict, Status::Missing | Status::Stale)
 }
 
-#[cfg(test)]
-mod draft_first_tests {
-    use super::*;
-
-    /// Only a coarse solve on the 3D engine with nothing fresh on screen goes through the draft grid; Quick, Refine, a fresh table, the legacy engine and the opt-out do not.
-    #[test]
-    fn only_a_coarse_solve_with_no_fresh_table_goes_through_the_draft_grid() {
-        let rule = |three_d, off, grid, verdict: Status| draft_first_rule(three_d, off, grid, &verdict);
-        assert!(rule(true, false, CfdGrid::Coarse, Status::Missing));
-        assert!(rule(true, false, CfdGrid::Coarse, Status::Stale));
-        assert!(!rule(true, false, CfdGrid::Coarse, Status::Fresh));
-        assert!(!rule(true, false, CfdGrid::Draft, Status::Missing));
-        assert!(!rule(true, false, CfdGrid::Medium, Status::Missing));
-        assert!(!rule(false, false, CfdGrid::Coarse, Status::Missing));
-        assert!(!rule(true, true, CfdGrid::Coarse, Status::Missing));
-        assert!(!rule(true, false, CfdGrid::Coarse, Status::Unsupported("x".into())));
-    }
-}
-
 /// What a node needs solved.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum NodeKind {
@@ -784,4 +765,23 @@ pub(super) fn solve_sized(
         table.notes.extend(stability_notes);
     }
     Ok(table)
+}
+
+#[cfg(test)]
+mod draft_first_tests {
+    use super::*;
+
+    /// Only a coarse solve on the 3D engine with nothing fresh on screen goes through the draft grid; Quick, Refine, a fresh table, the legacy engine and the opt-out do not.
+    #[test]
+    fn only_a_coarse_solve_with_no_fresh_table_goes_through_the_draft_grid() {
+        let rule = |three_d, off, grid, verdict: Status| draft_first_rule(three_d, off, grid, &verdict);
+        assert!(rule(true, false, CfdGrid::Coarse, Status::Missing));
+        assert!(rule(true, false, CfdGrid::Coarse, Status::Stale));
+        assert!(!rule(true, false, CfdGrid::Coarse, Status::Fresh));
+        assert!(!rule(true, false, CfdGrid::Draft, Status::Missing));
+        assert!(!rule(true, false, CfdGrid::Medium, Status::Missing));
+        assert!(!rule(false, false, CfdGrid::Coarse, Status::Missing));
+        assert!(!rule(true, true, CfdGrid::Coarse, Status::Missing));
+        assert!(!rule(true, false, CfdGrid::Coarse, Status::Unsupported("x".into())));
+    }
 }

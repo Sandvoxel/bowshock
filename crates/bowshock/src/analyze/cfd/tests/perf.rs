@@ -109,12 +109,7 @@ fn perf_3d_lift_example() {
         grid: CfdGrid::Coarse,
         compute: Default::default(),
         cpu_only: false,
-        // as the app: the draft grid solves the drag alone; `BOWSHOCK_NO_ANGLES` leaves the angles out of a coarse solve (the drag table alone)
-        stability: if std::env::var_os("BOWSHOCK_NO_ANGLES").is_some() || std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") {
-            Vec::new()
-        } else {
-            lift_nodes((0.1, 3.0)).unwrap()
-        },
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
     };
     let _ = solver::engine::timing::take_timings();
     let t0 = Instant::now();
@@ -354,15 +349,23 @@ fn engine3d_finned_timing() {
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     assert!(plan.fins.is_some());
     let shared = std::env::var("BOWSHOCK_SHARED_GRID").is_ok();
+    // `BOWSHOCK_MACHS=3.0` (a comma list): these Mach numbers instead of the table's, for the drag and for the angles (one node of each: the biggest grids, in a minute)
+    let machs: Option<Vec<f64>> = std::env::var("BOWSHOCK_MACHS").ok().map(|v| v.split(',').filter_map(|m| m.trim().parse().ok()).collect());
+    let draft = std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft");
     let job = Job {
         plan,
         altitude: 120.0,
-        nodes: nodes((0.1, 3.0)).unwrap(),
+        nodes: machs.clone().unwrap_or_else(|| nodes((0.1, 3.0)).unwrap()),
         stage: 1,
-        grid: if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse },
+        grid: if draft { CfdGrid::Draft } else { CfdGrid::Coarse },
         compute: Default::default(),
         cpu_only: false,
-        stability: lift_nodes((0.1, 3.0)).unwrap(),
+        // as the app: the draft grid solves the drag alone; `BOWSHOCK_NO_ANGLES` leaves the angles out of a coarse solve (the drag table alone)
+        stability: if draft || std::env::var_os("BOWSHOCK_NO_ANGLES").is_some() {
+            Vec::new()
+        } else {
+            machs.unwrap_or_else(|| lift_nodes((0.1, 3.0)).unwrap())
+        },
     };
     let _ = solver::engine::timing::take_timings();
     let _ = solver::take_facade_timings();
@@ -465,10 +468,17 @@ fn engine3d_draft_first() {
         cpu_only: false,
         stability: if grid == CfdGrid::Draft { Vec::new() } else { lift_nodes((0.1, 3.0)).unwrap() },
     };
+    // one `RUN` line per run of the solver (the timing model of DESIGN3D item 57 is fitted on these): pass, dimension, Mach, angle, cells, iterations executed, stop, run seconds, ms per iteration
     let solve = |grid: CfdGrid| {
+        let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
         let table = solve_sized(&job(grid), &Arc::new(AtomicBool::new(false)), |_| (), true).expect("the example solves");
-        (table, t.elapsed().as_secs_f64())
+        let wall = t.elapsed().as_secs_f64();
+        for r in solver::engine::timing::take_timings() {
+            let per_iter = if r.chunks_rest > 0 { 1000.0 * r.rest_chunks_s / (r.chunks_rest * 50) as f64 } else { f64::NAN };
+            println!("RUN {grid:?} {}D {:.2} {:.0} {} {} {} {:.2} {per_iter:.2}", r.dim, r.mach, r.alpha_deg, r.cells, r.iters_exec, r.stop, r.run_s);
+        }
+        (table, wall)
     };
     let (draft, t_draft) = solve(CfdGrid::Draft);
     println!("DRAFT-FIRST first result: {} points on {} in {t_draft:.1} s", draft.points.len(), draft.backend);
