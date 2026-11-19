@@ -2,8 +2,8 @@
 //! comparison of the sector grid with the half domain's.
 //!
 //! ```text
-//! gs_diag grid <n> [chord]                       CPU only: the two grids of the G-S gate (Coarse tier) compared
-//! gs_diag run <sector|half> <n> <mach> [--chord C] [--iters N] [--drift-tol X] [--sub S] [--cfl C] [--ext]
+//! gs_diag grid <n> [chord|-] [across]                     CPU only: the two grids of the G-S gate (Coarse tier) compared
+//! gs_diag run <sector|half> <n> <mach> [--chord C] [--across A] [--iters N] [--drift-tol X] [--sub S] [--cfl C] [--ext]
 //! ```
 //! `--iters N` runs exactly `N` iterations (every stop rule off); `--drift-tol X` keeps the default rules with that drift tolerance; `--ext` is the df32 precision. GPU runs
 //! need `BOWSHOCK_WEDGE_BACKEND=gpu`.
@@ -20,7 +20,7 @@ fn re_c_sea_level(d: f64) -> f64 {
     1.225 * 340.294 * d / 1.7894e-5
 }
 
-fn case_of(domain: &str, n: u32, mach: f64, chord: Option<usize>) -> Case3 {
+fn case_of(domain: &str, n: u32, mach: f64, chord: Option<usize>, across: usize) -> Case3 {
     let fins = Fins3 { count: n, ..Case3::anf_fins() };
     let flow = WallFlow { re_c: re_c_sea_level(0.03), mach_max: mach.max(2.0), ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
     let mut c = if domain == "sector" {
@@ -33,7 +33,7 @@ fn case_of(domain: &str, n: u32, mach: f64, chord: Option<usize>) -> Case3 {
     if let Some(cc) = chord {
         c.grid.fin_chord_cells = Some(cc);
     }
-    c
+    c.with_fin_cells_across(across)
 }
 
 fn node(g: &Grid3, i: usize, j: usize, k: usize) -> [f64; 3] {
@@ -57,8 +57,8 @@ fn describe(label: &str, g: &Grid3) {
     }
 }
 
-fn grid_compare(n: u32, chord: Option<usize>) {
-    let (cs, ch) = (case_of("sector", n, 0.8, chord), case_of("half", n, 0.8, chord));
+fn grid_compare(n: u32, chord: Option<usize>, across: usize) {
+    let (cs, ch) = (case_of("sector", n, 0.8, chord, across), case_of("half", n, 0.8, chord, across));
     let (gs, gh) = (body_grid3(&cs.grid).expect("sector grid"), body_grid3(&ch.grid).expect("half grid"));
     describe("sector", &gs);
     describe("half  ", &gh);
@@ -122,7 +122,7 @@ fn arg<T: std::str::FromStr>(args: &[String], name: &str) -> Option<T> {
 
 fn run(args: &[String]) {
     let (domain, n, mach): (&str, u32, f64) = (&args[0], args[1].parse().unwrap(), args[2].parse().unwrap());
-    let mut case = case_of(domain, n, mach, arg(args, "--chord"));
+    let mut case = case_of(domain, n, mach, arg(args, "--chord"), arg(args, "--across").unwrap_or(1));
     if let Some(it) = arg::<usize>(args, "--iters") {
         let nu = &mut case.numerics;
         (nu.max_iter, nu.drift_block, nu.mean_window, nu.incidence_window, nu.rel_tol) = (it, 0.0, 0, 0, 0.0);
@@ -187,8 +187,8 @@ fn run(args: &[String]) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("grid") => grid_compare(args[1].parse().unwrap(), args.get(2).map(|c| c.parse().unwrap())),
+        Some("grid") => grid_compare(args[1].parse().unwrap(), args.get(2).filter(|c| *c != "-").map(|c| c.parse().unwrap()), args.get(3).map_or(1, |a| a.parse().unwrap())),
         Some("run") => run(&args[1..]),
-        _ => eprintln!("usage: gs_diag grid <n> [chord] | run <sector|half> <n> <mach> [--chord C] [--iters N] [--drift-tol X] [--sub S] [--cfl C] [--ext]"),
+        _ => eprintln!("usage: gs_diag grid <n> [chord] | run <sector|half> <n> <mach> [--chord C] [--across A] [--iters N] [--drift-tol X] [--sub S] [--cfl C] [--ext]"),
     }
 }

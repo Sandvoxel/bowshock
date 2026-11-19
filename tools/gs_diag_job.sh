@@ -3,7 +3,7 @@
 n=$1; m=$2; c=$3; it=$4; shift 4
 export BOWSHOCK_WEDGE_BACKEND=gpu
 RUN="cargo run --release -q -p bowshock-core --example gs_diag --"
-for d in sector half; do
+for d in ${DOMS:-sector half}; do
   echo "== $d N$n M$m chord $c default stop"
   $RUN run $d $n $m --chord $c "$@" 2>&1
   [ "$it" -gt 0 ] && { echo "== $d N$n M$m chord $c fixed $it"; $RUN run $d $n $m --chord $c --iters $it "$@" 2>&1; }
