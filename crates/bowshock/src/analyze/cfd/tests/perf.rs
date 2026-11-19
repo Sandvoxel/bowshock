@@ -528,6 +528,43 @@ fn engine3d_draft_first() {
     );
 }
 
+/// What a smaller device does to the biggest grids of the app's coarse solve (DESIGN3D item 57), emulated on a big one: the sector (Mach 3) and the half domain at 2 degrees (Mach 3) of the
+/// example rocket on the shared grid (the Mach-3 grid at every node, as the app solves), on the GPU alone (no CPU fallback), `BOWSHOCK_ITERS` iterations (default 400) each. Run it under
+/// `LUMA_MEMORY_BUDGET=<bytes>` (Luma's budget of array data is 80 % of the device's memory: a 6 GiB card has 5 153 960 755, an 8 GiB card 6 871 947 674), with and without
+/// `BOWSHOCK_GPU_MEM_GUARD=off`, through `tools/gpuq/gpumem` for the process peak. Prints per domain the cells, the ms per iteration and the guard's refusal if there is one.
+#[test]
+#[ignore = "BOWSHOCK_ENGINE=3d: the biggest grids of the example's coarse solve on the GPU"]
+fn engine3d_memory_budget() {
+    assert_eq!(solver::Engine::from_env(), solver::Engine::Solver3, "run with BOWSHOCK_ENGINE=3d");
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let iters: usize = std::env::var("BOWSHOCK_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    for (what, condition) in [("sector", solver::Condition::from(3.0)), ("half domain 2 deg", solver::Condition::new(3.0, 2.0))] {
+        let mut analysis = solver::Analysis::new(&plan.body)
+            .unwrap()
+            .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: 120.0 } })
+            .roughness(plan.body_roughness)
+            .resolution(solver::Resolution::Coarse)
+            .backend(solver::Backend::Gpu)
+            .grid_mach(3.0)
+            .max_iterations(iters);
+        if let Some(fins) = &plan.fins {
+            analysis = analysis.fins(fins.clone()).fin_outline(plan.outline.clone());
+        }
+        let _ = solver::engine::timing::take_timings();
+        let t = Instant::now();
+        match analysis.run(&[condition]) {
+            Ok(_) => {
+                for r in solver::engine::timing::take_timings() {
+                    let per_iter = if r.chunks_rest > 0 { 1000.0 * r.rest_chunks_s / (r.chunks_rest * 50) as f64 } else { f64::NAN };
+                    println!("MEMBUDGET {what}: {} cells, {} iterations, {per_iter:.2} ms/it, {:.1} s", r.cells, r.iters_exec, t.elapsed().as_secs_f64());
+                }
+            }
+            Err(e) => println!("MEMBUDGET {what}: refused: {e}"),
+        }
+    }
+}
+
 fn serde_json_perf(wall: f64, iters: f64) -> String {
     format!(
         "{{\"case\":\"3d-engine-finned-example\",\"precision\":\"f32\",\"cells\":null,\"iters\":{iters},\"us_per_iter\":{:.3},\"wall_s\":{wall:.3}}}",
