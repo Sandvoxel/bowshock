@@ -17,7 +17,7 @@ use bowshock_cfd::gas3::{freestream3, prim_to_cons3, Cons3};
 use bowshock_cfd::gpu::{GpuSolver3, Precision, Staging};
 use bowshock_cfd::grid::Grid;
 use bowshock_cfd::grid3::{revolve, Grid3};
-use bowshock_cfd::implicit_params::{ImplicitParams, LineSolve3};
+use bowshock_cfd::implicit_params::{DtMode, ImplicitParams, LineSolve3};
 use bowshock_cfd::limiter::Limiter;
 use bowshock_cfd::solver3::{Config3, Scheme3, Solver3};
 use bowshock_core::engine::body_grid::{BaseBody, Body, LargeGridParams, Nose};
@@ -214,6 +214,35 @@ fn tiny_anf_ddadi_state_after_30_iterations_matches_cpu() {
         }
     }
     report("tiny ANF, DDADI and dissipation boost, 30 iterations", &rows);
+}
+
+/// `DtMode::SumCapK` (`dt = CFL V / (L_i + L_j + min(L_k, L_i + L_j))`, DESIGN3D item 60) against the CPU solver with the same parameters on the tiny ANF case, DDADI and the boost
+/// 0.35, 30 iterations from the free stream, M = 0.5 and M = 2, the steep ramp, `Fluxes` staging, both precisions. The cap must act on this grid (the azimuthal cells next to the
+/// axis make `L_k` the largest rate): the CPU state after 30 iterations differs from that of `DtMode::Sum` by more than the f32 target.
+#[test]
+fn tiny_anf_sum_capk_state_after_30_iterations_matches_cpu() {
+    let grid = tiny_anf_grid();
+    let mut rows = Vec::new();
+    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
+        let with = |dt_mode| {
+            let params = ImplicitParams { dt_mode, ddadi: Some(1.0), lhs_dis_boost: 0.35, ..implicit_params(true) };
+            Config3 { scheme: Scheme3::Implicit(params), ..config(mach, 2.0, limiter, low_mach) }
+        };
+        let (sum, capk) = (with(DtMode::Sum), with(DtMode::SumCapK));
+        compare(&format!("M {mach} sum-capk"), &grid, &capk, 0, 30, &[Staging::Fluxes], IMPLICIT, &mut rows);
+        let run = |cfg: &Config3| {
+            let mut cpu = Solver3::new(grid.clone(), cfg.clone());
+            for _ in 0..30 {
+                cpu.step();
+            }
+            cpu.u
+        };
+        let (a, b) = (run(&sum), run(&capk));
+        let d = a.iter().zip(&b).fold(0.0f64, |m, (x, y)| (0..5).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
+        println!("M {mach}: CPU state, Sum against SumCapK after 30 iterations: {d:.2e}");
+        assert!(d > 10.0 * IMPLICIT.0, "M {mach}: the cap changes nothing on this grid ({d:e})");
+    }
+    report("tiny ANF, DtMode::SumCapK, 30 iterations", &rows);
 }
 
 /// The implicit scheme on every solid-face pattern of `solid_box_patterns_match_cpu` (lines cut by the solid cells in all three directions, the first

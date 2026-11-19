@@ -890,6 +890,29 @@ mod tests {
         assert!(half.dt[0] > 1.5 * cap, "the axis cell of a half domain is limited: dt {:e} vs {cap:e}", half.dt[0]);
     }
 
+    /// `DtMode::SumCapK`: `CFL V / (L_i + L_j + min(L_k, L_i + L_j))`: never below the sum's step, equal where `L_k <= L_i + L_j`, and
+    /// larger where the narrow azimuthal cells make `L_k` the largest rate; the wedge's step `CFL V / (L_i + L_j)` is between one and two of its steps.
+    #[test]
+    fn capped_k_time_step_is_bounded_by_the_sum() {
+        let fs = freestream3(0.5, 0.0);
+        let implicit = Scheme3::Implicit(ImplicitParams { cfl_max: 50.0, ..ImplicitParams::DEFAULT });
+        let mut s = Solver3::new(sliver_grid(4, 1.0, Symmetry::Half), cfg(fs, implicit, Limiter::VanAlbada));
+        s.eval_residual();
+        s.compute_dt(50.0, DtMode::Sum);
+        let sum = s.dt.clone();
+        s.compute_dt(50.0, DtMode::SumCapK);
+        let (mut larger, mut equal) = (0, 0);
+        for (c, (a, b)) in sum.iter().zip(&s.dt).enumerate() {
+            assert!(*b >= *a * (1.0 - 1e-12), "cell {c}: capped {b:e} vs sum {a:e}");
+            if *b > *a * (1.0 + 1e-9) {
+                larger += 1;
+            } else {
+                equal += 1;
+            }
+        }
+        assert!(larger > 0 && equal > 0, "the cap acts in {larger} cells and not in {equal}");
+    }
+
     /// `restore` of a `snapshot` taken mid-run gives back the run: the same steps afterwards reach the same state, the conserved variables bit for bit (the residual norms
     /// to the order of the parallel sum).
     #[test]

@@ -9,8 +9,8 @@ pub enum DtMode {
     MinDirection,
     /// 3D only: `dt = CFL V / (L_i + L_j + min(L_k, L_i + L_j))`. The sum, but the `k` rate (the azimuthal one of a finned sector, which clusters cells along every `k` line near the
     /// axis and the fins) counts at most as much as the other two together: the `k` direction is line-implicit like the others, and a sliver cell `r dtheta_min` wide must not set the
-    /// step of the whole wake cell. Unlike [`DtMode::MinDirection`] it never releases both directions at once (the step is within a factor 3/2 of the sum's when `L_k >= L_i + L_j`
-    /// and equal to it otherwise). 2D (no `k`): the same as `Sum`.
+    /// step of the whole wake cell. The step is the sum's where `L_k <= L_i + L_j` and otherwise at most twice the two-direction step `CFL V / (L_i + L_j)` of the wedge (no `L_k`
+    /// at all, `no_dt_k`); [`DtMode::MinDirection`] instead releases both directions at once. 2D (no `k`): the same as `Sum`.
     SumCapK,
 }
 
