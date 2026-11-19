@@ -70,7 +70,16 @@ fn shown(state: &State) -> Option<Shown<'_>> {
         });
     }
     let s = cfd.stopped.as_ref()?;
-    Some(Shown { tracker: &s.tracker, elapsed: s.seconds, running: false, cancelling: false, grid: s.grid, then: None, altitude: Some(s.altitude), stopped: Some(s) })
+    Some(Shown {
+        tracker: &s.tracker,
+        elapsed: s.seconds,
+        running: false,
+        cancelling: false,
+        grid: s.grid,
+        then: None,
+        altitude: Some(s.altitude),
+        stopped: Some(s),
+    })
 }
 
 /// Whether the solve (or its stopped state) is what the screen shows: the CFD table method on an analysis that uses it.
