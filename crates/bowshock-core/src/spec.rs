@@ -106,7 +106,20 @@ pub enum AftSpec {
         /// Diameter at the aft end.
         aft_diameter: f64,
     },
+    /// Step in diameter (a shoulder, a booster stepping down to the sustainer): the diameter changes to `aft_diameter` over a 45 degree (or steeper) chamfer of one grid cell.
+    /// The 3D engine ([`Engine::Solver3`](crate::Engine::Solver3)) takes it; the legacy engine and fins whose root crosses it refuse. The chamfer is as long as the step is
+    /// tall, at most a tenth of the nose diameter, and is taken from the section after the step (added to the body when the step is the last), so the body keeps its length.
+    Step {
+        /// Diameter after the step.
+        aft_diameter: f64,
+    },
 }
+
+/// Longest chamfer of a diameter step, in nose diameters (the cells beside it are of that size on a coarse grid).
+const STEP_WIDTH_MAX: f64 = 0.1;
+
+/// Tallest step the mesher is asked for, in nose diameters of radius change: the cells above it are sheared parallelograms, and the rows above a very tall step fold.
+pub const STEP_HEIGHT_MAX: f64 = 0.5;
 
 /// Axisymmetric body: a nose followed by tubes and transitions, ending in a flat base.
 #[derive(Clone, Debug, PartialEq)]
@@ -322,7 +335,7 @@ impl BodySpec {
     /// Largest diameter of the body \[m\].
     pub fn reference_diameter(&self) -> f64 {
         self.aft.iter().fold(self.nose.diameter, |d, a| match *a {
-            AftSpec::Transition { aft_diameter, .. } => d.max(aft_diameter),
+            AftSpec::Transition { aft_diameter, .. } | AftSpec::Step { aft_diameter } => d.max(aft_diameter),
             AftSpec::Tube { .. } => d,
         })
     }
@@ -330,7 +343,7 @@ impl BodySpec {
     /// Diameter of the flat base \[m\]: the diameter after the last aft section (the nose diameter when only tubes follow the nose).
     pub fn base_diameter(&self) -> f64 {
         self.aft.iter().fold(self.nose.diameter, |d, a| match *a {
-            AftSpec::Transition { aft_diameter, .. } => aft_diameter,
+            AftSpec::Transition { aft_diameter, .. } | AftSpec::Step { aft_diameter } => aft_diameter,
             AftSpec::Tube { .. } => d,
         })
     }
@@ -405,17 +418,40 @@ impl BodySpec {
         let mut segments = Vec::with_capacity(self.aft.len());
         let mut radius = 0.5; // internal radius at the start of the section
         let mut total = n.length;
+        // the chamfer length of the steps before this section, taken off its length
+        let mut chamfer = 0.0;
+        let carve = |k: usize, length: f64, chamfer: &mut f64| -> Result<f64, Error> {
+            let len = length / d - std::mem::take(chamfer);
+            if len <= 1e-9 {
+                return invalid(&format!("aft[{k}].length"), "is shorter than the chamfer of the diameter step before it");
+            }
+            Ok(len)
+        };
         for (k, a) in self.aft.iter().enumerate() {
             match *a {
                 AftSpec::Tube { length } => {
                     positive(&format!("aft[{k}].length"), length)?;
                     total += length;
-                    segments.push(Segment { length: length / d, slope: 0.0 });
+                    segments.push(Segment { length: carve(k, length, &mut chamfer)?, slope: 0.0 });
+                }
+                AftSpec::Step { aft_diameter } => {
+                    positive(&format!("aft[{k}].aft_diameter"), aft_diameter)?;
+                    let dr = 0.5 * aft_diameter / d - radius;
+                    if dr.abs() < 1e-9 {
+                        return invalid(&format!("aft[{k}].aft_diameter"), "a step must change the diameter");
+                    }
+                    if dr.abs() > STEP_HEIGHT_MAX {
+                        return invalid(&format!("aft[{k}]"), &format!("a step of {:.2} nose diameters in radius exceeds {STEP_HEIGHT_MAX}", dr.abs()));
+                    }
+                    let width = dr.abs().min(STEP_WIDTH_MAX);
+                    chamfer += width;
+                    radius += dr;
+                    segments.push(Segment::step(dr, width));
                 }
                 AftSpec::Transition { length, aft_diameter } => {
                     positive(&format!("aft[{k}].length"), length)?;
                     positive(&format!("aft[{k}].aft_diameter"), aft_diameter)?;
-                    let (len, r_end) = (length / d, 0.5 * aft_diameter / d);
+                    let (len, r_end) = (carve(k, length, &mut chamfer)?, 0.5 * aft_diameter / d);
                     let slope = (r_end - radius) / len;
                     if slope.atan().abs() > MAX_HALF_ANGLE {
                         return invalid(&format!("aft[{k}]"), &format!("transition half-angle {:.1} deg exceeds 30 deg", slope.atan().abs().to_degrees()));
@@ -426,6 +462,7 @@ impl BodySpec {
                 }
             }
         }
+        total += chamfer * d;
         if total > MAX_LENGTH_DIAMETERS * d {
             return invalid("aft", &format!("total body length {:.1} nose diameters exceeds {MAX_LENGTH_DIAMETERS}", total / d));
         }
@@ -454,6 +491,32 @@ mod tests {
         assert!((b.body.nose_length() - 3.0).abs() < 1e-12);
         assert!((b.x_base() - 10.0).abs() < 1e-12);
         assert!((b.base_radius() - 0.4).abs() < 1e-12);
+    }
+
+    /// A step is a chamfer segment of one cell taken from the section after it: the body keeps its length, the base and reference diameters follow the steps.
+    #[test]
+    fn a_step_keeps_the_length_and_moves_the_diameters() {
+        let step_up = BodySpec { aft: vec![AftSpec::Step { aft_diameter: 0.12 }, AftSpec::Tube { length: 0.6 }], ..spec() };
+        let (b, s) = step_up.to_internal().unwrap();
+        assert!(b.segments[0].is_step() && !b.segments[1].is_step());
+        assert!((b.x_base() - 9.0).abs() < 1e-12, "the body is 0.3 + 0.6 m long: {}", b.x_base());
+        assert!((b.base_radius() - 0.6).abs() < 1e-12 && step_up.base_diameter() == 0.12 && step_up.reference_diameter() == 0.12);
+        assert!((s.area_ratio - (0.1f64 / 0.12).powi(2)).abs() < 1e-12);
+        // a step is at least 45 degrees, however small, and a long one is a tenth of a diameter wide
+        for aft_diameter in [0.101, 0.12, 0.15] {
+            let (b, _) = BodySpec { aft: vec![AftSpec::Tube { length: 0.3 }, AftSpec::Step { aft_diameter }, AftSpec::Tube { length: 0.3 }], ..spec() }.to_internal().unwrap();
+            assert!(b.segments[1].is_step() && b.segments[1].length <= 0.1 + 1e-12);
+        }
+        // a step down at the end adds its chamfer; no step, no height, a tall one, or a section shorter than the chamfer are refused
+        let last = BodySpec { aft: vec![AftSpec::Tube { length: 0.6 }, AftSpec::Step { aft_diameter: 0.08 }], ..spec() };
+        assert!(last.to_internal().unwrap().0.x_base() > 9.0);
+        for aft in [
+            vec![AftSpec::Step { aft_diameter: 0.1 }, AftSpec::Tube { length: 0.6 }],
+            vec![AftSpec::Step { aft_diameter: 0.21 }, AftSpec::Tube { length: 0.6 }],
+            vec![AftSpec::Step { aft_diameter: 0.12 }, AftSpec::Tube { length: 0.005 }],
+        ] {
+            assert!(matches!(BodySpec { aft, ..spec() }.to_internal(), Err(Error::InvalidInput(_))));
+        }
     }
 
     fn blunted(base: SharpShape, tip_radius: f64) -> BodySpec {

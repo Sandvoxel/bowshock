@@ -1,0 +1,59 @@
+{
+ "id": "ion-drive",
+ "name": "Ion Drive (Steve Sawyer), LDRS 26, Jean Dry Lake",
+ "nose": {
+  "shape": "tangent-ogive",
+  "length": 19,
+  "diameter": 4,
+  "blunt_radius": 0.0
+ },
+ "body": [
+  {
+   "length": 49.5,
+   "fore_diameter": 4,
+   "aft_diameter": 4
+  },
+  {
+   "length": 1.5,
+   "fore_diameter": 4,
+   "aft_diameter": 2.5
+  }
+ ],
+ "fins": {
+  "count": 3,
+  "root_chord": 9.5,
+  "span": 4.375,
+  "sweep": 7,
+  "tip_chord": 2.0625,
+  "thickness": 0.093,
+  "section": "hexagonal",
+  "wedge_fraction": 0.06578947368421052,
+  "te_to_base": 2.75
+ },
+ "roughness_in": 0.0,
+ "nozzle_diameter_in": 0.0,
+ "rail_guide": null,
+ "launch_weight_lb": 11.37,
+ "cg_in": 39.5,
+ "motor": {
+  "designation": "K550",
+  "manufacturer": "AeroTech"
+ },
+ "site": {
+  "altitude_ft": 2750,
+  "temperature_f": 100,
+  "rod_angle_deg": 0,
+  "rod_length_ft": 10,
+  "wind_mph": 0
+ },
+ "measured": {
+  "apogee_ft": 8027,
+  "data": "barometric altimeters: AltAcc2 8302 ft and Perfect Flight 7752 ft, averaged"
+ },
+ "rasaero": {
+  "table_ft": 8642,
+  "file_ft": 8642.3
+ },
+ "notes": "1.5 in boattail from 4.0 to 2.5 in",
+ "source": "RASAero II Comparisons with Altitude Data, https://www.rasaero.com/comparisons-alt.htm (C. E. Rogers); geometry, weights, motor and site from the example file shipped with the free RASAero II download, https://www.rasaero.com/dl_software_ii.htm (RASAero_II_Setup_Version_1.0.2.0.zip, Examples/IonDrive.CDX1)"
+}

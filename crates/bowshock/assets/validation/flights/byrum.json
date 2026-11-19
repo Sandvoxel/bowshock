@@ -1,0 +1,54 @@
+{
+ "id": "byrum",
+ "name": "Gary Byrum, LDRS 26, Jean Dry Lake",
+ "nose": {
+  "shape": "tangent-ogive",
+  "length": 13,
+  "diameter": 3,
+  "blunt_radius": 0.0
+ },
+ "body": [
+  {
+   "length": 71.75,
+   "fore_diameter": 3,
+   "aft_diameter": 3
+  }
+ ],
+ "fins": {
+  "count": 3,
+  "root_chord": 11.75,
+  "span": 3.1875,
+  "sweep": 7.875,
+  "tip_chord": 1.875,
+  "thickness": 0.25,
+  "section": "square",
+  "wedge_fraction": 0.0,
+  "te_to_base": 1.25
+ },
+ "roughness_in": 0.0,
+ "nozzle_diameter_in": 0.0,
+ "rail_guide": null,
+ "launch_weight_lb": 7.75,
+ "cg_in": 56.0,
+ "motor": {
+  "designation": "J570",
+  "manufacturer": "AeroTech"
+ },
+ "site": {
+  "altitude_ft": 2750,
+  "temperature_f": 100,
+  "rod_angle_deg": 0,
+  "rod_length_ft": 10,
+  "wind_mph": 0
+ },
+ "measured": {
+  "apogee_ft": 5732,
+  "data": "barometric altimeter"
+ },
+ "rasaero": {
+  "table_ft": 5280,
+  "file_ft": 5281.2
+ },
+ "notes": "",
+ "source": "RASAero II Comparisons with Altitude Data, https://www.rasaero.com/comparisons-alt.htm (C. E. Rogers); geometry, weights, motor and site from the example file shipped with the free RASAero II download, https://www.rasaero.com/dl_software_ii.htm (RASAero_II_Setup_Version_1.0.2.0.zip, Examples/Byrum.CDX1)"
+}

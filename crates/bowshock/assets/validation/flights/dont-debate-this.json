@@ -1,0 +1,64 @@
+{
+ "id": "dont-debate-this",
+ "name": "Don't Debate This, N5800 minimum-diameter rocket (Mike Pasaretti), Black Rock",
+ "nose": {
+  "shape": "conical",
+  "length": 18,
+  "diameter": 3.9173,
+  "blunt_radius": 0.05
+ },
+ "body": [
+  {
+   "length": 67.25,
+   "fore_diameter": 3.9173,
+   "aft_diameter": 3.9173
+  },
+  {
+   "length": 0.5,
+   "fore_diameter": 3.9173,
+   "aft_diameter": 4.15
+  },
+  {
+   "length": 12.5,
+   "fore_diameter": 4.15,
+   "aft_diameter": 4.15
+  }
+ ],
+ "fins": {
+  "count": 3,
+  "root_chord": 12,
+  "span": 4,
+  "sweep": 10.3,
+  "tip_chord": 2.25,
+  "thickness": 0.189,
+  "section": "hexagonal",
+  "wedge_fraction": 0.08333333333333333,
+  "te_to_base": 1.12
+ },
+ "roughness_in": 0.00025,
+ "nozzle_diameter_in": 2.488,
+ "rail_guide": null,
+ "launch_weight_lb": 48.19,
+ "cg_in": 64.69,
+ "motor": {
+  "designation": "N5800",
+  "manufacturer": "Cesaroni"
+ },
+ "site": {
+  "altitude_ft": 3750,
+  "temperature_f": 80,
+  "rod_angle_deg": 2,
+  "rod_length_ft": 10,
+  "wind_mph": 5
+ },
+ "measured": {
+  "apogee_ft": 56573,
+  "data": "barometric altimeters: Featherweight 56504 ft and PerfectFlite 56641 ft, averaged"
+ },
+ "rasaero": {
+  "table_ft": 62308,
+  "file_ft": 61982.3
+ },
+ "notes": "13 in fin can (4.15 in) behind a 0.5 in shoulder; peak Mach about 3.2 is above the 3.0 top of the CFD table (the table's last point is carried up with the build-up's Mach trend); the fin's tip trailing edge is 0.55 in behind the root trailing edge and the file puts it 0.3 in behind the base; the 3D mesher takes an overhang of at most half the root's distance to the base, so the fin is moved 0.87 in forward (te_to_base 1.12 in instead of 0.25); its root leading edge is then 0.12 in ahead of the 0.5 in shoulder cone",
+ "source": "RASAero II Comparisons with Altitude Data, https://www.rasaero.com/comparisons-alt.htm (C. E. Rogers); geometry, weights, motor and site from the example file shipped with the free RASAero II download, https://www.rasaero.com/dl_software_ii.htm (RASAero_II_Setup_Version_1.0.2.0.zip, Examples/DontDebateThisN5800MinDia.CDX1)"
+}

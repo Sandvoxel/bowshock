@@ -830,6 +830,30 @@ fn a_diameter_step_is_one_cell_and_the_grids_build_around_it() {
     }
 }
 
+/// The facade's steps (`AftSpec::Step`: a chamfer as tall as the step, at most a tenth of a diameter, one cell) build on the base-wake grid behind the nose, between tubes and
+/// before a boattail, forward and backward, tiny to tall, with positive volumes.
+#[test]
+fn the_facades_steps_build_for_every_height_and_place() {
+    use bowshock_core::{AftSpec, BodySpec, NoseShape, NoseSpec};
+    let d = 0.1;
+    let nose = NoseSpec { shape: NoseShape::TangentOgive, length: 0.3, diameter: d };
+    for aft_diameter in [0.102, 0.11, 0.14, 0.2, 0.06, 0.09, 0.0501] {
+        for (place, aft) in [
+            ("behind the nose", vec![AftSpec::Step { aft_diameter }, AftSpec::Tube { length: 0.8 }]),
+            ("between tubes", vec![AftSpec::Tube { length: 0.4 }, AftSpec::Step { aft_diameter }, AftSpec::Tube { length: 0.6 }]),
+            ("before a boattail", vec![AftSpec::Tube { length: 0.4 }, AftSpec::Step { aft_diameter }, AftSpec::Transition { length: 0.1, aft_diameter: 0.9 * aft_diameter }]),
+            ("at the base", vec![AftSpec::Tube { length: 0.8 }, AftSpec::Step { aft_diameter }]),
+        ] {
+            let spec = BodySpec { nose, aft };
+            let (body, _) = spec.to_internal().unwrap_or_else(|e| panic!("{aft_diameter} {place}: {e}"));
+            for level in [0u32, 1] {
+                let s = Case3::wedge(2.0, body.clone(), level).build_solver().unwrap_or_else(|e| panic!("{aft_diameter} {place} level {level}: {e}"));
+                assert!(s.grid.vol.iter().all(|v| *v >= 0.0), "{aft_diameter} {place} level {level}: a negative volume");
+            }
+        }
+    }
+}
+
 /// Fins refuse a root across a diameter step, naming it; fins beside the step (on the tube behind it) build.
 #[test]
 fn fins_across_a_diameter_step_are_refused_and_fins_behind_it_build() {
