@@ -1335,13 +1335,18 @@ impl LazySolver3 {
             // the loop is traced once per (limiter, configuration): a chunk then costs only its launches (`luma::compile_until_all`; the setters that change what the step
             // reads drop the compiled loop). A step Luma cannot compile (a read-back inside it) runs through `iterate_until_all`, traced again every call
             if self.compiled.as_ref().is_none_or(|c| c.key != key || c.max < seg) {
-                self.compiled = None;
+                // the plan being replaced is given back before the new trace (Luma frees its exact-size buffers only when the device is idle: left to the trace it adds its
+                // 1.1 GiB per 688k cells to the trace's 2.5), and the trace's spare buffers after it (the pool keeps them, 1.1 GiB idle per plan): `Context::trim`, DESIGN3D item 49
+                if self.compiled.take().is_some() {
+                    self.ctx.trim()?;
+                }
                 let init = self.state.as_ref().ok_or_else(no_state)?;
                 match luma::compile_until_all(init, records3(luma::Until::new(seg).check_every(sync), monitor), |s, _| self.step3(s, lim)) {
                     Ok(run) => self.compiled = Some(CompiledLoop3 { key, max: seg, run }),
                     Err(luma::LumaError::Unsupported(_)) => {}
                     Err(e) => return Err(e),
                 }
+                self.ctx.trim()?;
             }
             let init = self.state.take().ok_or_else(no_state)?;
             let run = match &mut self.compiled {
