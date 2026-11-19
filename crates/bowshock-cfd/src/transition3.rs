@@ -118,3 +118,52 @@ pub fn gamma_field(grid: &Grid3, solid: &[bool], faces: &[WallFace], tr: Transit
         gamma
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid3::SolidBox;
+    use crate::walldist3::wall_faces;
+
+    /// A box of 12 x 8 x 6 cubes of side 0.1 with a body floor (`j < 2`, every `i`: `Part::Body`) and a fin on it (`i` 6..10, `j` 2..6, `k` 2..3: `Part::Fin`, chord `x` 0.6 to 1.0).
+    fn grid() -> (Grid3, Vec<bool>) {
+        let n = [12usize, 8, 6];
+        let (mut x, mut y, mut z) = (vec![], vec![], vec![]);
+        for k in 0..=n[2] {
+            for j in 0..=n[1] {
+                for i in 0..=n[0] {
+                    x.push(0.1 * i as f64);
+                    y.push(0.1 * j as f64);
+                    z.push(0.1 * k as f64);
+                }
+            }
+        }
+        let mut g = Grid3::try_from_nodes(n[0], n[1], n[2], x, y, z).unwrap();
+        g.mark_solid(SolidBox { i: 0..12, j: 0..2, k: 0..6 }, Some(Part::Body(0)));
+        g.mark_solid(SolidBox { i: 6..10, j: 2..6, k: 2..3 }, Some(Part::Fin(0)));
+        let solid = (0..g.part.len()).map(|c| g.part[c] != crate::grid3::PART_FLUID).collect();
+        (g, solid)
+    }
+
+    /// The field is the property of the nearest wall: body walls laminar upstream of `x_tr`, fin walls upstream of the chord fraction of their row; no transition (`0`, `0`) is an
+    /// empty field (the fully turbulent solver, untouched).
+    #[test]
+    fn gamma_follows_the_nearest_wall_station() {
+        let (g, solid) = grid();
+        let faces = wall_faces(&g, &solid);
+        assert!(gamma_field(&g, &solid, &faces, Transition { x_tr: 0.0, fin_frac: 0.0 }).is_empty());
+        let at = |gm: &[f64], i, j, k| gm[g.cell(i, j, k)];
+        // body only (fin turbulent from the leading edge): cells above the floor upstream of x = 0.5 are laminar, downstream turbulent
+        let gm = gamma_field(&g, &solid, &faces, Transition { x_tr: 0.5, fin_frac: 0.0 });
+        assert_eq!((at(&gm, 1, 2, 0), at(&gm, 4, 2, 0), at(&gm, 5, 2, 0), at(&gm, 9, 2, 0)), (0.0, 0.0, 1.0, 1.0));
+        // the cells beside the fin (k = 1, nearest wall the fin side) are turbulent from the leading edge
+        assert_eq!((at(&gm, 6, 3, 1), at(&gm, 9, 3, 1)), (1.0, 1.0));
+        // the fin laminar over 0.5 of its chord (x 0.6 to 0.8) and the body trip behind it (x_tr = 0.1): the cells beside the fin follow the fin
+        let gm = gamma_field(&g, &solid, &faces, Transition { x_tr: 0.1, fin_frac: 0.5 });
+        assert_eq!((at(&gm, 6, 3, 1), at(&gm, 7, 3, 1), at(&gm, 8, 3, 1), at(&gm, 9, 3, 1)), (0.0, 0.0, 1.0, 1.0));
+        assert_eq!((at(&gm, 7, 5, 1), at(&gm, 8, 5, 1)), (0.0, 1.0));
+        // a fully laminar fin
+        let gm = gamma_field(&g, &solid, &faces, Transition { x_tr: 0.1, fin_frac: 1.0 });
+        assert_eq!((at(&gm, 6, 3, 1), at(&gm, 9, 3, 1), at(&gm, 11, 2, 0)), (0.0, 0.0, 1.0));
+    }
+}
