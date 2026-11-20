@@ -105,6 +105,7 @@ pub(super) fn table() -> CfdTable {
         points: vec![p(0.5, 0.4), p(1.0, 0.8), p(2.0, 0.6)],
         grid: CfdGrid::Coarse,
         lift: None,
+        boattail: false,
         power_on: None,
     }
 }

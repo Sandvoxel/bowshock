@@ -901,6 +901,7 @@ fn cfd_table(geometry: u64) -> bowshock_model::CfdTable {
         points: vec![p(0.3), p(1.0), p(2.0)],
         grid: CfdGrid::Coarse,
         lift: None,
+        boattail: false,
         power_on: None,
     }
 }

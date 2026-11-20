@@ -137,6 +137,7 @@ mod tests {
             grid: CfdGrid::Coarse,
             lift: None,
             bands: false,
+            boattail: false,
             power_on: Some(Box::new(CfdPowerOn {
                 jet: jet(0.03),
                 solved_at: 0,

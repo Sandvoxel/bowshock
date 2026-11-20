@@ -387,7 +387,12 @@ fn product_default_engine_end_to_end() {
     assert!(table.bands && table.lift.as_ref().is_some_and(|l| l.bands), "a 3D table carries the bands");
     assert!(table.notes.iter().all(|n| !n.contains("No GPU")));
     for p in &table.points {
-        let b = solver::uncertainty::cd_band(p.cd, p.mach, solver::Resolution::Coarse);
+        let b = solver::uncertainty::cd_band(
+            p.cd,
+            p.mach,
+            solver::Resolution::Coarse,
+            solver::uncertainty::BodyFeatures { boattail: table.boattail, friction_share: p.friction / p.cd },
+        );
         println!("BAND M {:.2} cd {:.4} [{:.4}, {:.4}]", p.mach, p.cd, p.cd - b.low, p.cd + b.high);
     }
     let files = crate::analyze::openrocket::export(&table);
@@ -717,7 +722,17 @@ fn engine3d_warm_variants() {
         Err(_) => nodes((0.1, 3.0)).unwrap(),
     };
     let grid_mach = nodes((0.1, 3.0)).unwrap().iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let job = Job { plan, altitude: 120.0, nodes: machs.clone(), stage: 1, grid, compute: Default::default(), cpu_only: false, stability: Vec::new(), power_on: Vec::new() };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: machs.clone(),
+        stage: 1,
+        grid,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+        power_on: Vec::new(),
+    };
     let session = Session::Local { backend: solver::Backend::Gpu };
     let conditions: Vec<solver::Condition> = machs.iter().map(|&m| solver::Condition::new(m, if half { LIFT_ALPHAS[0] } else { 0.0 })).collect();
     let variants = std::env::var("BOWSHOCK_VARIANTS").unwrap_or_else(|_| "cold default".to_string());

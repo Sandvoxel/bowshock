@@ -122,8 +122,17 @@ fn the_example_table_solves_and_agrees_with_extended() {
 fn a_table_says_why_the_legacy_engine_solved_it_when_there_is_no_gpu() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
-    let job =
-        Job { plan, altitude: 120.0, nodes: vec![0.6], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new(), power_on: Vec::new() };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: vec![0.6],
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+        power_on: Vec::new(),
+    };
     let notes = job_notes(&job);
     match solver::Engine::no_gpu_fallback() {
         Some(why) => {

@@ -116,9 +116,11 @@ pub fn help(label: &str) -> Option<&'static str> {
         "Base" => "Low-pressure wake behind the blunt aft end. Smaller while the motor burns (the exhaust fills the wake).",
         "Fins" => "The fins' own skin friction plus leading- and trailing-edge pressure drag.",
         "Other" => "Launch lugs and rail buttons sticking out into the airflow.",
-        "Cd band" => "Where the true drag coefficient is expected, from the measured errors of the CFD solve against free flight (a high smooth-model bias, the stop rule, the grid, the wall temperature). The solve is more likely to read high than low. It does not include lugs and rail buttons that are not meshed: one lug raised the apogee drag of a model-scale rocket by 16 % when it was measured.",
+        "Cd band" => "Where the true drag coefficient is expected, from the measured errors of the CFD solve against free flight and tunnel data (a smooth fully turbulent model reads high, the transonic fin drag rise reads low, a boattail or a friction-dominated body reads high subsonically; plus the stop rule, the grid and the wall temperature). It does not include lugs and rail buttons that are not meshed: one lug raised the apogee drag of a model-scale rocket by 16 % when it was measured.",
         "Not meshed" => "Launch lugs and rail buttons are not meshed by the CFD solve; the table adds the build-up method's drag for them. One lug changed the apogee of a model-scale rocket by +16 % when it was measured, so a rocket with large buttons is outside the Cd band.",
-        "Margin lower bound" => "The static margin if the centre of pressure is as far forward as the CFD comparison with free flight allows (0.12 caliber subsonic, 0.25 caliber supersonic). The solve puts the centre of pressure too far aft and the normal-force slope 3-11 % high, so it overstates stability: judge the rocket by this number.",
+        "Margin lower bound" => "The static margin if the centre of pressure is as far forward as the CFD comparison with free flight and tunnels allows (0.3 caliber). The solve puts the subsonic centre of pressure aft and the normal-force slope up to 21 % high, so it can overstate stability: judge the rocket by this number.",
+        "CNα band" => "Where the true normal-force slope is expected: the grid (5 %) and the measured bias of the solve, which reads high subsonically (11-21 %) and by -1 to +13 % supersonically.",
+        "Boattail" => "A boattail makes the base-wake solve over-predict the pressure drag at subsonic Mach numbers (by up to 0.01-0.02 of the reference area at Mach 0.6, more toward 0.9): the drag may read high, and the band's lower side is wider.",
         "Total Cd" => "Total drag coefficient: drag force divided by dynamic pressure and reference area. Lower is better.",
         "Static margin" => {
             "Distance from the centre of gravity back to the centre of pressure, in body diameters (calibers). Above about 1 the rocket flies straight."
@@ -287,9 +289,16 @@ pub fn compare_section(out: &Output, overlay: &Overlay, x_si: Option<f64>, activ
 }
 
 /// The 3D engine's lower bound of the static margin at `mach` (calibers), when the stability solve is the 3D engine's.
-fn margin_bound(out: &Output, margin: f64, mach: f64) -> Option<f64> {
+fn margin_bound(out: &Output, margin: f64) -> Option<f64> {
     out.cfd.as_ref()?.lift.as_ref().filter(|l| l.bands)?;
-    Some(margin - bowshock_core::uncertainty::x_cp_band_cal(mach).low)
+    Some(margin - bowshock_core::uncertainty::x_cp_band_cal().low)
+}
+
+/// The 3D engine's band of the normal-force slope at `mach` (per radian), when the stability solve is the 3D engine's.
+fn cn_alpha_bounds(out: &Output, cn_alpha: f64, mach: f64) -> Option<(f64, f64)> {
+    out.cfd.as_ref()?.lift.as_ref().filter(|l| l.bands)?;
+    let band = bowshock_core::uncertainty::cn_alpha_band(mach);
+    Some((cn_alpha * (1.0 - band.low), cn_alpha * (1.0 + band.high)))
 }
 
 fn stability_rows(run: &Run, p: &MachPointLike, mach: f64, units: UnitSystem, out: &Output) -> Vec<Row> {
@@ -305,13 +314,16 @@ fn stability_rows(run: &Run, p: &MachPointLike, mach: f64, units: UnitSystem, ou
             }
         }
     }
-    if let Some(bound) = margin_bound(out, p.margin, mach) {
+    if let Some(bound) = margin_bound(out, p.margin) {
         rows.push(Row::new("Margin lower bound", cal(bound), "cal").muted());
     }
     rows.push(Row::new(format!("CP{lift}"), cp, u.clone()));
     // The kit shows one CG: the one the margin uses (the Conditions' "CG for margin").
     rows.push(Row::new(if burnout { "CG burnout" } else { "CG liftoff" }, cg, u));
     rows.push(Row::new(format!("CNα{lift}"), format!("{:.2}", p.cn_alpha), "/rad"));
+    if let Some((lo, hi)) = cn_alpha_bounds(out, p.cn_alpha, mach) {
+        rows.push(Row::new("CNα band", format!("{lo:.2} – {hi:.2}"), "/rad").muted());
+    }
     rows
 }
 
@@ -357,9 +369,13 @@ fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem
         drag.push(Row::new("Other", cd(d.protuberances), "").swatch(SeriesColor::Muted).share(d.protuberances / d.total.max(1e-12)));
     }
     if let Some(info) = out.cfd.as_ref().filter(|c| c.bands) {
-        let band = bowshock_core::uncertainty::cd_band(d.total, x, resolution_of(info.grid));
+        let features = bowshock_core::uncertainty::BodyFeatures { boattail: info.boattail, friction_share: d.friction / d.total.max(1e-12) };
+        let band = bowshock_core::uncertainty::cd_band(d.total, x, resolution_of(info.grid), features);
         drag.insert(1, Row::new("Cd band", format!("{} – {}", cd(d.total - band.low), cd(d.total + band.high)), "").muted());
         drag.push(Row::new("Not meshed", "lugs, buttons", "").muted());
+        if info.boattail && x < bowshock_core::uncertainty::terms::SUBSONIC_BELOW {
+            drag.push(Row::new("Boattail", "subsonic drag may read high", "").muted());
+        }
     }
 
     let by_margin = |a: &&MachPoint, b: &&MachPoint| a.margin_cal.total_cmp(&b.margin_cal);

@@ -340,6 +340,20 @@ impl BodySpec {
         })
     }
 
+    /// Whether the body has a boattail: a [`AftSpec::Transition`] that narrows the body toward the base (the afterbody the subsonic drag band widens for,
+    /// [`crate::uncertainty::BodyFeatures`]).
+    pub fn boattail(&self) -> bool {
+        let mut d = self.nose.diameter;
+        for a in &self.aft {
+            match *a {
+                AftSpec::Transition { aft_diameter, .. } if aft_diameter < d => return true,
+                AftSpec::Transition { aft_diameter, .. } | AftSpec::Step { aft_diameter } => d = aft_diameter,
+                AftSpec::Tube { .. } => {}
+            }
+        }
+        false
+    }
+
     /// Diameter of the flat base \[m\]: the diameter after the last aft section (the nose diameter when only tubes follow the nose).
     pub fn base_diameter(&self) -> f64 {
         self.aft.iter().fold(self.nose.diameter, |d, a| match *a {

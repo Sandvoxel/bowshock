@@ -441,6 +441,7 @@ mod tests {
             points: vec![point(0.5), point(1.0)],
             grid: Default::default(),
             lift: None,
+            boattail: false,
             power_on: None,
         };
         let (revision, steps) = (doc.revision(), doc.undo.len());

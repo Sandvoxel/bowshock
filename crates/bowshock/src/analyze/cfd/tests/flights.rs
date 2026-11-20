@@ -362,7 +362,7 @@ fn flight_validation() {
                 compute: Default::default(),
                 cpu_only: false,
                 stability: job_nodes().1,
-            power_on: Vec::new(),
+                power_on: Vec::new(),
             };
             let t0 = Instant::now();
             let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points(f.id.clone())).unwrap_or_else(|e| panic!("{}: solve failed: {e}", f.id));
@@ -465,7 +465,7 @@ fn stepped_rocket_solves_and_settles() {
         compute: Default::default(),
         cpu_only: false,
         stability: job_nodes().1,
-            power_on: Vec::new(),
+        power_on: Vec::new(),
     };
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points("stepped".into())).expect("the stepped rocket solves");

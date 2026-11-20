@@ -402,6 +402,8 @@ pub struct CfdInfo {
     pub grid: CfdGrid,
     /// Whether the drag is the 3D engine's, so that the drag band applies (`CfdTable::bands`).
     pub bands: bool,
+    /// Whether the body has a boattail (`CfdTable::boattail`): the subsonic drag band is wider for it and says so.
+    pub boattail: bool,
     /// The 3D stability solve the margin, CP and `CNα` come from, when the table has a usable one.
     pub lift: Option<LiftInfo>,
     /// The table's first Mach node when the plotted range starts below it (the drag there is the first point scaled by Extended's trend).
@@ -657,6 +659,7 @@ fn cfd_info(table: &CfdTable, analysis: Analysis, cond: &Conditions) -> CfdInfo 
         solve_seconds: table.solve_seconds,
         grid: table.grid,
         bands: table.bands,
+        boattail: table.boattail,
         lift: table.lift.as_ref().filter(|l| cfd::lift_usable(l)).map(|l| LiftInfo {
             points: l.points.len(),
             backend: l.backend.clone(),
@@ -921,6 +924,7 @@ mod tests {
             points: vec![point(0.3), point(1.0), point(2.0)],
             grid: CfdGrid::Coarse,
             lift: None,
+            boattail: false,
             power_on: None,
         };
         let info = |mach: (f64, f64)| cfd_info(&table, Analysis::Drag, &Conditions { mach, ..Conditions::default() });
@@ -1037,6 +1041,7 @@ mod tests {
             points: [0.1, 0.5, 1.0, 2.0, 3.0].into_iter().map(point).collect(),
             grid: CfdGrid::Coarse,
             lift: None,
+            boattail: false,
             power_on: None,
         };
         let drag_table = DragTable::from_cfd(&cfd_table, None);

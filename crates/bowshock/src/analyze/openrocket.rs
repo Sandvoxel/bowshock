@@ -28,9 +28,10 @@ fn comments(table: &CfdTable, what: &str) -> String {
         format!("# Bowshock CFD {what} table: {} grid, {}, altitude {:.0} m\n", format!("{:?}", table.grid).to_lowercase(), table.backend, table.altitude);
     if table.bands {
         out.push_str(
-            "# CFD solve: expect the drag 3-7 % high against free flight (fully turbulent smooth model) and the centre of pressure up to 0.25 caliber off\n",
+            "# CFD solve: the drag reads 3-7 % high against free flight (fully turbulent smooth model), up to 20 % high subsonically with a boattail or a friction-dominated body,\n",
         );
-        out.push_str("# (subsonic: 0.12 caliber too far aft, so the stability is overstated). Lugs and rail buttons are not meshed.\n");
+        out.push_str("# and up to 17 % low from Mach 0.95 to 1.2 (fin drag rise); the centre of pressure is within 0.3 caliber and CNalpha reads up to 21 % high subsonically.\n");
+        out.push_str("# Lugs and rail buttons are not meshed.\n");
     }
     out
 }
@@ -108,6 +109,7 @@ mod tests {
             points: vec![p(0.5, 0.4123456789), p(1.0, 0.8), p(2.0, 0.6)],
             grid: CfdGrid::Coarse,
             lift: None,
+            boattail: false,
             power_on: None,
         }
     }

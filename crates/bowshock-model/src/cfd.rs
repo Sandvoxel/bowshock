@@ -235,6 +235,10 @@ pub struct CfdTable {
     /// of the legacy engine and for one stored before the bands existed: those show no band.
     #[serde(default)]
     pub bands: bool,
+    /// Whether the body has a boattail (`BodySpec::boattail`): the subsonic drag of the 3D engine's base-wake solve over a boattail reads high, and its drag band is wider for it
+    /// (`bowshock_core::uncertainty::BodyFeatures`).
+    #[serde(default)]
+    pub boattail: bool,
     /// The drag with the motor jet on, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_on: Option<Box<CfdPowerOn>>,
@@ -341,6 +345,7 @@ mod tests {
             solved_at: 1_700_000_000,
             solve_seconds: 12.5,
             bands: false,
+            boattail: false,
             backend: "GPU (Luma)".into(),
             fallback: None,
             altitude: 120.0,

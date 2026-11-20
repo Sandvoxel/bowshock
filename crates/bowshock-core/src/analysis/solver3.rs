@@ -1082,9 +1082,13 @@ impl Analysis {
         tm.field_s = t_field.elapsed().as_secs_f64();
         // the bands come from the measured terms of `uncertainty`, not from a second sweep
         let usable = quality != Quality::Failed;
-        let cd_band = (usable && drag.total.is_finite()).then(|| crate::uncertainty::cd_band(drag.total, c.mach, self.resolution));
+        let features = crate::uncertainty::BodyFeatures {
+            boattail: self.body_spec.as_ref().is_some_and(BodySpec::boattail),
+            friction_share: drag.friction.filter(|_| drag.total > 0.0).map_or(0.0, |f| f / drag.total),
+        };
+        let cd_band = (usable && drag.total.is_finite()).then(|| crate::uncertainty::cd_band(drag.total, c.mach, self.resolution, features));
         let x_cp_band = forces.filter(|f| usable && f.x_cp.is_finite()).map(|_| {
-            let cal = crate::uncertainty::x_cp_band_cal(c.mach);
+            let cal = crate::uncertainty::x_cp_band_cal();
             crate::uncertainty::Band { low: cal.low * self.d_ref, high: cal.high * self.d_ref }
         });
         Ok(PolarPoint {
