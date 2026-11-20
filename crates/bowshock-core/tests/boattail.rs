@@ -7,6 +7,7 @@
 //! - `fo`: first order throughout; `nolm`: the low-Mach flux correction off; `lm`: on; `pc`: low-Mach preconditioning of the implicit left-hand side on; `minmod`, `venk`: limiter;
 //! - `sens<lo>_<hi>`: CPU shock-sensor thresholds (relative pressure jump of the Rusanov blend; `sens0_0` is not allowed: `sensoff` = thresholds 1e9);
 //! - `sting<R>`: the sting radius (default 0.13); `cflmax<N>`, `cfl0_<x>`, `sub<N>`, `nobc`, `nolines`: implicit parameters;
+//! - `seg<k>`, `wake<k>`, `gap<k>`, `njo<k>`, `dx<k>`, `drw<k>`: the boattail cells, the cells behind the base, the rows between sting and base radius, the rows above, the end-cell size and the first cell height refined by `k`;
 //! - `closed`: the boattail continues as a sting of the base radius to the outflow (`Wake::Sting`, no base, no wake: the pressure drag of nose and boattail must vanish, d'Alembert);
 //! - `round`: the shoulder rounded by four short cones (2.5, 5, 7.5 degrees over 0.2 d) before the 10 degrees; `nosting`: full-disc base; `cyl<L>`: cylinder length (default 2);
 //! - `iters<N>`: cap of the iterations.
@@ -72,6 +73,33 @@ fn case_of(m: f64, variant: &str) -> Case3 {
         if let Some(v) = p.strip_prefix("sens") {
             let (lo, hi) = if v == "off" { (1e9, 2e9) } else { v.split_once('_').map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap())).expect("sens<lo>_<hi>") };
             bowshock_cfd::limiter::set_diag_sensor(lo, hi);
+        }
+    }
+    // region refinements of the base-wake grid (cell counts times the factor, even): `seg` the boattail's cells, `wake` the cells behind the base, `gap` the rows between the sting and the base
+    // radius, `njo` the rows above the body, `dx` the end-cell size at the shoulder and the base corner divided by the factor, `drw` the first cell height divided by it
+    for p in &parts {
+        let f = |name: &str| p.strip_prefix(name).and_then(|v| v.parse::<f64>().ok());
+        if let Some(base) = c.grid.base.as_mut() {
+            let even = |n: usize, k: f64| (((n as f64 * k) / 2.0).round() as usize * 2).max(2);
+            if let Some(k) = f("seg") {
+                let last = base.n_seg.len() - 1;
+                base.n_seg[last] = even(base.n_seg[last], k);
+            }
+            if let Some(k) = f("wake") {
+                base.n_wake = even(base.n_wake, k);
+            }
+            if let Some(k) = f("gap") {
+                base.n_gap = even(base.n_gap, k);
+            }
+            if let Some(k) = f("njo") {
+                base.nj_out = even(base.nj_out, k);
+            }
+            if let Some(k) = f("dx") {
+                base.dx_tip /= k;
+            }
+            if let Some(k) = f("drw") {
+                base.dr_wall /= k;
+            }
         }
     }
     if parts.contains(&"fo") {
@@ -179,6 +207,11 @@ fn bt1_fox_boattail() {
                 }
             }
             println!("{tag} rms Cp x>3 {:.4} (n {n})", (sq / n as f64).sqrt());
+            // apples to apples: the drag of the nose (0 .. 2) and of the boattail (4 .. 5) by the same trapezoid over the orifices, from the data and from the solver's Cp at the orifices
+            let solver_cp: Vec<f64> = fox::OGIVE_CYL_X_D.iter().map(|&x| at(x.min(cps.last().unwrap().0))).collect();
+            let (dn_d, dn_s) = (quad(k, true, None), quad(k, true, Some(&solver_cp)));
+            let (db_d, db_s) = (quad(k, false, None), quad(k, false, Some(&solver_cp)));
+            println!("{tag} orifice quadrature: nose data {dn_d:+.4} solver {dn_s:+.4} | boattail data {db_d:+.4} solver {db_s:+.4} | nose+boattail data {:+.4} solver {:+.4}", dn_d + db_d, dn_s + db_s);
             // first fluid row above the body: total pressure and entropy loss per column
             let pt = |w: &[f64; 5]| {
                 let c2 = GAMMA * w[4] / w[0];
@@ -353,4 +386,33 @@ fn bt3_fox_legacy_2d() {
             println!("{tag} rms Cp x>3 {:.4} (n {n})", (sq / n as f64).sqrt());
         }
     }
+}
+
+/// The pressure drag on `S = pi d^2 / 4` of the nose (`nose`) or the boattail of the Fox body (configuration 4) by the trapezoid over the orifices in the area `A / S = 4 r^2`, from the data (`cp`
+/// `None`) or from the `Cp` at the orifices `cp`. The nose starts at the tip with the first orifice's `Cp`, ends at `x = 2` with the last nose orifice's; the boattail goes from `x = 4` (the first
+/// orifice behind it) to the base (`x = 5`, the last orifice).
+fn quad(k: usize, nose: bool, cp: Option<&[f64]>) -> f64 {
+    let xs = &fox::OGIVE_CYL_X_D;
+    let data = match k {
+        0 => &fox::OGIVE_CYL_CP_M04_MEAN,
+        1 => &fox::OGIVE_CYL_CP_M06_MEAN,
+        _ => &fox::OGIVE_CYL_CP_M08_MEAN,
+    };
+    let cps: &[f64] = cp.unwrap_or(data);
+    let (rho, l, r0) = (4.25f64, 2.0f64, 0.5f64);
+    let area = |x: f64| -> f64 {
+        let r = if x <= l { (rho * rho - (l - x).powi(2)).sqrt() + r0 - rho } else if x < 4.0 { r0 } else { r0 - (x - 4.0) * 10f64.to_radians().tan() };
+        4.0 * r * r
+    };
+    let pts: Vec<(f64, f64)> = xs.iter().zip(cps).filter(|(&x, _)| if nose { x <= 2.0 } else { x > 3.99 }).map(|(&x, &c)| (x, c)).collect();
+    let (a, b) = if nose { (0.0, 2.0) } else { (4.0, 5.0) };
+    let mut xq = vec![a];
+    let mut cq = vec![pts[0].1];
+    for &(x, c) in &pts {
+        xq.push(x);
+        cq.push(c);
+    }
+    xq.push(b);
+    cq.push(pts.last().unwrap().1);
+    (0..xq.len() - 1).map(|i| -0.5 * (cq[i] + cq[i + 1]) * (area(xq[i + 1]) - area(xq[i]))).sum()
 }
