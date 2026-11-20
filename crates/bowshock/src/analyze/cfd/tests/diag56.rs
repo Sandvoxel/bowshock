@@ -28,6 +28,9 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     if let Some(x) = env_f("DIAG_FIRST") {
         c.numerics.first_order_iters = x as usize;
     }
+    if std::env::var_os("DIAG_LE_ROWS").is_some() {
+        c.grid.fin_le_rows = true;
+    }
     if let Some(x) = env_f("DIAG_ACROSS") {
         c.grid.fin_cells_across = x as usize;
     }
@@ -41,6 +44,7 @@ fn hook(c: &mut solver::engine::case3::Case3) {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
         let label = std::env::var("DIAG_ROCKET").unwrap_or_default();
         solver::engine::grid3::print_quality(&label, &g);
+        solver::engine::grid3::print_le_quality(&label, &g);
         if let Ok(v) = std::env::var("DIAG_CELL") {
             let v: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
             let (ci, cj, ck, span) = (v[0], v[1], v[2], v[3]);
