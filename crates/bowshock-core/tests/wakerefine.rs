@@ -235,3 +235,12 @@ fn variants_build() {
         println!("{v}: {}x{}", s.grid.ni, s.grid.nj);
     }
 }
+
+/// The G-X4 sector on the Arcas sting builds (CPU, no solve).
+#[test]
+fn arcas_sector_on_a_sting_builds() {
+    let r = arcas_rocket(arcas_stab::LONG_TUBE_LENGTH - arcas::TUBE_LENGTH, arcas::TRANSONIC_RE_PER_M, arcas::TRANSONIC_T0_K);
+    let c = r.sector_on_sting(0.6, 1.2, TierKind::Coarse, STING_ARCAS);
+    let s = c.build_solver_cached().expect("sector on a sting");
+    println!("sector on a sting: {}x{}x{}", s.grid.ni, s.grid.nj, s.grid.nk);
+}

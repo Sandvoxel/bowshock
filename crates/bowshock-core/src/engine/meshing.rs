@@ -233,4 +233,38 @@ mod tests {
         assert_eq!(segment_cells(40, 59.7, 1, 0.03), 60);
         assert_eq!(segment_cells(80, 59.7, 2, 0.015), 120);
     }
+
+    /// Only a body with a boattail has its end cells refined (Coarse and Fine tiers); a flat-based body, a diameter step, the Draft and Lift tiers keep the plain grid.
+    #[test]
+    fn only_a_boattail_refines_the_end_cells() {
+        use crate::engine::body_grid::{Body, Nose};
+        use crate::engine::case3::{Case3, Tier, WallFlow};
+        let flow = WallFlow { re_c: 1.0e7, mach_max: 1.2, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.38 };
+        let nose = Body { nose: Nose::TangentOgive { fineness: 3.0 } };
+        let dx = |b: BaseBody, t: Tier| Case3::wedge(0.8, b, 0).with_tier(t).grid.base.expect("base grid").dx_tip;
+        let plain = base_grid(&BaseBody::cylinder(nose, 6.0), 0).dx_tip;
+        assert_eq!(dx(BaseBody::cylinder(nose, 6.0), Tier::Coarse(flow)), plain);
+        assert_eq!(dx(BaseBody::cylinder(nose, 6.0).with_step(-0.05, 0.05), Tier::Coarse(flow)), plain);
+        let boat = BaseBody::cylinder(nose, 6.0).with_boattail(1.0, 10f64.to_radians());
+        assert_eq!(dx(boat.clone(), Tier::Coarse(flow)), plain * BOATTAIL_DX_FACTOR);
+        assert_eq!(dx(boat.clone(), Tier::Fine(flow)), plain * BOATTAIL_DX_FACTOR);
+        assert_eq!(dx(boat.clone(), Tier::Euler), plain);
+        assert_eq!(dx(boat.clone(), Tier::Lift(flow)), plain);
+        assert_eq!(dx(boat, Tier::draft(flow)), DRAFT_DX_TIP);
+    }
+
+    /// A body on a sting has its gap rows clustered at both walls (the sting wall resolved), a free-wake body keeps the one-sided rows.
+    #[test]
+    fn a_sting_gets_two_sided_gap_rows() {
+        use crate::engine::body_grid::{Body, Nose};
+        let nose = Body { nose: Nose::TangentOgive { fineness: 3.0 } };
+        let body = BaseBody::cylinder(nose, 6.0).with_boattail(1.0, 10f64.to_radians());
+        let (mut a, mut sa) = (base_grid(&body, 0), sting_grid(&body, 0));
+        resolve_walls(&mut a, &mut sa, &body, 1e-5);
+        assert!(a.gap_one_sided);
+        let stung = body.clone().with_sting(0.13);
+        let (mut b, mut sb) = (base_grid(&stung, 0), sting_grid(&stung, 0));
+        resolve_walls(&mut b, &mut sb, &stung, 1e-5);
+        assert!(!b.gap_one_sided && b.n_gap % 2 == 0 && b.n_gap >= 2);
+    }
 }

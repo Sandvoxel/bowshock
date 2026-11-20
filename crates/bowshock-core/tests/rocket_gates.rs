@@ -252,9 +252,11 @@ fn gate_x3_grm_cn_alpha_and_xcp() {
 // Axial force on the Coarse sector
 
 /// The axial force without the base of the four-fin sector, `C_A,corr` of the data: pressure and friction of the body and the fins on the data's reference area.
-fn sector_axial(r: &Rocket, mach: f64, mach_max: f64, fins: bool) -> Result<(Solved, f64, bool), String> {
+///
+/// `sting` is the radius of the support behind the base over the nose diameter (`0`: free wake): the tunnel models of NASA TN D-4013 hang on a 1 in sting behind the 1.47 in base.
+fn sector_axial(r: &Rocket, mach: f64, mach_max: f64, fins: bool, sting: f64) -> Result<(Solved, f64, bool), String> {
     let kind = tier_kind();
-    let case = if fins { r.sector(mach, mach_max, kind) } else { r.finless(mach, mach_max, kind) };
+    let case = if fins { r.sector_on_sting(mach, mach_max, kind, sting) } else { r.finless_on_sting(mach, mach_max, kind, sting) };
     let s = Session::new(&case).and_then(|mut s| s.run(&case, false))?;
     let v = r.area_factor() * (s.parts.total - s.parts.base - s.parts.friction.base);
     Ok((s, v, is_gate(kind, &case)))
@@ -282,6 +284,9 @@ fn print_axial(lines: &mut Lines, id: &str, case: &str, (gated, viscous, known):
     compare(lines, gated, viscous, known, id, case, v, data, band);
 }
 
+/// Radius of the 1 in sting of the Arcas tunnel models (NASA TN D-4013 p. 4) over the 2.25 in nose diameter.
+const ARCAS_STING: f64 = 0.5 / 2.25;
+
 /// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, Mach 0.6 / 0.8 gated (fins on
 /// 15 %, fins off 12 % or 0.03, the increment 30 % or 0.03) and Mach 0.7-1.2 INFO (reading uncertainty 0.02 at Mach 0.9-1.0), as G-F4 for the short model. `FAIL KNOWN` (DESIGN3D item 55):
 /// the fins-off lines at Mach 0.6 / 0.8: +16.8 / +16.0 % (DESIGN3D item 62, `tests/subdrag.rs`: NOT the friction, which is 0.240 / 0.233 of the 0.292 / 0.293 and within 2 % of a flat-plate estimate
@@ -295,7 +300,7 @@ fn gate_x4_arcas_long_axial_force() {
     let rows: Vec<_> = rows.into_iter().filter(|r| keep.contains(&r.0)).collect();
     let runs = par_map(&rows, |&(m, _, _)| {
         let r = arcas_for(m, true);
-        (sector_axial(&r, m, 1.2, false), sector_axial(&r, m, 1.2, true))
+        (sector_axial(&r, m, 1.2, false, ARCAS_STING), sector_axial(&r, m, 1.2, true, ARCAS_STING))
     });
     let mut lines = Lines::default();
     for (&(m, off, on), (a, b)) in rows.iter().zip(runs) {
@@ -335,7 +340,7 @@ fn gate_x5_yuska_axial_force() {
     add("A-8x6", false, false, &yuska::MODEL_A_ROLL0_8X6, false);
     let keep = machs(&rows.iter().map(|r| r.3).collect::<Vec<_>>());
     rows.retain(|r| keep.contains(&r.3));
-    let runs = par_map(&rows, |&(_, short, trim, m, _, _)| sector_axial(&yuska_rocket(short, trim, yuska_re_per_ft(m)), m, 3.47, true));
+    let runs = par_map(&rows, |&(_, short, trim, m, _, _)| sector_axial(&yuska_rocket(short, trim, yuska_re_per_ft(m)), m, 3.47, true, 0.0));
     let mut lines = Lines::default();
     for (&(name, _, _, m, ca, gated), r) in rows.iter().zip(runs) {
         match r {
@@ -364,7 +369,7 @@ fn gate_x6_grm_axial_force() {
     let rows: Vec<(f64, f64)> = grm::FINS_ON.iter().map(|r| (r.0, r.3)).collect();
     let keep = machs(&rows.iter().map(|r| r.0).collect::<Vec<_>>());
     let rows: Vec<_> = rows.into_iter().filter(|r| keep.contains(&r.0)).collect();
-    let runs = par_map(&rows, |&(m, _)| sector_axial(&grm_rocket(), m, 1.3, true));
+    let runs = par_map(&rows, |&(m, _)| sector_axial(&grm_rocket(), m, 1.3, true, 0.0));
     let mut lines = Lines::default();
     for (&(m, caf), r) in rows.iter().zip(runs) {
         match r {
