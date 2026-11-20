@@ -7,7 +7,7 @@ use bowshock_sim::{BodyKind, FinCrossSection, FinPlanform, FinSet, NoseShape, Ve
 pub(super) const SOLVER_REV: u64 = 5;
 /// The same for a table the 3D engine (`BOWSHOCK_ENGINE=3d`) solved: a separate number, so that a table of one engine is stale to the other, and the legacy keys are unchanged.
 /// At the engine swap this replaces [`SOLVER_REV`] (the legacy engine's tables are then stale, which they are meant to be).
-pub(super) const SOLVER_REV_3D: u64 = 1003;
+pub(super) const SOLVER_REV_3D: u64 = 1004;
 /// The lowest Mach number a drag node's wall spacing is sized for on a shared-sizing table ([`super::sizing_mach`], DESIGN3D item 57).
 pub const DRAG_SIZING_MACH_FLOOR: f64 = 1.0;
 /// Relative drag tolerance of the solver's stop rule: a point ends once its total drag varies by less than this over 500
@@ -31,7 +31,7 @@ pub(super) const NODE_GAP: f64 = 0.12;
 /// Bump when what a stored 3D stability solve means changes (solver, grid, how the forces are reduced).
 pub(super) const LIFT_REV: u64 = 5;
 /// [`LIFT_REV`] of the 3D engine (the half domain on the base-wake grid, the base solved, the fins on that grid).
-pub(super) const LIFT_REV_3D: u64 = 1002;
+pub(super) const LIFT_REV_3D: u64 = 1004;
 
 /// The revision of the engine in use: what a stored table's key carries.
 fn solver_rev() -> u64 {

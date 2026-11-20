@@ -490,12 +490,13 @@ pub(super) enum NodeKind {
     Lift,
 }
 
-/// The Mach number the walls of a node's grid are sized for on a table with a shared sizing (DESIGN3D item 57): the angle nodes take the table's highest (`table_max`), a drag node its own
-/// Mach number but not below [`DRAG_SIZING_MACH_FLOOR`] (and not above `table_max`). Sized for its own Mach number a low-Mach node has a first cell at 30-50 wall units on the fins and
-/// is not grid-converged (Mach 0.1: CD +8 % at refinement 1, still falling at 1.333); sized for Mach 1 and up it is within 0.3 % of the Mach-3 sizing for a third to half less time.
+/// The Mach number the walls of a node's grid are sized for on a table with a shared sizing (DESIGN3D item 57): a drag node its own Mach number but not below
+/// [`DRAG_SIZING_MACH_FLOOR`], an angle node its own Mach number (user decision: the Lift tier's CN is not grid-converged under any sizing, 4-7 % per refinement step, and the own-Mach
+/// grid is the cheapest), neither above `table_max`. Sized for its own Mach number a low-Mach drag node has a first cell at 30-50 wall units on the fins and is not grid-converged
+/// (Mach 0.1: CD +8 % at refinement 1, still falling at 1.333); sized for Mach 1 and up it is within 0.3 % of the Mach-3 sizing for a third to half less time.
 pub(super) fn sizing_mach(kind: NodeKind, mach: f64, table_max: f64) -> f64 {
     match kind {
-        NodeKind::Lift => table_max,
+        NodeKind::Lift => mach.min(table_max),
         NodeKind::Drag => mach.max(DRAG_SIZING_MACH_FLOOR).min(table_max),
     }
 }
@@ -801,10 +802,11 @@ mod draft_first_tests {
 mod sizing_tests {
     use super::*;
 
-    /// The angle nodes keep the table's sizing, a drag node its own Mach number with a floor, and none goes above the table's highest.
+    /// An angle node is sized for its own Mach number, a drag node for its own with a floor, and none above the table's highest.
     #[test]
-    fn the_drag_nodes_are_sized_for_their_own_mach_number_with_a_floor() {
-        assert_eq!(sizing_mach(NodeKind::Lift, 0.5, 3.0), 3.0);
+    fn the_nodes_are_sized_for_their_own_mach_number_the_drag_nodes_with_a_floor() {
+        assert_eq!(sizing_mach(NodeKind::Lift, 0.5, 3.0), 0.5);
+        assert_eq!(sizing_mach(NodeKind::Lift, 3.0, 2.0), 2.0);
         assert_eq!(sizing_mach(NodeKind::Drag, 0.1, 3.0), DRAG_SIZING_MACH_FLOOR);
         assert_eq!(sizing_mach(NodeKind::Drag, 2.3, 3.0), 2.3);
         assert_eq!(sizing_mach(NodeKind::Drag, 0.1, 0.5), 0.5);
