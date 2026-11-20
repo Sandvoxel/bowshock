@@ -1090,11 +1090,15 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         // taper as it always did (the example rocket's trailing edge moves 0.13 d over a 0.015 d cell, and its table is as it was)
         let room_up = if pl.i_seg0 < pl.i_le { pl.x_le_root - xs[pl.i_seg0] } else { xs[pl.i_le] - xs[pl.i_le.saturating_sub(1)] };
         let widened = up > ZONE_TRIGGER * room_up;
-        // the move fades away over the rows above the tip: four, or when the zone was widened as many as lift the row `FADE_REACH` times the move above the tip (a row a move
-        // higher is a shear of 45 degrees, and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
+        // the move fades away over the rows above the tip: four, or as many as lift the row `FADE_REACH` times the move above the tip (a row a move
+        // higher is a shear of 45 degrees; a fin with room ahead of its edge, Byrum's, sheared its rows above the tip within four cells, 10 degrees between the cell edges), and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
         // did at 75 degrees)
         let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
-        let nfade = if widened { (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip) } else { 4 };
+        let nfade = if widened || std::env::var_os("BOWSHOCK_NFADE_ALL").is_some() {
+            (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip)
+        } else {
+            4
+        };
         let vj_of = |jj: usize| if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / nfade as f64 };
         // the tip row stands on one cylinder `r_tip` over the fin: the fraction of its way from the body surface under each column to the boundary
         let target_ref = pl.span / (r_far - pl.r_t);
@@ -1118,11 +1122,17 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         };
         let x_le_eff = |jj: usize| pl.x_le_root + vj_of(jj) * (row(jj).1 - pl.x_le_root);
         let x_te_eff = |jj: usize| pl.x_te_root + vj_of(jj) * (row(jj).1 + row(jj).2 - pl.x_te_root);
-        let (need_le, need_te) = (ramp_need(pl.i_le, &x_le_eff), ramp_need(pl.i_te, &x_te_eff));
+        let off = std::env::var_os("BOWSHOCK_RAMP_OFF").is_some();
+        let (need_le, need_te) = if off { (0.0, 0.0) } else { (ramp_need(pl.i_le, &x_le_eff), ramp_need(pl.i_te, &x_te_eff)) };
         if std::env::var_os("BOWSHOCK_RAMP_DEBUG").is_some() {
             let dx = |n: usize| xs[pl.i_le] - xs[pl.i_le.saturating_sub(n)];
             let ex = |n: usize| xs[(pl.i_te + n).min(ni)] - xs[pl.i_te];
-            println!("RAMP need le {need_le:.4} (columns give {:.4}, widened {widened}) te {need_te:.4} (columns give {:.4})", dx(8) - dx(4), ex(8) - ex(4));
+            println!(
+                "RAMP need le {need_le:.4} (columns give {:.4}, widened {widened}) te {need_te:.4} (columns give {:.4}) nfade {nfade} height(tip+4)/up {:.3}",
+                dx(8) - dx(4),
+                ex(8) - ex(4),
+                height((pl.j_tip + 4).min(nj - j_off)) / up
+            );
         }
         // columns beside the edges: the rows follow the tip's cylinder at full weight over the 4 columns next to the edge and fade away over the next 4; when the sweep zone is
         // widened ([`ZONE_REACH`]) the sweep shears the rows of those columns by up to the move of the edge, and a fade over cells that short bends them (a slope of 0.44 against
@@ -1205,7 +1215,11 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         let t = f.thickness;
         let h_at = |i: usize, jj: usize| -> f64 {
             let (_, _, chord) = row(jj);
-            let xi = if pl.round_rows && chord > 1e-12 { row_offs[jj.min(pl.j_tip)][i.clamp(pl.i_le, pl.i_te) - pl.i_le] / chord } else { (nodes0[i] - pl.x_le_root) / f.root_chord };
+            let xi = if pl.round_rows && chord > 1e-12 {
+                row_offs[jj.min(pl.j_tip)][i.clamp(pl.i_le, pl.i_te) - pl.i_le] / chord
+            } else {
+                (nodes0[i] - pl.x_le_root) / f.root_chord
+            };
             half_thickness(&f.profile, t, chord, xi)
         };
         for j in j_off..=nj {
@@ -1325,7 +1339,10 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                     }
                 }
                 if let Some((pl, _)) = &plan {
-                    println!("FOLD plan i_le {} i_te {} i_seg0 {} i_seg1 {} i_floor {} j_tip {} j_off {j_off}", pl.i_le, pl.i_te, pl.i_seg0, pl.i_seg1, pl.i_floor, pl.j_tip);
+                    println!(
+                        "FOLD plan i_le {} i_te {} i_seg0 {} i_seg1 {} i_floor {} j_tip {} j_off {j_off}",
+                        pl.i_le, pl.i_te, pl.i_seg0, pl.i_seg1, pl.i_floor, pl.j_tip
+                    );
                 }
             }
             return Err(Error::Grid(e));
@@ -1871,6 +1888,41 @@ mod tests {
         eprintln!("sweep at a segment start: widest neighbour ratio {:.2} at i {} row {}", worst.0, worst.1, worst.2);
         // the cell ahead of the edge is the segment's own, 3 times the finer edge cell of the round section (more in the rows of a tapering chord): it was 2 400
         assert!(worst.0 < 6.0, "neighbouring cell widths differ by {:.1} at i {} of row {}", worst.0, worst.1, worst.2);
+    }
+
+    /// The swept rounded fin of the Cancer Descending fixture (60 degrees, tip chord 0.29 of the root's, the tip trailing edge behind the root's, 0.0625 d thick; DESIGN3D item
+    /// 66) built with a fold at 63 % span: the rows bent to meet the tip's cylinder faded over 4 columns, a slope that reached the sweep shear's. It builds, and the first chord
+    /// cell of the round edge keeps its size down the span.
+    #[test]
+    fn a_swept_tapered_rounded_fin_does_not_fold_and_keeps_its_edge_cell() {
+        for level in [0u32, 1] {
+            let mut p = params(
+                level,
+                Some(Fins3 {
+                    count: 3,
+                    root_chord: 3.167,
+                    tip_chord: 0.917,
+                    span: 1.5,
+                    sweep: 2.667,
+                    thickness: 0.0625,
+                    te_to_base: 0.84,
+                    profile: FinProfile::Rounded,
+                    planform: None,
+                }),
+            );
+            let nose = Nose::Cone { half_angle: 10f64.to_radians() };
+            p.sting.body = BaseBody { body: Body { nose }, segments: vec![Segment { length: 14.0, slope: 0.0 }], sting_radius: 0.0 };
+            p.sting.n_seg = vec![56 << level];
+            let g = body_grid3(&p).expect("the grid builds without a negative volume");
+            let (le_root, j0, j_tip) = (g.solid[0].i.start, g.solid[0].j.start, g.solid[0].j.len());
+            let k_side = if g.solid[0].k.start > 0 { g.solid[0].k.start - 1 } else { g.solid[0].k.end };
+            let node = |i: usize, j: usize| g.x[(k_side * (g.nj + 1) + j) * (g.ni + 1) + i];
+            // the first chord cell of the row at 60 % of the span against the root's
+            let j60 = j0 + 3 * j_tip / 5;
+            let cell = |j: usize| node(le_root + 1, j) - node(le_root, j);
+            eprintln!("level {level}: first chord cell {:.5} at the root, {:.5} at row {j60} of {j_tip}", cell(j0), cell(j60));
+            assert!(cell(j60) > 0.7 * cell(j0), "the edge cell shrank from {:.5} to {:.5}", cell(j0), cell(j60));
+        }
     }
 
     /// Axial node positions along the wall row of a 3D grid.
