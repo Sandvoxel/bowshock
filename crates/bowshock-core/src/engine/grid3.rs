@@ -65,6 +65,11 @@ const RAMP_REACH: f64 = 0.3;
 /// Cells over the radius of a round fin edge: the first chord cell is at most this fraction of it.
 const LE_RADIUS_CELLS: f64 = 4.0;
 
+/// EXPERIMENT (removed before the commit of the fix): smallest first chord cell of a row, as a fraction of the root's.
+fn le_floor() -> f64 {
+    std::env::var("BOWSHOCK_LE_FLOOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
+}
+
 /// A zone is widened when the move of an edge is more than this fraction of the room the segment has for it.
 const ZONE_TRIGGER: f64 = 0.5;
 
@@ -304,6 +309,11 @@ struct FinPlan {
     planform: Option<Planform>,
     /// Radial fractions of the node rows, including the extra rows of `span_cells` (`nj + 1`).
     sj: Vec<f64>,
+    /// The chord nodes of the root row (offsets from the root leading edge, `nf + 1`), the first cell the clustering aimed at and whether the rows above the root keep it
+    /// (a rounded section: [`FinPlan::row_offsets`]).
+    fin_offs: Vec<f64>,
+    edge: f64,
+    round_rows: bool,
 }
 
 impl FinPlan {
@@ -321,6 +331,23 @@ impl FinPlan {
     /// Fraction of the span (from the body surface to the tip) of the node row `jj`.
     fn span_fraction(&self, jj: usize) -> f64 {
         self.sj[jj.min(self.j_tip)] / self.sj[self.j_tip]
+    }
+
+    /// Chord nodes (offsets from the leading edge of the row) of a row whose chord is `chord`. The rows of a tapered fin used to be the root row scaled with the chord, so
+    /// the first cell of a round edge of constant radius shrank with it (the Rabia fixture: a fourth of the radius at the root, a sixteenth at 76 % span, a cell 100 to 450
+    /// times shorter than the row is high, and the collapse that started there); a rounded section keeps the root's first cell down the span until the chord itself gives
+    /// `0.3 chord / nf` (item 66). The root row and any row of the root's chord are the root's nodes.
+    fn row_offsets(&self, chord: f64) -> Vec<f64> {
+        let nf = self.fin_offs.len() - 1;
+        let c_root = self.fin_offs[nf];
+        if !self.round_rows || chord <= 1e-12 || (chord - c_root).abs() <= 1e-12 * c_root {
+            return self.fin_offs.iter().map(|o| o * chord / c_root).collect();
+        }
+        let edge = (0.3 * chord / nf as f64).min(self.edge).max(le_floor() * self.edge);
+        let fresh = two_sided_nodes(chord, nf, edge);
+        // the nodes of the root row that sit on a body station stay where they were, scaled
+        let root = two_sided_nodes(c_root, nf, self.edge);
+        fresh.iter().zip(self.fin_offs.iter().zip(&root)).map(|(f, (o, r))| f + (o - r) * chord / c_root).collect()
     }
 }
 
@@ -897,6 +924,9 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         span,
         planform: f.planform.clone(),
         sj,
+        fin_offs,
+        edge,
+        round_rows: matches!(f.profile, FinProfile::Rounded) && std::env::var_os("BOWSHOCK_LE_ROWS").is_none_or(|v| v != "0"),
     })
 }
 
@@ -1047,6 +1077,7 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
             }
         };
         let mut up = 0.0f64;
+        let row_offs: Vec<Vec<f64>> = if pl.round_rows { (0..=pl.j_tip).map(|jj| pl.row_offsets(row(jj).2)).collect() } else { Vec::new() };
         for jj in 0..=pl.j_tip {
             up = up.max((row(jj).1 - pl.x_le_root).abs());
         }
@@ -1122,6 +1153,13 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                     xn[j * (ni + 1) + i] = old + vj * (new - old);
                 }
             }
+            if pl.round_rows && chord > 1e-12 {
+                // a rounded section keeps the first chord cell of the root down the span ([`FinPlan::row_offsets`])
+                for i in pl.i_le..=pl.i_te {
+                    let old = nodes0[i];
+                    xn[j * (ni + 1) + i] = old + vj * (x_le + row_offs[jj.min(pl.j_tip)][i - pl.i_le] - old);
+                }
+            }
         }
         // nominal angular width of a layer cell away from the fin: the cells next to it (one uniform cell of the domain, the first cell of a stack)
         let cell_ang = lay.as_ref().map_or(span / nk as f64, |l| l.cell_ang);
@@ -1131,7 +1169,7 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         let t = f.thickness;
         let h_at = |i: usize, jj: usize| -> f64 {
             let (_, _, chord) = row(jj);
-            let xi = (nodes0[i] - pl.x_le_root) / f.root_chord;
+            let xi = if pl.round_rows && chord > 1e-12 { row_offs[jj.min(pl.j_tip)][i.clamp(pl.i_le, pl.i_te) - pl.i_le] / chord } else { (nodes0[i] - pl.x_le_root) / f.root_chord };
             half_thickness(&f.profile, t, chord, xi)
         };
         for j in j_off..=nj {
@@ -1527,6 +1565,40 @@ pub fn print_quality(label: &str, g: &Grid3) {
             at(i, j, k),
             dims(i, j, k),
             dims(i + nb.0, j + nb.1, k + nb.2)
+        );
+    }
+}
+
+/// Diagnostic: the cells beside the leading edge of the fin walls, row by row (`j`): the first three chord cells' axial lengths on the fin face line, the radial row height,
+/// how far the edge moves aft from one row to the next (the sweep), the angle between the i and j edges in the meridian plane and the cell's aspect.
+pub fn print_le_quality(label: &str, g: &Grid3) {
+    let node = |i: usize, j: usize, k: usize| {
+        let n = (k * (g.nj + 1) + j) * (g.ni + 1) + i;
+        [g.x[n], g.y[n], g.z[n]]
+    };
+    let is_fin = |i: usize, j: usize, k: usize| matches!(g.part_of(i, j, k), Some(Part::Fin(_)));
+    // a fin layer cell and its first chord column
+    let Some((_, _, k0)) = (0..g.nk).flat_map(|k| (0..g.nj).flat_map(move |j| (0..g.ni).map(move |i| (i, j, k)))).find(|&(i, j, k)| is_fin(i, j, k)) else {
+        return;
+    };
+    let k_side = if k0 > 0 { k0 - 1 } else { k0 };
+    for j in 0..g.nj {
+        let Some(i_le) = (0..g.ni).find(|&i| is_fin(i, j, k0)) else { continue };
+        let r = |i: usize, j: usize| node(i, j, k_side)[1].hypot(node(i, j, k_side)[2]);
+        let dx = |i: usize| node(i + 1, j, k_side)[0] - node(i, j, k_side)[0];
+        let dr = r(i_le, j + 1) - r(i_le, j);
+        let shift = node(i_le, j + 1, k_side)[0] - node(i_le, j, k_side)[0];
+        let ang = dr.atan2(shift.abs()).to_degrees();
+        let along = dr.hypot(shift);
+        println!(
+            "LE {label}: j {j} i_le {i_le} x {:.4} r {:.4} cells dx {:.5} {:.5} {:.5} (ahead {:.5}) dr {dr:.5} shift {shift:.5} edge angle {ang:.1} deg aspect {:.1}",
+            node(i_le, j, k_side)[0],
+            r(i_le, j),
+            dx(i_le),
+            dx(i_le + 1),
+            dx(i_le + 2),
+            dx(i_le - 1),
+            along / dx(i_le).abs().max(1e-300)
         );
     }
 }

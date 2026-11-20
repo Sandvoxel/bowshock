@@ -41,6 +41,7 @@ fn hook(c: &mut solver::engine::case3::Case3) {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
         let label = std::env::var("DIAG_ROCKET").unwrap_or_default();
         solver::engine::grid3::print_quality(&label, &g);
+        solver::engine::grid3::print_le_quality(&label, &g);
         if let Ok(v) = std::env::var("DIAG_CELL") {
             let v: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
             let (ci, cj, ck, span) = (v[0], v[1], v[2], v[3]);
