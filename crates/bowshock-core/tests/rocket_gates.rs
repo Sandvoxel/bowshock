@@ -105,6 +105,9 @@ struct StabGate<'a> {
     /// Mach numbers whose `CN_alpha` / `x_cp` lines are documented discrepancies (`FAIL KNOWN DESIGN3D-X-item-55`, the band is not widened).
     known_cn: &'static [f64],
     known_xcp: &'static [f64],
+    /// Every incidence from the free stream instead of warm-started from the previous one: the Arcas short model at Mach 0.6 has two steady states at 4 degrees (CN 1.004 from a cold start,
+    /// 0.849 after 2 degrees; DESIGN3D item 67), and the data's angles are independent runs.
+    cold: bool,
 }
 
 fn run_stability(g: &StabGate) -> Lines {
@@ -116,7 +119,7 @@ fn run_stability(g: &StabGate) -> Lines {
         let mut s = Session::new(&cases[0])?;
         let mut out = Vec::new();
         for (k, c) in cases.iter().enumerate() {
-            out.push(s.run(c, k > 0)?);
+            out.push(s.run(c, k > 0 && !g.cold)?);
         }
         Ok((out, r.area_factor(), is_gate(tier_kind(), &cases[0])))
     });
@@ -200,6 +203,7 @@ fn gate_x1_arcas_cn_alpha_and_xcp() {
         info: false,
         known_cn: &[0.8],
         known_xcp: &[0.6, 0.8, 0.9, 1.0, 1.2],
+        cold: true,
     };
     run_stability(&g).finish();
 }
@@ -235,6 +239,7 @@ fn gate_x2_yuska_cn_alpha_and_xcp() {
         info,
         known_cn: if tag == "yuska-C-roll0" { &[2.38] } else { &[] },
         known_xcp: if tag.starts_with("yuska-A-roll") { &[3.47] } else { &[] },
+        cold: false,
     };
     // leaked so the closures live for the gates' `'static` borrow
     let (a, b, c): (&'static (dyn Fn(f64) -> Rocket + Sync), &'static (dyn Fn(f64) -> Rocket + Sync), &'static (dyn Fn(f64) -> Rocket + Sync)) =
@@ -278,6 +283,7 @@ fn gate_x3_grm_cn_alpha_and_xcp() {
         info: false,
         known_cn: &[0.85, 0.92, 0.94],
         known_xcp: &[],
+        cold: false,
     };
     run_stability(&g).finish();
 }
