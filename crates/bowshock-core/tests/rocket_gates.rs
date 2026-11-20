@@ -285,7 +285,7 @@ fn print_axial(lines: &mut Lines, id: &str, case: &str, (gated, viscous, known):
 /// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, Mach 0.6 / 0.8 gated (fins on
 /// 15 %, fins off 12 % or 0.03, the increment 30 % or 0.03) and Mach 0.7-1.2 INFO (reading uncertainty 0.02 at Mach 0.9-1.0), as G-F4 for the short model. `FAIL KNOWN` (DESIGN3D item 55):
 /// the fins-off lines at Mach 0.6 / 0.8: +16.8 / +16.0 % (DESIGN3D item 62, `tests/subdrag.rs`: NOT the friction, which is 0.240 / 0.233 of the 0.292 / 0.293 and within 2 % of a flat-plate estimate
-/// (0.244 / 0.239), the grid (+0.1 %) or the carborundum band (-0.1 %); the excess is the boattail pressure drag, +0.051 / +0.059 on a body whose data leave about 0.006 for it. The test has a 1 in sting
+/// (0.244 / 0.239), the grid (+0.1 %) or the carborundum band (-0.1 %); the excess is attributed in item 62 to the boattail pressure drag (+0.051 / +0.059 on a body whose data leave about 0.006 for it); item 64 does not establish that (the Fox Euler nose + boattail matches the measured one, the friction is open). The test has a 1 in sting
 /// the gate omits (-5 points with it), and a body of the data's friction would need laminar flow to 7 calibres, which the band's roughness Reynolds number of about 750 does not support).
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
