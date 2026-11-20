@@ -91,6 +91,16 @@ pub struct RansOpts3 {
     /// Dilatation-dissipation compressibility correction of the SST model ([`Compressibility`], DESIGN3D item 54). `Off` (default): the plain model, bit-identical to a solver
     /// without the feature.
     pub compressibility: Compressibility,
+    /// The wall distance of every cell centroid ([`grid_wall_distance`]) when the caller has it already (the engine's grid cache keeps it for the cases of one grid): the exact
+    /// distance is a function of the grid alone, and taking it is bit-identical to computing it. `None` (default): computed here; a vector of another length is ignored.
+    pub dwall: Option<std::sync::Arc<Vec<f64>>>,
+}
+
+/// The exact wall distance of every fluid cell centroid of `grid` to its wall faces ([`wall_distance3`]; `f64::INFINITY` in solid cells): what [`Solver3::set_viscous_with`]
+/// computes for an SST run, as a function of the grid alone.
+pub fn grid_wall_distance(grid: &Grid3) -> Vec<f64> {
+    let solid: Vec<bool> = grid.part.iter().map(|&p| p != crate::grid3::PART_FLUID).collect();
+    wall_distance3(grid, &solid, &wall_faces(grid, &solid))
 }
 
 impl Default for RansOpts3 {
@@ -104,6 +114,7 @@ impl Default for RansOpts3 {
             wall_thermal: WallThermal::Adiabatic,
             transition: None,
             compressibility: Compressibility::Off,
+            dwall: None,
         }
     }
 }
@@ -176,8 +187,13 @@ impl Solver3 {
         let mut ks = Vec::new();
         let mut gamma = Vec::new();
         if sst {
-            let faces = wall_faces(&self.grid, &self.solid);
-            dwall = crate::timing::timed("walldist", || wall_distance3(&self.grid, &self.solid, &faces));
+            let given = opts.dwall.filter(|d| d.len() == nc);
+            // the wall faces are needed by the distance and by the transition's intermittency
+            let faces = if given.is_some() && opts.transition.is_none() { Vec::new() } else { wall_faces(&self.grid, &self.solid) };
+            dwall = match given {
+                Some(d) => d.as_ref().clone(),
+                None => crate::timing::timed("walldist", || wall_distance3(&self.grid, &self.solid, &faces)),
+            };
             let rho = self.cfg.freestream[0];
             (turb, mu_t) = turbulence3::init(&model, &self.solid, |_| rho);
             if let Some(tr) = opts.transition {

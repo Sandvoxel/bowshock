@@ -29,7 +29,7 @@ impl GridKey {
 /// The most recently used grids, newest last.
 pub struct GridCache {
     capacity: usize,
-    entries: Vec<(GridKey, Arc<Grid3>, Arc<AxisMap>)>,
+    entries: Vec<(GridKey, Arc<Grid3>, Arc<AxisMap>, Option<Arc<Vec<f64>>>)>,
     /// Lookups answered from the cache.
     pub hits: usize,
     /// Grids built (lookups that missed).
@@ -50,7 +50,7 @@ impl GridCache {
     /// The grid of `p` and its axis ghost map (`Solver3::with_axis`), cached together.
     pub fn entry(&mut self, p: &Grid3Params) -> Result<(Arc<Grid3>, Arc<AxisMap>), Error> {
         let key = GridKey::of(p);
-        if let Some(i) = self.entries.iter().position(|(k, _, _)| *k == key) {
+        if let Some(i) = self.entries.iter().position(|(k, ..)| *k == key) {
             let entry = self.entries.remove(i);
             let out = (entry.1.clone(), entry.2.clone());
             self.entries.push(entry);
@@ -63,15 +63,28 @@ impl GridCache {
         if self.entries.len() == self.capacity {
             self.entries.remove(0);
         }
-        self.entries.push((key, grid.clone(), axis.clone()));
+        self.entries.push((key, grid.clone(), axis.clone(), None));
         Ok((grid, axis))
+    }
+
+    /// The wall distance of every cell of the grid of `p` (`grid`, as [`GridCache::entry`] gave it): the cached one, or computed and cached with it.
+    fn wall_distance(&mut self, p: &Grid3Params, grid: &Grid3) -> Arc<Vec<f64>> {
+        let key = GridKey::of(p);
+        let slot = self.entries.iter_mut().find(|(k, ..)| *k == key).map(|e| &mut e.3);
+        match slot {
+            Some(Some(d)) => d.clone(),
+            Some(slot) => slot.insert(Arc::new(bowshock_cfd::timing::timed("walldist", || bowshock_cfd::solver3::grid_wall_distance(grid)))).clone(),
+            None => Arc::new(bowshock_cfd::solver3::grid_wall_distance(grid)),
+        }
     }
 
     /// The implicit CPU solver of `case` on its (cached) grid and axis map: [`Case3::build_solver`] without the mesher and the axis map.
     pub fn solver(&mut self, case: &Case3) -> Result<Solver3, Error> {
         let (grid, axis) = self.entry(&case.grid)?;
+        // the exact wall distance of the SST run is a function of the grid: computed once for the cases that share it
+        let dwall = case.viscous.filter(|v| !crate::engine::timing::no_fixedcost() && v.turbulence == bowshock_cfd::sst::Turbulence::Sst).map(|_| self.wall_distance(&case.grid, &grid));
         let (grid, axis) = bowshock_cfd::timing::timed("grid_clone", || (Grid3::clone(&grid), AxisMap::clone(&axis)));
-        Ok(case.solver_with_axis(grid, axis))
+        Ok(case.solver_with_axis(grid, axis, dwall))
     }
 
     /// Number of grids held.
@@ -234,6 +247,28 @@ mod tests {
             assert_eq!(s.grid.part, fresh.grid.part);
             assert_eq!(s.u, fresh.u);
         }
+    }
+
+    /// The wall distance of an SST run comes from the cache entry of its grid, once for the cases of one grid, and is the one the solver computes itself.
+    #[test]
+    fn the_cached_wall_distance_is_the_solvers_own() {
+        use crate::engine::case3::WallFlow;
+        let flow = WallFlow { re_c: 5.0e5, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 };
+        let c = Case3::wedge(2.0, Case3::anf_body(), 0).with_tier(Tier::Coarse(flow));
+        assert!(c.viscous.is_some());
+        let own = c.build_solver().unwrap();
+        let mut cache = GridCache::new(2);
+        let first = cache.solver(&c).unwrap();
+        let mut c2 = c.clone();
+        c2.mach = 0.5;
+        let second = cache.solver(&c2).unwrap();
+        assert_eq!(cache.builds, 1);
+        let want = &own.rans().unwrap().dwall;
+        assert!(want.iter().any(|d| d.is_finite()));
+        for s in [&first, &second] {
+            assert_eq!(&s.rans().unwrap().dwall, want);
+        }
+        assert!(cache.entries[0].3.is_some(), "kept with the grid");
     }
 
     #[test]

@@ -636,13 +636,14 @@ impl Case3 {
     /// The implicit CPU solver of this case's numerics and free stream on `grid` (a grid the mesher did not build: the validation cases' wedges).
     pub fn solver_on(&self, grid: Grid3) -> Solver3 {
         let s = Solver3::new(grid, self.config3());
-        self.with_equations(s)
+        self.with_equations(s, None)
     }
 
     /// [`Case3::solver_on`] with the axis map of `grid` already built (the grid cache shares it).
-    pub fn solver_with_axis(&self, grid: Grid3, axis: bowshock_cfd::axis3::AxisMap) -> Solver3 {
+    /// `dwall`: the wall distance of the grid's cells when it is at hand ([`bowshock_cfd::solver3::grid_wall_distance`]).
+    pub fn solver_with_axis(&self, grid: Grid3, axis: bowshock_cfd::axis3::AxisMap, dwall: Option<std::sync::Arc<Vec<f64>>>) -> Solver3 {
         let s = bowshock_cfd::timing::timed("solver_new", || Solver3::with_axis(grid, axis, self.config3()));
-        bowshock_cfd::timing::timed("equations", || self.with_equations(s))
+        bowshock_cfd::timing::timed("equations", || self.with_equations(s, dwall))
     }
 
     fn config3(&self) -> Config3 {
@@ -660,7 +661,7 @@ impl Case3 {
     /// Switches the viscous (SST) terms of `s` on when the case is viscous: the sand-grain roughness of the walls from the grid's per-part values
     /// (`Grid3::wall_ks`), the outflow of the numerics (characteristic for a body: `RansOpts3::default` would impose a static pressure, right for plates only);
     /// gives the `Part::Jet` cells of a motor case their jet state (`Solver3::set_jet`, nothing without a motor).
-    fn with_equations(&self, mut s: Solver3) -> Solver3 {
+    fn with_equations(&self, mut s: Solver3, dwall: Option<std::sync::Arc<Vec<f64>>>) -> Solver3 {
         s.set_jet(self.jet_state3());
         if let Some(v) = self.viscous {
             let ks = s.grid.wall_ks();
@@ -673,6 +674,7 @@ impl Case3 {
                     wall_thermal: self.wall_thermal,
                     transition: self.transition,
                     compressibility: self.compressibility,
+                    dwall,
                     ..RansOpts3::default()
                 },
             );
