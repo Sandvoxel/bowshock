@@ -31,7 +31,7 @@ use crate::engine::case3::{Tier, WallFlow, DRAFT_SAFE_BELOW_MACH};
 use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
-use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
+use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall, COLLAPSE_FLOOR};
 use crate::engine::warm3::{rescale, warm_plan, Order, Rescale};
 use bowshock_cfd::gas3::{cons_to_prim3, prim_to_cons3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
@@ -512,10 +512,19 @@ impl Gpu3 {
     }
 }
 
-/// A state with a density or pressure within a hundredth and a half of the free stream's in some cell has run into the GPU solver's positivity floor (`POSITIVITY_FLOOR`,
-/// 1e-2): a cell clipped there is a defect, and a point whose forces contain it is not a result (Rabia Coarse Mach 2.3: C_D 1.14 against 0.50 on the Draft grid, "settled").
-fn clipped_state(rho_min: f64, p_min: f64, fs: &[f64; 5]) -> bool {
-    !(rho_min >= 1.5e-2 * fs[0] && p_min >= 1.5e-2 * fs[4])
+/// Local Mach number above which a cell of collapsed density or pressure is unphysical ([`unphysical_cell`]).
+const UNPHYSICAL_MACH: f64 = 20.0;
+
+/// An unphysical cell in the solved state: a density or pressure that is not positive (or NaN), or below a thousandth of the free stream's ([`COLLAPSE_FLOOR`], the CFL controller's
+/// health threshold) in a cell of local Mach number above [`UNPHYSICAL_MACH`]. A vacuum at a fin edge (Rabia Coarse Mach 2.3: p 1e-5 of the free stream, Mach 900, C_D 1.14 against
+/// 0.50 on the Draft grid, "settled") is a defect and a point whose forces contain it is not a result; a legitimate expansion (the Yuska wedge trailing edges, p 0.06 of the free stream)
+/// is neither.
+fn unphysical_cell(w: &[f64; 5], fs: &[f64; 5]) -> bool {
+    if !(w[0] > 0.0 && w[4] > 0.0) {
+        return true;
+    }
+    let low = w[0] < COLLAPSE_FLOOR * fs[0] || w[4] < COLLAPSE_FLOOR * fs[4];
+    low && (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt() > UNPHYSICAL_MACH * (bowshock_cfd::gas3::GAMMA * w[4] / w[0]).sqrt()
 }
 
 /// Quality of a 3D point, first match wins: [`Quality::Failed`] on a non-finite or blown-up state (the run stopped `NonFinite`), a cell whose density or
@@ -986,14 +995,8 @@ impl Analysis {
         let d = &post.drag;
 
         // the guards: the state, the outer boundaries, the base
-        let (mut min_rho, mut min_p) = (f64::INFINITY, f64::INFINITY);
-        for (cell, u) in post.u.iter().enumerate() {
-            if g.part[cell] == PART_FLUID {
-                let w = cons_to_prim3(u);
-                min_rho = min_rho.min(w[0]);
-                min_p = min_p.min(w[4]);
-            }
-        }
+        let fs = case.freestream();
+        let unphysical = post.u.iter().enumerate().any(|(cell, u)| g.part[cell] == PART_FLUID && unphysical_cell(&cons_to_prim3(u), &fs));
         let farfield_dp = farfield_dp(g, &post.u, p_inf);
         let samples = wall_samples(g, &post.u);
         let cp = |pw: f64| (pw - p_inf) / q_inf;
@@ -1022,7 +1025,7 @@ impl Analysis {
             Forces { cn, cm: if x_cp.is_finite() { -cn * x_cp / self.d_ref } else { 0.0 }, x_cp, ca }
         });
         let finite = total.is_finite() && forces.is_none_or(|f| f.cn.is_finite() && f.ca.is_finite());
-        let quality = quality3(r.stop_reason, c.mach, clipped_state(min_rho, min_p, &case.freestream()), finite, farfield_dp, cp_base);
+        let quality = quality3(r.stop_reason, c.mach, unphysical, finite, farfield_dp, cp_base);
 
         let mut warnings = Vec::new();
         if (0.7..1.05).contains(&c.mach) && self.has_sharp_corner() {
@@ -1132,6 +1135,20 @@ fn farfield_dp(g: &Grid3, u: &[Cons3], p_inf: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::spec::{AftSpec, NoseShape, NoseSpec};
+
+    /// The state guard flags the vacuum cell of the Rabia Coarse Mach 2.3 run (p 1e-5 of the free stream, Mach 900) and a non-positive state, and not the low-pressure expansions of a
+    /// converged run (the Yuska trailing edges: p 0.06, rho 0.04 of the free stream at Mach 3; even a cell at a thousandth in a slow flow).
+    #[test]
+    fn the_state_guard_flags_a_vacuum_at_hypersonic_speed_and_nothing_legitimate() {
+        use bowshock_cfd::gas3::GAMMA;
+        let fs = [1.0, 2.38, 0.0, 0.0, 1.0 / GAMMA];
+        let sound = |rho: f64, p: f64| (GAMMA * p / rho).sqrt();
+        assert!(unphysical_cell(&[1e-5, 900.0 * sound(1e-5, 1e-5 * fs[4]), 0.0, 0.0, 1e-5 * fs[4]], &fs), "vacuum cell at Mach 900");
+        assert!(unphysical_cell(&[1.0, 0.0, 0.0, 0.0, -1e-3], &fs), "negative pressure");
+        assert!(unphysical_cell(&[f64::NAN, 0.0, 0.0, 0.0, 1.0], &fs), "NaN density");
+        assert!(!unphysical_cell(&[0.04, 3.0 * sound(0.04, 0.06 * fs[4]), 0.0, 0.0, 0.06 * fs[4]], &fs), "Yuska trailing-edge expansion");
+        assert!(!unphysical_cell(&[1e-3, 1.0, 0.0, 0.0, 5e-4 * fs[4]], &fs), "slow flow at a thousandth");
+    }
 
     #[test]
     fn the_facades_area_factor_is_the_engines_nose_to_largest_area_for_the_default_reference() {
