@@ -242,7 +242,7 @@ fn bt1_fox_boattail() {
                     continue;
                 }
                 // the first fluid cell above a solid one
-                let Some(j) = (1..g.nj).find(|&j| g.is_solid(i, j - 1, 0) && !g.is_solid(i, j, 0)) else { continue };
+                let Some(j) = (1..g.nj).find(|&j| g.is_solid(i, j - 1, 0) && !g.is_solid(i, j, 0)).or_else(|| (!g.is_solid(i, 0, 0)).then_some(0)) else { continue };
                 let w1 = cons_to_prim3(&h.u[g.cell(i, j, 0)]);
                 let w4 = cons_to_prim3(&h.u[g.cell(i, (j + 4).min(g.nj - 1), 0)]);
                 println!(
