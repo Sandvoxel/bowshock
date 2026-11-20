@@ -10,3 +10,4 @@ guide/book/
 *~
 .DS_Store
 perf/.ledger.lock
+__pycache__/
