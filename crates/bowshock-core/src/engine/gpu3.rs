@@ -355,46 +355,6 @@ impl GpuRunner3 {
                 .position(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL)
                 .or_else(|| mon.iter().position(|m| m.iter().any(|x| !x.is_finite())))
                 .or_else(|| collapsed(rho_min, p_min, &case.freestream()).then_some(len - 1));
-            if let (Some(k), true) = (failure, std::env::var_os("BOWSHOCK_FAIL_DIAG").is_some()) {
-                // TEMPORARY diagnostic of the failures
-                let u = self.gpu.state_f64()?;
-                let g = &self.host.grid;
-                let (mut lo_rho, mut lo_p, mut hi_m) = ((f64::INFINITY, 0usize), (f64::INFINITY, 0usize), (0.0f64, 0usize));
-                for (c, q) in u.iter().enumerate() {
-                    if g.part[c] != bowshock_cfd::grid3::PART_FLUID {
-                        continue;
-                    }
-                    let w = bowshock_cfd::gas3::cons_to_prim3(q);
-                    if w[0] < lo_rho.0 {
-                        lo_rho = (w[0], c);
-                    }
-                    if w[4] < lo_p.0 {
-                        lo_p = (w[4], c);
-                    }
-                    let m = (w[1] * w[1] + w[2] * w[2] + w[3] * w[3]).sqrt() / (1.4 * w[4] / w[0]).abs().sqrt();
-                    if m > hi_m.0 {
-                        hi_m = (m, c);
-                    }
-                }
-                let at = |c: usize| {
-                    let (i, j, kk) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
-                    let x = g.xc[c];
-                    format!("({i},{j},{kk}) x {:.3} r {:.3} th {:.1}", x[0], x[1].hypot(x[2]), x[2].atan2(x[1]).to_degrees())
-                };
-                let fs = case.freestream();
-                println!(
-                    "FAILDIAG chunk {done}+{k}: res_ok {} mon_ok {} rho_min {:.3e} {} | p_min {:.3e} {} | M_max {:.3} {} | h {:?}",
-                    !h.iter().any(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL),
-                    !mon.iter().any(|m| m.iter().any(|x| !x.is_finite())),
-                    lo_rho.0 / fs[0],
-                    at(lo_rho.1),
-                    lo_p.0 / fs[4],
-                    at(lo_p.1),
-                    hi_m.0,
-                    at(hi_m.1),
-                    h.iter().step_by(10).collect::<Vec<_>>()
-                );
-            }
             if let Some(back) = failure.and_then(|k| ctl.fail(done + k + 1, (cfl_host * ip.growth.powi(k as i32)).min(ctl.cap()))) {
                 let mut cfg = self.host.cfg.clone();
                 if let Scheme3::Implicit(p) = &mut cfg.scheme {

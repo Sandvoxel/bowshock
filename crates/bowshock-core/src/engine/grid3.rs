@@ -59,6 +59,9 @@ pub struct Fins3 {
 /// stretched (or shrunk) by at most `1 + 1 / ZONE_REACH`.
 const ZONE_REACH: f64 = 3.0;
 
+/// How much longer, in units of the largest move of the leading edge, the fade of the tip's radial bending ahead of the edge is when the zone is widened.
+const RAMP_REACH: f64 = 0.3;
+
 /// Cells over the radius of a round fin edge: the first chord cell is at most this fraction of it.
 const LE_RADIUS_CELLS: f64 = 4.0;
 
@@ -1032,7 +1035,35 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     // half-thickness of the fin layer at every node (`NaN` on the axis and below the body surface)
     let mut half_w = Vec::new();
     if let Some((pl, f)) = &plan {
+        // planform of the row `jj` above the surface
+        let row = |jj: usize| -> (f64, f64, f64) {
+            let frac = pl.span_fraction(jj);
+            match &pl.planform {
+                Some(pf) => {
+                    let h = frac * pl.span;
+                    (frac, pl.x_le_root + pf.x_le(h), pf.chord(h))
+                }
+                None => (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac),
+            }
+        };
+        let mut up = 0.0f64;
+        for jj in 0..=pl.j_tip {
+            up = up.max((row(jj).1 - pl.x_le_root).abs());
+        }
+        // the zone is only widened where the segment's own would stretch its cells by more than `ZONE_TRIGGER` (the move over the room it has, or over the width of the one cell
+        // that absorbs it when it has none): a fin with room keeps the grid it always had. Only the leading edge's: behind the trailing edge the one cell takes the move of the
+        // taper as it always did (the example rocket's trailing edge moves 0.13 d over a 0.015 d cell, and its table is as it was)
+        let room_up = if pl.i_seg0 < pl.i_le { pl.x_le_root - xs[pl.i_seg0] } else { xs[pl.i_le] - xs[pl.i_le.saturating_sub(1)] };
+        let widened = up > ZONE_TRIGGER * room_up;
+        // columns ahead of the leading edge: the rows follow the tip's cylinder at full weight over the 4 columns next to the edge and fade away over the next 4; when the sweep
+        // zone is widened ([`ZONE_REACH`]) the sweep shears the rows of those columns by up to the move of the edge, and a fade over cells that short bends them (a slope of
+        // 0.44 against the shear's 0.42 at Mach 2.3 of the Rabia grid) into a fold: the fade is `RAMP_REACH` times the move longer
         let wcol = |i: usize| -> f64 {
+            if widened && i < pl.i_le {
+                let dx = |n: usize| xs[pl.i_le] - xs[pl.i_le.saturating_sub(n)];
+                let (x4, x8) = (dx(4), dx(8).max(dx(4) + RAMP_REACH * up));
+                return if xs[pl.i_le] - xs[i] <= x4 { 1.0 } else { (1.0 - (xs[pl.i_le] - xs[i] - x4) / (x8 - x4)).max(0.0) };
+            }
             let d = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
             if d <= 4 {
                 1.0
@@ -1057,31 +1088,11 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 rn[j * (ni + 1) + i] = r_in[i] + s * (r_far - r_in[i]);
             }
         }
-        // planform of the row `jj` above the surface
-        let row = |jj: usize| -> (f64, f64, f64) {
-            let frac = pl.span_fraction(jj);
-            match &pl.planform {
-                Some(pf) => {
-                    let h = frac * pl.span;
-                    (frac, pl.x_le_root + pf.x_le(h), pf.chord(h))
-                }
-                None => (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac),
-            }
-        };
         // sweep and taper: piecewise-linear remap of the segment nodes. The nodes ahead of the leading edge absorb what the edge moves by (the leading edge of the tip row is
         // `sweep` aft of the root's): over a zone [`ZONE_REACH`] times the largest move wide, so that no cell takes it alone. The zone starts at the segment's start node and,
         // when the segment has less room than that, goes on past it to the end of the nose: a fin that starts at the start of its segment (a fin can) stretched the one cell
         // ahead of it by the whole sweep (2.6 d for 3.1 d of sweep, 2 400 times the volume of the cell behind it)
         let nodes0: Vec<f64> = xs.clone();
-        let mut up = 0.0f64;
-        for jj in 0..=pl.j_tip {
-            up = up.max((row(jj).1 - pl.x_le_root).abs());
-        }
-        // the zone is only widened where the segment's own would stretch its cells by more than `ZONE_TRIGGER` (the move over the room it has, or over the width of the one cell
-        // that absorbs it when it has none): a fin with room keeps the grid it always had. Only the leading edge's: behind the trailing edge the one cell takes the move of the
-        // taper as it always did (the example rocket's trailing edge moves 0.13 d over a 0.015 d cell, and its table is as it was)
-        let room_up = if pl.i_seg0 < pl.i_le { pl.x_le_root - nodes0[pl.i_seg0] } else { nodes0[pl.i_le] - nodes0[pl.i_le.saturating_sub(1)] };
-        let widened = up > ZONE_TRIGGER * room_up;
         let i_up =
             if widened { (pl.i_floor..=pl.i_seg0).rev().find(|&i| pl.x_le_root - nodes0[i] >= ZONE_REACH * up).unwrap_or(pl.i_floor) } else { pl.i_seg0 };
         // the move fades away over the rows above the tip: four, or when the zone was widened as many as lift the row `FADE_REACH` times the move above the tip (a row a move
