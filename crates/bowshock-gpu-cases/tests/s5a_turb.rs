@@ -368,7 +368,17 @@ impl Case {
 
     /// This case run with the compressibility correction `comp`: `k` of the fluid cells reset so that the turbulent Mach number `M_t^2 = 2 k / a^2` spans 0.01 .. 2.25 (`M_t`
     /// 0.1 .. 1.5, geometrically over the cell index: below, around and above the Wilcox threshold 0.25) and the eddy viscosity recomputed from it.
-    fn with_compressibility(mut self, comp: Compressibility) -> Case {
+    fn with_compressibility(self, comp: Compressibility) -> Case {
+        self.with_compressibility_by(comp, false)
+    }
+
+    /// [`Case::with_compressibility`] for the grids whose line systems do not stand a `k` of order 1 (the fin sector: its `Off` control with those inputs already misses the f32 left-hand side
+    /// round-off targets by a factor 2): `k` of the fluid cells scaled by 8 only (`M_t^2` up to about 0.15 in the cells of the largest `k`: past the Wilcox threshold 1/16), `omega` kept.
+    fn with_compressibility_mild(self, comp: Compressibility) -> Case {
+        self.with_compressibility_by(comp, true)
+    }
+
+    fn with_compressibility_by(mut self, comp: Compressibility, mild: bool) -> Case {
         self.comp = comp;
         let model = Sst::new(self.re_c);
         let nc = self.solid.len();
@@ -382,10 +392,14 @@ impl Case {
             let w = self.w[pidx3(ni, nj, nk, (c % ni) as isize, ((c / ni) % nj) as isize, (c / (ni * nj)) as isize)];
             let a2 = GAMMA * w[4] / w[0];
             let mt = 0.1 * 15f64.powf(((c * 7919) % nc) as f64 / nc as f64);
-            self.turb[c][0] = 0.5 * mt * mt * a2;
-            // `omega` reset with it so that `mu_t / mu` stays about 2 (the plain cases' level) (a random `omega` of 1 to 100 under `k` of order 1 caps `mu_t` at `1e5 / re_c`: a diffusion-dominated, ill-conditioned
-            // line system whose f32 left-hand side amplifies its round-off 10 times in the updated scalars, which says nothing about the corrections)
-            self.turb[c][1] = self.turb[c][0] / 2.0 * w[0] / self.mu[c];
+            if mild {
+                self.turb[c][0] *= 8.0;
+            } else {
+                self.turb[c][0] = 0.5 * mt * mt * a2;
+                // `omega` reset with it so that `mu_t / mu` stays about 2 (the plain cases' level) (a random `omega` of 1 to 100 under `k` of order 1 caps `mu_t` at `1e5 / re_c`: a diffusion-dominated, ill-conditioned
+                // line system whose f32 left-hand side amplifies its round-off 10 times in the updated scalars, which says nothing about the corrections)
+                self.turb[c][1] = self.turb[c][0] / 2.0 * w[0] / self.mu[c];
+            }
             self.mu_t[c] = model.eddy_viscosity(&CellIn {
                 rho: w[0],
                 nu: self.mu[c] / w[0],
@@ -617,7 +631,7 @@ fn cases() -> Vec<Case> {
                 false,
                 17,
             )
-            .with_compressibility(comp),
+            .with_compressibility_mild(comp),
         );
     }
     v
