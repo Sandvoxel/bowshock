@@ -28,7 +28,7 @@ fn case_of(domain: &str, n: u32, mach: f64, chord: Option<usize>, across: usize)
         Case3::sector(mach, Case3::anf_body(), fins, tier(TierKind::Coarse, flow), 0)
     } else {
         let mut h = Case3::base_half(mach, 0.0, Case3::anf_body(), Some(fins), tier(TierKind::Coarse, flow), 0);
-        h.grid.domain = Domain3::Half { phase: if n % 2 == 0 { FinPhase::Between } else { FinPhase::InPlane } };
+        h.grid.domain = Domain3::Half { phase: if n.is_multiple_of(2) { FinPhase::Between } else { FinPhase::InPlane } };
         h
     };
     if let Some(cc) = chord {
@@ -67,7 +67,7 @@ fn grid_compare(n: u32, chord: Option<usize>, across: usize) {
     let (gs, gh) = (body_grid3(&cs.grid).expect("sector grid"), body_grid3(&ch.grid).expect("half grid"));
     describe("sector", &gs);
     describe("half  ", &gh);
-    let mirror = n % 2 == 0;
+    let mirror = n.is_multiple_of(2);
     let th_of = |g: &Grid3, i: usize, j: usize, k: usize| polar(node(g, i, j, k)).0;
     // meridian nodes: the axial and radial coordinates of the sector's cells against the half domain's, k for k matched by azimuth (the sector's theta, or pi/n - theta when the
     // half domain's fin at pi/n is the sector's mirror image)
