@@ -267,6 +267,10 @@ fn main() -> Result<(), String> {
         Some("sum-capk") => case.numerics.implicit.dt_mode = DtMode::SumCapK,
         Some(other) => return Err(format!("--dt-mode sum|sum-capk|min, not {other}")),
     }
+    // `--growth G`: the CFL ramp factor per iteration (`ImplicitParams::growth`, default 1.02)
+    if let Some(g) = value("--growth") {
+        case.numerics.implicit.growth = g.parse().map_err(|e| format!("--growth: {e}"))?;
+    }
     if let Some(c) = value("--cfl-ref") {
         case.numerics.cfl_ref = c.parse().map_err(|e| format!("--cfl-ref: {e}"))?;
     }
