@@ -259,13 +259,16 @@ fn main() -> Result<(), String> {
     if let Some(d) = value("--dis-boost") {
         case.numerics.implicit.lhs_dis_boost = d.parse().map_err(|e| format!("--dis-boost: {e}"))?;
     }
-    // `--dt-mode sum|sum-capk|min`: `DtMode::Sum` (`CFL V / (L_i + L_j + L_k)`), `DtMode::SumCapK` (`CFL V / (L_i + L_j + min(L_k, L_i + L_j))`) or `DtMode::MinDirection` (`CFL V / (3 min L_d)`, the weakest direction sizes the step)
+    // `--dt-mode sum|min`: `DtMode::Sum` (`CFL V / (L_i + L_j + L_k)`) or `DtMode::MinDirection` (`CFL V / (3 min L_d)`, the weakest direction sizes the step)
     match value("--dt-mode").as_deref() {
         None => {}
         Some("sum") => case.numerics.implicit.dt_mode = DtMode::Sum,
         Some("min") => case.numerics.implicit.dt_mode = DtMode::MinDirection,
-        Some("sum-capk") => case.numerics.implicit.dt_mode = DtMode::SumCapK,
-        Some(other) => return Err(format!("--dt-mode sum|sum-capk|min, not {other}")),
+        Some(other) => return Err(format!("--dt-mode sum|min, not {other}")),
+    }
+    // `--dt-k-cap X`: the `k` rate of the `Sum` step counts at most X (L_i + L_j) (`ImplicitParams::dt_k_cap`, DESIGN3D item 60; default none)
+    if let Some(x) = value("--dt-k-cap") {
+        case.numerics.implicit.dt_k_cap = x.parse().map_err(|e| format!("--dt-k-cap: {e}"))?;
     }
     // `--growth G`: the CFL ramp factor per iteration (`ImplicitParams::growth`, default 1.02)
     if let Some(g) = value("--growth") {

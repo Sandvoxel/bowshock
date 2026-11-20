@@ -7,11 +7,6 @@ pub enum DtMode {
     Sum,
     /// `dt = CFL A / (2 min(L_i, L_j))`: sized by the weaker direction.
     MinDirection,
-    /// 3D only: `dt = CFL V / (L_i + L_j + min(L_k, L_i + L_j))`. The sum, but the `k` rate (the azimuthal one of a finned sector, which clusters cells along every `k` line near the
-    /// axis and the fins) counts at most as much as the other two together: the `k` direction is line-implicit like the others, and a sliver cell `r dtheta_min` wide must not set the
-    /// step of the whole wake cell. The step is the sum's where `L_k <= L_i + L_j` and otherwise at most twice the two-direction step `CFL V / (L_i + L_j)` of the wedge (no `L_k`
-    /// at all, `no_dt_k`); [`DtMode::MinDirection`] instead releases both directions at once. 2D (no `k`): the same as `Sum`.
-    SumCapK,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +47,11 @@ pub struct ImplicitParams {
     /// MUSCL residual has the amplification `1 - (1 + a - b) 2 sigma / (1 + 2 sigma) / (1 + delta)` at large CFL (`1 + a - b` up to 2.3 for van Albada, 2 for minmod), so
     /// `delta` 0.3-0.5 keeps it above -1 while the smooth modes change by `O(delta theta)`. 0 is the plain scheme.
     pub lhs_dis_boost: f64,
+    /// 3D, `DtMode::Sum` only: the `k` rate of the pseudo-time step counts at most `dt_k_cap (L_i + L_j)`, `dt = CFL V / (L_i + L_j + min(L_k, dt_k_cap (L_i + L_j)))`. The `k` direction is
+    /// line-implicit like the others, but on a finned sector the azimuthal clustering along every `k` line makes the cells near the axis and in the wake slivers `r dtheta_min` wide, `L_k`
+    /// is up to 1e7 times `L_i + L_j` there (Draft example sector at the converged state: `L_k > L_i + L_j` in 56 % of the cells, in 75 % of the base wake) and the sum sets their step.
+    /// The step is the sum's where `L_k <= dt_k_cap (L_i + L_j)` and else at most `1 + dt_k_cap` times the two-direction step `CFL V / (L_i + L_j)`. `INFINITY` is the plain sum (the default).
+    pub dt_k_cap: f64,
 }
 
 /// Lower bound of the reference velocity of the low-Mach preconditioning in units of the free-stream sound speed. Measured on the example
@@ -92,6 +92,7 @@ impl ImplicitParams {
         line_solve: LineSolve3::Block,
         ddadi: None,
         lhs_dis_boost: 0.0,
+        dt_k_cap: f64::INFINITY,
     };
 
     /// Parameters for viscous runs: the weaker-direction pseudo-time step with a lower CFL limit and one more defect-correction pass.

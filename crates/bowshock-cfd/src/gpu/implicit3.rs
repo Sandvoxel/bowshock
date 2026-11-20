@@ -717,20 +717,20 @@ impl LazySolver3 {
         (0..n_dirs).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)) + diff.map_or_else(|| 0.0f32 * &g.one, |d| d[dir].clone())).collect()
     }
 
-    /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`), `cfl V / (L_i + L_j + min(L_k, L_i + L_j))`
-    /// (`DtMode::SumCapK`) or `cfl V / (3 min(L_i, L_j, L_k))` (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is
-    /// the one-element array of the loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`, or `2 min(L_i, L_j)`).
-    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>) -> F {
+    /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))` (`DtMode::MinDirection`), `L_d` =
+    /// half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is the one-element array of the loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`,
+    /// or `2 min(L_i, L_j)`). `k_cap` finite (`ImplicitParams::dt_k_cap`, `Sum` only): `L_k` counts at most `k_cap (L_i + L_j)`.
+    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode, k_cap: f64, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>) -> F {
         let g = &self.lg;
         let cs = (cf(GAMMA) * &wk[4] / &wk[0]).sqrt();
         let l = self.dt_rates3(wk, diff, lm, if self.no_dt_k { 2 } else { 3 });
         let dt = match (mode, l.as_slice()) {
-            (DtMode::Sum, [a, b, c]) => cfl * &g.vol / (a + b + c),
-            (DtMode::SumCapK, [a, b, c]) => {
+            (DtMode::Sum, [a, b, c]) if k_cap.is_finite() => {
                 let ab = a + b;
-                cfl * &g.vol / (&ab + c.minimum(&ab))
+                cfl * &g.vol / (&ab + c.minimum(&(cf(k_cap) * &ab)))
             }
-            (DtMode::Sum | DtMode::SumCapK, [a, b]) => cfl * &g.vol / (a + b),
+            (DtMode::Sum, [a, b, c]) => cfl * &g.vol / (a + b + c),
+            (DtMode::Sum, [a, b]) => cfl * &g.vol / (a + b),
             (DtMode::MinDirection, [a, b, c]) => cfl * &g.vol / (3.0f32 * a.minimum(b).minimum(c)),
             (DtMode::MinDirection, [a, b]) => cfl * &g.vol / (2.0f32 * a.minimum(b)),
             _ => unreachable!("two or three directions"),
@@ -1164,7 +1164,7 @@ impl LazySolver3 {
             }
             _ => (None, None),
         };
-        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
+        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, p.dt_k_cap, diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
         let b: V5 = v5(|k| &lhs(&r0[k]) * &dt);
         let lam = lam.as_ref();
         let du = match p.line_solve {

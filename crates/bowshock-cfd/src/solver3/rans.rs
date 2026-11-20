@@ -485,7 +485,7 @@ mod tests {
         se.set_viscous(None);
         for s in [&mut sv, &mut se] {
             s.eval_residual();
-            s.compute_dt(0.5, crate::implicit_params::DtMode::Sum);
+            s.compute_dt(0.5, crate::implicit_params::DtMode::Sum, f64::INFINITY);
         }
         let g = &sv.grid;
         let r = sv.rans().unwrap();

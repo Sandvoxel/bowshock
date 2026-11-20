@@ -773,7 +773,7 @@ fn compute_dt(s: &mut Solver, cfl: f64, mode: DtMode, lm: Option<&LowMach>) {
                 lj += viscous::diffusion_rate(mu[c], mu_t[c], wc[0], 0.5 * (fb.len + ft.len), a);
             }
             row[i] = match mode {
-                DtMode::Sum | DtMode::SumCapK => cfl * a / (li + lj),
+                DtMode::Sum => cfl * a / (li + lj),
                 DtMode::MinDirection => cfl * a / (2.0 * li.min(lj)),
             };
         }

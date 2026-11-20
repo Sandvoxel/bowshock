@@ -624,7 +624,7 @@ pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
     s.eval_residual();
     let rn = s.density_residual();
     s.precond = LowMach::of(p, &s.cfg.freestream);
-    s.compute_dt(cfl, p.dt_mode);
+    s.compute_dt(cfl, p.dt_mode, p.dt_k_cap);
     s.face_lambdas();
 
     let b: Vec<Cons3> = s.res.iter().zip(s.dt.iter()).map(|(r, d)| [r[0] * d, r[1] * d, r[2] * d, r[3] * d, r[4] * d]).collect();
