@@ -26,7 +26,7 @@ use rayon::prelude::*;
 pub(crate) mod jet;
 pub(crate) mod rans;
 pub use jet::JetState3;
-pub use rans::RansOpts3;
+pub use rans::{grid_wall_distance, RansOpts3};
 
 /// Ghost layers per side.
 pub(crate) const NG: usize = 2;

@@ -544,8 +544,131 @@ fn engine3d_finned_timing() {
     let run_total: f64 = runs.iter().map(|r| r.run_s).sum();
     let fixed = sums[0] + sums[1] + sums[2] + sums[3] + sums[4] + case_s + post_s + host_s + field_s + drop_s;
     println!("SUM {} runs, {iterations} iterations: iterating {run_total:.1} s of {wall:.1} s wall; fixed costs per point (build, context, upload, reset, first chunk, facade) {fixed:.1} s; points at the iteration cap: {capped:?} = {capped_s:.1} s", runs.len());
+    // the finer parts (item 69): the set-up and the per-chunk host work by name, for the seed wedges (under 200 000 cells) and the finned points apart
+    for (name, small) in [("seed wedges", true), ("finned points", false)] {
+        let rs: Vec<_> = runs.iter().filter(|r| (r.cells < 200_000) == small).collect();
+        let mut parts: Vec<(&str, f64)> = Vec::new();
+        for r in &rs {
+            for &(k, v) in &r.parts {
+                match parts.iter_mut().find(|(n, _)| *n == k) {
+                    Some((_, t)) => *t += v,
+                    None => parts.push((k, v)),
+                }
+            }
+        }
+        let sum = |f: &dyn Fn(&solver::engine::timing::PointTiming) -> f64| rs.iter().map(|r| f(r)).sum::<f64>();
+        println!(
+            "PARTS {name}: {} runs, {} it, run {:.2} s | build {:.2} ctx {:.2} upload {:.2} reset {:.2} first chunk {:.2} (steady-state equivalent {:.2}) rest {:.2} downloads {:.2} forces {:.2} final {:.2} | {}",
+            rs.len(),
+            rs.iter().map(|r| r.iters_exec).sum::<usize>(),
+            sum(&|r| r.run_s),
+            sum(&|r| r.build_s),
+            sum(&|r| r.ctx_s),
+            sum(&|r| r.upload_s),
+            sum(&|r| r.reset_s),
+            sum(&|r| r.first_chunk_s),
+            rs.iter().filter(|r| r.chunks_rest > 0).map(|r| r.rest_chunks_s / r.chunks_rest as f64).sum::<f64>(),
+            sum(&|r| r.rest_chunks_s),
+            sum(&|r| r.download_s),
+            sum(&|r| r.forces_s),
+            sum(&|r| r.final_s),
+            parts.iter().map(|(k, v)| format!("{k} {v:.2}")).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let kinds = ["wedge", "sector", "half"];
+    for k in kinds {
+        let f: Vec<_> = facade.iter().filter(|t| t.what == "point" && t.kind == k).collect();
+        if f.is_empty() {
+            continue;
+        }
+        println!(
+            "FACADE {k}: {} points, run {:.2} s (of which seed {:.2} s, {} wedge iterations), case {:.3}, post {:.3}, host {:.3}, Field3 {:.3}",
+            f.len(),
+            f.iter().map(|t| t.run_s).sum::<f64>(),
+            f.iter().map(|t| t.seed_s).sum::<f64>(),
+            f.iter().map(|t| t.seed_iters).sum::<usize>(),
+            f.iter().map(|t| t.case_s).sum::<f64>(),
+            f.iter().map(|t| t.post_s).sum::<f64>(),
+            f.iter().map(|t| t.host_s).sum::<f64>(),
+            f.iter().map(|t| t.field_s).sum::<f64>()
+        );
+    }
     let all = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, iterations];
     println!("PERF {}", serde_json_perf(wall, all[13]));
+}
+
+/// The host-side set-up of the points of the finned example (DESIGN3D item 69), no GPU: for a drag node and an angle node of every Mach number of the table, the grid cache
+/// emptied first, the seconds of the mesher, the axis map, the grid clone, the solver arrays, the equations (wall distance included) and the seed wedge's build. `RAYON_NUM_THREADS`
+/// or a loaded machine shows which parts are CPU bound.
+#[test]
+#[ignore = "timing of the host-side set-up of the finned example: seconds of CPU"]
+fn host_setup_timing() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
+        power_on: Vec::new(),
+    };
+    let grid_mach = job.nodes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
+    let session = Session::Local { backend: solver::Backend::Cpu };
+    let mut total = 0.0;
+    for (kind, machs) in [(NodeKind::Drag, job.nodes.clone()), (NodeKind::Lift, job.stability.clone())] {
+        for &m in &machs {
+            if std::env::var("BOWSHOCK_PROBE_MACHS").is_ok_and(|l| !l.split(',').any(|x| x.trim().parse::<f64>().is_ok_and(|x| (x - m).abs() < 1e-9))) {
+                continue;
+            }
+            let analysis = node_analysis(&job, kind, &session, altitude, grid_mach, true, m, false).ok().expect("the node's analysis");
+            let c = if kind == NodeKind::Lift { solver::Condition::new(m, 2.0) } else { solver::Condition::from(m) };
+            let t = Instant::now();
+            let (notes, main_s, wedge_s) = analysis.host_build_probe(c, kind == NodeKind::Drag).unwrap();
+            total += t.elapsed().as_secs_f64();
+            println!(
+                "HOST {} M {m:.2}: solver {main_s:.3} s + seed wedge {wedge_s:.3} s | {}",
+                if kind == NodeKind::Lift { "angle" } else { "drag" },
+                notes.iter().map(|(k, v)| format!("{k} {v:.3}")).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    println!("HOST total {total:.2} s");
+}
+
+/// The seed wedges of the finned example on the CPU (DESIGN3D item 69), no GPU: seconds and iterations of the wedge of a drag node, solved by the CPU solver in f64 (the GPU's
+/// take 0.5 ms per iteration, 12-17 s for the table). `BOWSHOCK_PROBE_MACHS` picks the Mach numbers.
+#[test]
+#[ignore = "timing of the CPU solver on the seed wedges: minutes of CPU"]
+fn cpu_seed_timing() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+        power_on: Vec::new(),
+    };
+    let grid_mach = job.nodes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
+    let session = Session::Local { backend: solver::Backend::Cpu };
+    for &m in &job.nodes {
+        if std::env::var("BOWSHOCK_PROBE_MACHS").is_ok_and(|l| !l.split(',').any(|x| x.trim().parse::<f64>().is_ok_and(|x| (x - m).abs() < 1e-9))) {
+            continue;
+        }
+        let analysis = node_analysis(&job, NodeKind::Drag, &session, altitude, grid_mach, true, m, false).ok().expect("the node's analysis");
+        let (s, its) = analysis.seed_probe(solver::Condition::from(m), true).unwrap();
+        println!("SEEDCPU M {m:.2}: {its} iterations, {s:.2} s = {:.2} ms per iteration", 1e3 * s / its.max(1) as f64);
+    }
 }
 
 /// The draft-first flow as the app runs it (DESIGN3D item 57), through the app path on the finned example rocket: the draft solve (the drag at every Mach node, no angles) and then

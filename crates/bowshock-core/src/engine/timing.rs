@@ -39,6 +39,25 @@ pub struct PointTiming {
     pub iters_stop: usize,
     pub iters_exec: usize,
     pub stop: String,
+    /// Finer parts by name (set-up: mesher, solver, wall distance, geometry upload; per chunk: the residual read-back, the health check, the state snapshot, the host stop rule), seconds.
+    pub parts: Vec<(&'static str, f64)>,
+}
+
+impl PointTiming {
+    /// Adds `secs` to the part `name`.
+    pub fn add(&mut self, name: &'static str, secs: f64) {
+        match self.parts.iter_mut().find(|(k, _)| *k == name) {
+            Some((_, v)) => *v += secs,
+            None => self.parts.push((name, secs)),
+        }
+    }
+}
+
+/// Whether `BOWSHOCK_NO_FIXEDCOST` is set: the measurement switch of the A/B runs of DESIGN3D item 69, which takes the fixed-cost work back to the way it was before (no host build
+/// ahead, ...). Every change of that item is behind it; the results do not depend on it.
+#[doc(hidden)]
+pub fn no_fixedcost() -> bool {
+    std::env::var_os("BOWSHOCK_NO_FIXEDCOST").is_some()
 }
 
 static TIMINGS: Mutex<Vec<PointTiming>> = Mutex::new(Vec::new());
@@ -48,8 +67,8 @@ static TIMINGS: Mutex<Vec<PointTiming>> = Mutex::new(Vec::new());
 pub fn record_timing(t: PointTiming) {
     if std::env::var_os("BOWSHOCK_TIMING").is_some() {
         eprintln!(
-            "TIMING {{\"dim\":{},\"mach\":{},\"alpha_deg\":{:.1},\"warm\":{},\"cells\":{},\"build_s\":{:.4},\"ctx_s\":{:.4},\"upload_s\":{:.4},\"reset_s\":{:.4},\"first_chunk_s\":{:.4},\"chunks_rest\":{},\"rest_chunks_s\":{:.4},\"downloads\":{},\"download_s\":{:.4},\"forces_s\":{:.4},\"final_s\":{:.4},\"run_s\":{:.4},\"iters_stop\":{},\"iters_exec\":{},\"stop\":\"{}\"}}",
-            t.dim, t.mach, t.alpha_deg, t.warm, t.cells, t.build_s, t.ctx_s, t.upload_s, t.reset_s, t.first_chunk_s, t.chunks_rest, t.rest_chunks_s, t.downloads, t.download_s, t.forces_s, t.final_s, t.run_s, t.iters_stop, t.iters_exec, t.stop
+            "TIMING {{\"dim\":{},\"mach\":{},\"alpha_deg\":{:.1},\"warm\":{},\"cells\":{},\"build_s\":{:.4},\"ctx_s\":{:.4},\"upload_s\":{:.4},\"reset_s\":{:.4},\"first_chunk_s\":{:.4},\"chunks_rest\":{},\"rest_chunks_s\":{:.4},\"downloads\":{},\"download_s\":{:.4},\"forces_s\":{:.4},\"final_s\":{:.4},\"run_s\":{:.4},\"iters_stop\":{},\"iters_exec\":{},\"stop\":\"{}\",\"parts\":{{{}}}}}",
+            t.dim, t.mach, t.alpha_deg, t.warm, t.cells, t.build_s, t.ctx_s, t.upload_s, t.reset_s, t.first_chunk_s, t.chunks_rest, t.rest_chunks_s, t.downloads, t.download_s, t.forces_s, t.final_s, t.run_s, t.iters_stop, t.iters_exec, t.stop, t.parts.iter().map(|(k, v)| format!("\"{k}\":{v:.4}")).collect::<Vec<_>>().join(",")
         );
     }
     TIMINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(t);

@@ -621,6 +621,7 @@ impl LazySolver3 {
         // i boundaries `[layer, j, k]`
         let iface_at =
             |i: usize| -> Vec<&Face3> { (0..nk).flat_map(|k| (0..nj).flat_map(move |j| [(k * nj + j) * (ni + 1) + i; 2])).map(|q| &grid.iface[q]).collect() };
+        let t_bc = std::time::Instant::now();
         let imin = normals(iface_at(0), -1.0, [2, nj, nk])?;
         let imax = normals(iface_at(ni), 1.0, [2, nj, nk])?;
         // j boundaries `[i, layer, k]`
@@ -648,8 +649,12 @@ impl LazySolver3 {
             (0..2).flat_map(|_| (0..nj).flat_map(move |j| (0..ni).map(move |i| (k * nj + j) * ni + i))).map(|q| &grid.kface[q]).collect()
         };
         let ksym = [normals(kplane(0), 1.0, [ni, nj, 2])?, normals(kplane(nk), 1.0, [ni, nj, 2])?];
+        crate::timing::note("g_boundaries", t_bc.elapsed().as_secs_f64());
         // the axis runs: the ghost rows below the row of a run are the weighted state across the axis
+        let t_ax = std::time::Instant::now();
         let axis = crate::axis3::AxisMap::new(grid).runs.iter().map(|run| AxisGeo3::new(ctx, grid, run)).collect::<Result<Vec<_>>>()?;
+        crate::timing::note("g_axis", t_ax.elapsed().as_secs_f64());
+        let t_geo = std::time::Instant::now();
         let geo = Geo3 {
             f: [face_geo(&grid.iface, [ni + 1, nj, nk])?, face_geo(&grid.jface, [ni, nj + 1, nk])?, face_geo(&grid.kface, [ni, nj, nk + 1])?],
             inv_v: up(ctx, &grid.vol.iter().zip(&solid).map(|(v, s)| if *s { 0.0 } else { 1.0 / v }).collect::<Vec<_>>(), [ni, nj, nk])?,
@@ -671,7 +676,8 @@ impl LazySolver3 {
                 [None, None, None]
             },
         };
-        let lg = LGeo3::new(ctx, grid, &solid, &jet_mask)?;
+        crate::timing::note("g_faces_cells_solid", t_geo.elapsed().as_secs_f64());
+        let lg = crate::timing::timed("g_lgeo", || LGeo3::new(ctx, grid, &solid, &jet_mask))?;
         let jet_gpu = match jet {
             Some(j) => {
                 let cells: Vec<usize> = (0..nc).filter(|&c| jet_mask[c]).collect();
@@ -724,15 +730,15 @@ impl LazySolver3 {
     /// A lazy solver in the state of a host solver: grid, config, conserved state and iteration count.
     pub fn from_host(ctx: &Context, s: &Solver3) -> Result<LazySolver3> {
         let jet = s.jet();
-        let mut l = LazySolver3::new_with_jet(ctx, &s.grid, &s.cfg, jet.as_ref())?;
-        l.set_viscous_from_host(s)?;
+        let mut l = crate::timing::timed("up_geometry", || LazySolver3::new_with_jet(ctx, &s.grid, &s.cfg, jet.as_ref()))?;
+        crate::timing::timed("up_viscous", || l.set_viscous_from_host(s))?;
         if l.visc.is_some() && matches!(s.cfg.scheme, Scheme3::Implicit(p) if p.line_solve == crate::implicit_params::LineSolve3::DiagonalCorrected) {
             return Err(luma::LumaError::Unsupported("the diagonal line solve of a viscous run is not ported (use LineSolve3::Block)".into()));
         }
         if matches!(s.cfg.scheme, Scheme3::Implicit(p) if p.low_mach_precond && p.line_solve == crate::implicit_params::LineSolve3::DiagonalCorrected) {
             return Err(luma::LumaError::Unsupported("the diagonal line solve with the low-Mach preconditioning is not ported (it stalls on the CPU too: use LineSolve3::Block)".into()));
         }
-        l.set_state(&s.u)?;
+        crate::timing::timed("up_state", || l.set_state(&s.u))?;
         l.iter = s.iter;
         Ok(l)
     }
@@ -794,8 +800,27 @@ impl LazySolver3 {
     /// A copy of the loop state to return to ([`LazySolver3::restore`]), downloaded to host memory (the raw `S` elements: a restore gives back the state bit for bit): the CFL
     /// controller of the runner keeps up to seven of them, 49 B per cell each of an SST run, which as device arrays would be 340 B per cell of the pool (DESIGN3D item 49).
     pub fn snapshot(&self) -> Result<Snapshot3> {
+        self.snapshot_into(None)
+    }
+
+    /// [`LazySolver3::snapshot`] into the host buffers of `spare` (a snapshot of the same grid that is no longer needed): a read-back into memory the host already owns costs about half
+    /// of one into fresh pages (`Array::read_into`), and a snapshot is taken every chunk of a run.
+    pub fn snapshot_into(&self, spare: Option<Snapshot3>) -> Result<Snapshot3> {
         let state = self.state.as_ref().ok_or_else(no_state)?;
-        Ok(Snapshot3 { state: state.iter().map(|a| Ok((a.to_vec()?, a.shape()))).collect::<Result<_>>()?, iter: self.iter })
+        let mut spare = spare.map_or_else(Vec::new, |s| s.state).into_iter();
+        let arrays = state
+            .iter()
+            .map(|a| {
+                let mut v = spare.next().map_or_else(Vec::new, |(v, _)| v);
+                if v.len() == a.len() {
+                    a.read_into(&mut v)?;
+                } else {
+                    v = a.to_vec()?;
+                }
+                Ok((v, a.shape()))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Snapshot3 { state: arrays, iter: self.iter })
     }
 
     /// Returns to `snap` (the state, the CFL of its ramp and the iteration count); with `cfl_cap` the CFL of the state is at most that (a controller that lowers `cfl_max`

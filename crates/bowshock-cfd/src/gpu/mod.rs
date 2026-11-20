@@ -655,9 +655,16 @@ impl GpuSolver3 {
 
     /// A copy of the loop state, downloaded to host memory, to return to with [`GpuSolver3::restore`] (bit for bit): the CFL controller of the 3D runner.
     pub fn snapshot(&self) -> Result<Snapshot3> {
-        Ok(Snapshot3(match &self.inner {
-            Inner3::F32(s) => SnapInner::F32(s.snapshot()?),
-            Inner3::Ext(s) => SnapInner::Ext(s.snapshot()?),
+        self.snapshot_into(None)
+    }
+
+    /// [`GpuSolver3::snapshot`] into the host buffers of `spare`, a snapshot that is no longer needed (of the same solver; any other is ignored and its buffers dropped).
+    pub fn snapshot_into(&self, spare: Option<Snapshot3>) -> Result<Snapshot3> {
+        Ok(Snapshot3(match (&self.inner, spare.map(|s| s.0)) {
+            (Inner3::F32(s), Some(SnapInner::F32(old))) => SnapInner::F32(s.snapshot_into(Some(old))?),
+            (Inner3::F32(s), _) => SnapInner::F32(s.snapshot_into(None)?),
+            (Inner3::Ext(s), Some(SnapInner::Ext(old))) => SnapInner::Ext(s.snapshot_into(Some(old))?),
+            (Inner3::Ext(s), _) => SnapInner::Ext(s.snapshot_into(None)?),
         }))
     }
 

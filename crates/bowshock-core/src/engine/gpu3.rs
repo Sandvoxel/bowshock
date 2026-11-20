@@ -10,7 +10,7 @@ use crate::engine::run3::{
     breakdown_from, coefficients, collapsed, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, CflControl, CflEvent, DragParts,
     LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall, WallForces, MEAN_EVERY, ROLLBACK_RESIDUAL, SAMPLE_EVERY,
 };
-use crate::engine::timing::{record_timing, PointTiming};
+use crate::engine::timing::{no_fixedcost, record_timing, PointTiming};
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
 use bowshock_cfd::grid3::Face3;
@@ -23,16 +23,23 @@ pub const SYNC: usize = SAMPLE_EVERY;
 /// The grid shape and precision of the last solver built in this process: the idle buffers Luma pools are sized for it (see [`make_room`]).
 static LAST_SHAPE: std::sync::Mutex<Option<([usize; 3], Precision)>> = std::sync::Mutex::new(None);
 
+/// Grids below this many cells (the seed wedges) do not count as a change of shape in [`make_room`].
+const SMALL_GRID_CELLS: usize = 200_000;
+
 /// Before a 3D solver is built on `ctx`: gives the idle buffers of the other grid shapes back to the device (`Context::trim`; a solver of the same shape as the last one finds its
 /// buffers in the pool and keeps them: a table rebuilds its solver for every node) and refuses a grid that the device cannot hold ([`bowshock_cfd::gpu::device_bytes3`]
 /// against the context's budget less what the solvers still alive hold), with the error "grid of N cells needs ~X GiB, device budget Y GiB" instead of a failed allocation.
 fn make_room(ctx: &luma::Context, host: &Solver3, prec: Precision) -> Result<(), Error> {
     let shape = ([host.grid.ni, host.grid.nj, host.grid.nk], prec);
-    let changed = LAST_SHAPE.lock().map_err(|_| Error::Internal("the shape of the last GPU solver is poisoned".into()))?.replace(shape) != Some(shape);
-    if changed {
-        ctx.trim()?;
-    }
     let cells = host.grid.ni * host.grid.nj * host.grid.nk;
+    // a seed wedge (a few ten thousand cells) between two finned solvers is no change of shape: its buffers are of other size classes, and trimming the pool for it and again for the
+    // next finned solver would give back and allocate again the gigabytes the finned ones share
+    if cells >= SMALL_GRID_CELLS || no_fixedcost() {
+        let changed = LAST_SHAPE.lock().map_err(|_| Error::Internal("the shape of the last GPU solver is poisoned".into()))?.replace(shape) != Some(shape);
+        if changed {
+            ctx.trim()?;
+        }
+    }
     let sub_iters = match host.cfg.scheme {
         Scheme3::Implicit(p) => p.sub_iters,
         Scheme3::Explicit => 0,
@@ -68,6 +75,13 @@ fn fits(cells: usize, need: u64, resident: u64, budget: Option<u64>) -> Result<(
     }
 }
 
+/// What the end of [`GpuRunner3::run_on`] read from the device state, kept for the facade's report of the same state (it takes these instead of reading them again): the wall forces
+/// per class, `(all faces, faces up to the base station)`, and the viscous face fluxes of a RANS run. Valid until the next run.
+pub struct EndReadings {
+    pub forces: (WallForces, WallForces),
+    pub flux: Option<[Vec<[f64; 5]>; 3]>,
+}
+
 /// GPU solver plus the host solver (grid and config) of one 3D case.
 pub struct GpuRunner3 {
     pub gpu: GpuSolver3,
@@ -87,12 +101,35 @@ pub struct GpuRunner3 {
     /// The CFL the next warm run starts its ramp at instead of restarting it at `cfl0` (taken by [`GpuRunner3::run_on`]; at most the run's `cfl_max`): a run that goes on from
     /// a converged field (a neighbouring Mach number, the next angle) is not a start-up, so it need not creep up from `cfl0`. `None`: the ramp restarts.
     pub start_cfl: Option<f64>,
+    /// The readings of the end of the last run (`None` before it and while it runs; the host solver's `u` is the state they belong to).
+    pub end: Option<EndReadings>,
+    /// The finer parts of the set-up (see [`PointTiming::parts`]), moved to the timing of the first run.
+    setup_parts: Vec<(&'static str, f64)>,
+    /// No run yet: the first run's timing carries the set-up (build, context, upload) whether it is warm (a seeded or neighbour start) or not.
+    fresh: bool,
 }
 
 impl GpuRunner3 {
     /// Builds the host solver of `case` (viscous with SST when `Case3::viscous` is set: the wall forces of the runner then include the shear of the no-slip faces) and
     /// uploads it to the default GPU context.
     pub fn new(case: &Case3, prec: Precision) -> Result<GpuRunner3, Error> {
+        let t0 = Instant::now();
+        let ctx = luma::default_context()?;
+        if ctx.is_cpu() {
+            return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
+        }
+        GpuRunner3::new_in(case, prec, ctx, t0.elapsed().as_secs_f64())
+    }
+
+    /// [`GpuRunner3::new`] on Luma's native CPU backend (the host-side cost of the set-up measured without a GPU: `Analysis::host_build_probe`; the tests of a runner built on another
+    /// thread).
+    #[doc(hidden)]
+    pub fn new_cpu(case: &Case3, prec: Precision) -> Result<GpuRunner3, Error> {
+        GpuRunner3::new_in(case, prec, luma::Context::cpu()?, 0.0)
+    }
+
+    fn new_in(case: &Case3, prec: Precision, ctx: luma::Context, ctx_seconds: f64) -> Result<GpuRunner3, Error> {
+        let _ = bowshock_cfd::timing::take();
         let t_build = Instant::now();
         // the grid (mesher, face geometry) comes from the process-wide cache: one `Analysis::run` per Mach node rebuilds neither it nor, with the shared default
         // context, the compiled kernels of the previous call
@@ -100,12 +137,7 @@ impl GpuRunner3 {
         let visc = host.rans().map(|r| r.visc);
         let build_seconds = t_build.elapsed().as_secs_f64();
         let t0 = Instant::now();
-        let ctx = luma::default_context()?;
-        let ctx_seconds = t0.elapsed().as_secs_f64();
-        if ctx.is_cpu() {
-            return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
-        }
-        make_room(&ctx, &host, prec)?;
+        bowshock_cfd::timing::timed("make_room", || make_room(&ctx, &host, prec))?;
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
         let upload_seconds = t1.elapsed().as_secs_f64();
@@ -120,9 +152,42 @@ impl GpuRunner3 {
             upload_seconds,
             cfl_events: Vec::new(),
             start_cfl: None,
+            end: None,
+            fresh: true,
+            setup_parts: Vec::new(),
         };
-        runner.upload_wall_faces(case)?;
+        bowshock_cfd::timing::timed("wall_faces", || runner.upload_wall_faces(case))?;
+        runner.setup_parts = bowshock_cfd::timing::take();
         Ok(runner)
+    }
+
+    /// Whether the device has room for a second solver of about this size while this one iterates (the next run's, built ahead: [`crate::analysis`] `fire_next_hint`): the memory
+    /// estimate of this solver's peak plus a solver a third bigger (the angle grids are bigger than the sectors) within the guard of [`make_room`]. No budget (a CPU device) always fits.
+    pub(crate) fn room_for_next(&self) -> bool {
+        let g = &self.host.grid;
+        let cells = g.ni * g.nj * g.nk;
+        let sub_iters = match self.host.cfg.scheme {
+            Scheme3::Implicit(p) => p.sub_iters,
+            Scheme3::Explicit => 0,
+        };
+        let prec = self.gpu.precision();
+        let need = bowshock_cfd::gpu::device_bytes3(cells, prec, sub_iters, self.host.rans().is_some());
+        let next = bowshock_cfd::gpu::device_bytes3(cells + cells / 3, prec, sub_iters, self.host.rans().is_some());
+        fits(cells, need.saturating_add(next), 0, self.gpu.context().memory_stats().budget_bytes).is_ok()
+    }
+
+    /// This runner was built ahead, on a background thread, and waited `wait` seconds for: its set-up time is not the point's (timing only: the seconds of the build and the upload
+    /// become the parts `ahead_build` and `ahead_upload`, `ahead_wait` is what the point waited).
+    pub(crate) fn built_ahead(&mut self, wait: f64) {
+        self.setup_parts.push(("ahead_build", std::mem::take(&mut self.build_seconds)));
+        self.setup_parts.push(("ahead_upload", std::mem::take(&mut self.upload_seconds)));
+        self.setup_parts.push(("ahead_wait", wait));
+    }
+
+    /// The named parts of the set-up of this runner (see [`PointTiming::parts`]); what [`GpuRunner3::run_on`] has not moved to its timing yet.
+    #[doc(hidden)]
+    pub fn setup_parts(&self) -> &[(&'static str, f64)] {
+        &self.setup_parts
     }
 
     /// Uploads the wall faces of the force integration (`run3::wall_faces`, in the order of the CPU integration) to the device.
@@ -235,10 +300,15 @@ impl GpuRunner3 {
 
     /// The largest first-cell `y+` of the streamwise no-slip walls of the device state (`run3::y_plus_max` from the downloaded state and viscous face fluxes; `None` for Euler).
     pub fn y_plus_report(&self) -> Result<Option<f64>, Error> {
-        let (Some(visc), Some(fluxes)) = (self.visc, self.gpu.viscous_flux()?) else { return Ok(None) };
+        let Some(fluxes) = self.gpu.viscous_flux()? else { return Ok(None) };
+        self.y_plus_from(&self.gpu.state_f64()?, &fluxes)
+    }
+
+    /// [`GpuRunner3::y_plus_report`] from the state `u` and the viscous face fluxes of the device state.
+    fn y_plus_from(&self, u: &[bowshock_cfd::gas3::Cons3], fluxes: &[Vec<[f64; 5]>; 3]) -> Result<Option<f64>, Error> {
+        let Some(visc) = self.visc else { return Ok(None) };
         let g = &self.host.grid;
         let r = self.host.rans().ok_or_else(|| Error::Gpu("the host solver has no viscous state".into()))?;
-        let u = self.gpu.state_f64()?;
         let solid: Vec<bool> = g.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
         let mut y_plus_max = 0.0f64;
         let classes = crate::engine::run3::wall_classes(g);
@@ -289,14 +359,27 @@ impl GpuRunner3 {
         Ok(drag_parts_from(case, &self.host.grid, &self.wall_forces()?.0))
     }
 
+    /// [`GpuRunner3::drag_parts`] of the state the last run ended in, from the readings it kept (read again when there are none).
+    pub fn end_drag_parts(&self, case: &Case3) -> Result<DragParts, Error> {
+        match &self.end {
+            Some(e) => Ok(drag_parts_from(case, &self.host.grid, &e.forces.0)),
+            None => self.drag_parts(case),
+        }
+    }
+
     /// Iterate to a stop rule: as [`crate::engine::run3::run3_on`] (`warm`: keep the field, set the free stream of `case`, restart
     /// the CFL ramp).
     pub fn run_on(&mut self, case: &Case3, warm: bool) -> Result<PointResult3, Error> {
         let t_run = Instant::now();
         let g = &self.host.grid;
         let mut tm = PointTiming { dim: 3, mach: case.mach, alpha_deg: case.alpha.to_degrees(), warm, cells: g.ni * g.nj * g.nk, ..Default::default() };
-        if !warm {
+        if std::mem::take(&mut self.fresh) {
             (tm.build_s, tm.ctx_s, tm.upload_s) = (self.build_seconds, self.ctx_seconds, self.upload_seconds);
+            tm.parts = std::mem::take(&mut self.setup_parts);
+            // what the caller did between the set-up and this run (the carried start field of a seeded run)
+            for (k, v) in bowshock_cfd::timing::take() {
+                tm.add(k, v);
+            }
         }
         let n = &case.numerics;
         let cfg = Config3 {
@@ -316,6 +399,7 @@ impl GpuRunner3 {
                 p
             }),
         };
+        self.end = None;
         self.gpu.set_config(&cfg)?;
         self.host.cfg = cfg;
         // the motor jet of this case (its state follows the Mach number): the jet cells of a warm state take it, a cold reset starts from it
@@ -346,6 +430,8 @@ impl GpuRunner3 {
         // restore), `cfl_max` is multiplied by `CFL_BACKOFF` and the chunk is run again. The cap only goes down; the converged state does not depend on it. The CFL in force is
         // tracked on the host (the device's ramp, `cfl0 growth^k` up to the cap) and told to the stop rule, whose windows lengthen as the CFL falls below `Numerics3::cfl_ref`.
         let Scheme3::Implicit(ip) = self.host.cfg.scheme else { return Err(Error::Gpu("the GPU 3D runner needs the implicit scheme".into())) };
+        // a snapshot the controller no longer keeps: its host buffers take the next one
+        let mut spare: Option<bowshock_cfd::gpu::Snapshot3> = None;
         let mut cfl_host = start.unwrap_or(ip.cfl0).min(ip.cfl_max);
         let mut ctl = CflControl::new(self.gpu.snapshot()?, ip.cfl_max, cfl_host).with_enabled(n.cfl_control);
         rule.set_cfl(cfl_host);
@@ -359,7 +445,9 @@ impl GpuRunner3 {
             let (h, mon) = self.gpu.run_monitored(len)?;
             let dt_chunk = t_chunk.elapsed().as_secs_f64();
             // the state's own health: a wake that collapses towards vacuum keeps a finite residual below the limit (`COLLAPSE_FLOOR`); the failure is then the chunk's last iteration
+            let t_part = Instant::now();
             let [rho_min, p_min] = self.gpu.state_extrema()?;
+            tm.add("extrema", t_part.elapsed().as_secs_f64());
             let failure = h
                 .iter()
                 .position(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL)
@@ -385,6 +473,7 @@ impl GpuRunner3 {
                 tm.chunks_rest += 1;
                 tm.rest_chunks_s += dt_chunk;
             }
+            let t_part = Instant::now();
             let coeffs = |k: usize| coefficients(case, &self.host.grid, mon[k]);
             let by_incidence = |f: &LiftForces| if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn };
             for (k, r) in h.into_iter().enumerate() {
@@ -398,14 +487,16 @@ impl GpuRunner3 {
                     break;
                 }
             }
+            tm.add("stop_rule", t_part.elapsed().as_secs_f64());
             done = end;
             if stop.is_none() {
                 // the controller's snapshot is a download to host memory: counted with the state downloads of the point's timing
                 let t_snap = Instant::now();
-                let snapshot = self.gpu.snapshot()?;
+                let snapshot = self.gpu.snapshot_into(if no_fixedcost() { None } else { spare.take() })?;
                 tm.downloads += 1;
                 tm.download_s += t_snap.elapsed().as_secs_f64();
-                ctl.accept(snapshot, done, cfl_host);
+                tm.add("snapshot", t_snap.elapsed().as_secs_f64());
+                spare = ctl.accept(snapshot, done, cfl_host).pop();
             }
             // the state leaves the device only at a chunk where a snapshot is due
             let on_grid = done.is_multiple_of(SYNC);
@@ -418,11 +509,23 @@ impl GpuRunner3 {
             }
         }
         let t_final = Instant::now();
-        let f = self.lift_forces(case)?;
+        let forces = self.wall_forces()?;
+        let f = forces_from(case, &self.host.grid, &forces.1);
+        tm.add("final_forces", t_final.elapsed().as_secs_f64());
         let mut result = rule.finish(case, f, stop.unwrap_or(done));
         // the `y+` of the streamwise walls (viscous runs) and the base Cp, from the device state (one state download; the host solver takes it for the pressure integration)
-        result.y_plus_max = self.y_plus_report()?.unwrap_or(f64::NAN);
-        self.host.u = self.gpu.state_f64()?;
+        let t_part = Instant::now();
+        let u = self.gpu.state_f64()?;
+        let flux = self.gpu.viscous_flux()?;
+        result.y_plus_max = match &flux {
+            Some(flux) => self.y_plus_from(&u, flux)?.unwrap_or(f64::NAN),
+            None => f64::NAN,
+        };
+        self.host.u = u;
+        if !no_fixedcost() {
+            self.end = Some(EndReadings { forces, flux });
+        }
+        tm.add("final_download", t_part.elapsed().as_secs_f64());
         result.cp_base = crate::engine::run3::base_cp(case, &self.host);
         result.cfl_events.clone_from(&ctl.events);
         self.cfl_events = ctl.events;
@@ -438,9 +541,26 @@ impl GpuRunner3 {
 
 #[cfg(test)]
 mod tests {
-    use super::fits;
+    use super::{fits, GpuRunner3};
+    use crate::engine::case3::Case3;
+    use bowshock_cfd::gpu::Precision;
 
     const GIB: u64 = 1 << 30;
+
+    /// A solver built on another thread (the next run's, built while the GPU iterates this one: `analysis::solver3` `fire_next_hint`) runs on this thread exactly as one built here:
+    /// the device arrays of its geometry are the same, whichever thread uploaded them (Luma's CPU backend: no GPU needed).
+    #[test]
+    fn a_runner_built_on_another_thread_runs_as_one_built_here() {
+        let mut case = Case3::tiny_anf(2.0, 0.0).euler_equations();
+        case.numerics.max_iter = 40;
+        let mut here = GpuRunner3::new_cpu(&case, Precision::F32).unwrap();
+        let there = std::thread::scope(|s| s.spawn(|| GpuRunner3::new_cpu(&case, Precision::F32)).join().unwrap()).unwrap();
+        let mut there = there;
+        let (a, b) = (here.run_on(&case, false).unwrap(), there.run_on(&case, false).unwrap());
+        assert_eq!((a.cn.to_bits(), a.ca.to_bits(), a.iterations), (b.cn.to_bits(), b.ca.to_bits(), b.iterations));
+        assert_eq!(here.host.u, there.host.u, "the same state after the same iterations");
+        assert!(a.ca.is_finite() && a.iterations > 0);
+    }
 
     /// The guard refuses what exceeds the budget less the resident bytes, says how big the grid is and what the device has, and lets everything through without a budget.
     #[test]

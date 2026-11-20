@@ -819,6 +819,26 @@ fn solve_drag_nodes(
     Ok(out)
 }
 
+/// Tells the engine which run `next` is, for the drag and stability items (the power-on pair is solved on wedges, there is nothing to build ahead): see [`solver::Analysis::hint_next`].
+fn hint_next(job: &Job, altitude: f64, grid_mach: f64, shared_grid: bool, warm: bool, next: &Item, session: &Session) {
+    if next.power || warm || !solves_3d() {
+        return;
+    }
+    let (kind, machs, conditions): (NodeKind, Vec<f64>, Vec<solver::Condition>) = if next.lift {
+        let machs: Vec<f64> = next.nodes.iter().map(|&k| job.stability[k]).collect();
+        let conditions = next.nodes.iter().flat_map(|&k| LIFT_ALPHAS.iter().map(move |&a| solver::Condition::new(job.stability[k], a))).collect();
+        (NodeKind::Lift, machs, conditions)
+    } else {
+        let machs: Vec<f64> = next.nodes.iter().map(|&k| job.nodes[k]).collect();
+        let conditions = machs.iter().map(|&m| solver::Condition::from(m)).collect();
+        (NodeKind::Drag, machs, conditions)
+    };
+    let altitude = if kind == NodeKind::Lift { job.altitude.clamp(0.0, SOLVER_CEILING) } else { altitude };
+    if let Ok(analysis) = node_analysis(job, kind, session, altitude, grid_mach, shared_grid, machs[0], warm) {
+        analysis.hint_next(&conditions);
+    }
+}
+
 /// Solves the table of `job`: blocking. Every Mach number of the drag table is one work item, then every Mach number of the stability part
 /// (both angles, see [`solve_lift_nodes`]); with the warm start ([`warm_start`]) the Mach numbers of a kind are two chains instead ([`work_list`]). Each item is solved on one
 /// machine, and with several machines on they take the next item as they become free. `progress` is given [`Event::Machines`] first, then for each point its
@@ -852,6 +872,10 @@ pub(super) fn solve_sized(
     let work = {
         let (job, cancel, send, items) = (Arc::new(job.clone()), cancel.clone(), send.clone(), items.clone());
         move |session: &mut Session, machine: usize, item: usize| -> Result<Node, Failed> {
+            // the host set-up of the item that follows is built while the GPU iterates this one (a hint to the engine: the solve is the same without it)
+            if let Some(next) = items.get(item + 1) {
+                hint_next(&job, altitude, grid_mach, shared_grid, warm, next, session);
+            }
             let item = &items[item];
             if item.power {
                 return solve_power_node(&job, grid_mach, shared_grid, job.power_on[item.nodes[0]], session, &cancel).map(Node::Power);
@@ -862,7 +886,9 @@ pub(super) fn solve_sized(
             solve_drag_nodes(&job, altitude, grid_mach, shared_grid, warm, &item.nodes, session, machine, started, &cancel, &send).map(Node::Drag)
         }
     };
-    let fleet = run_fleet(&job.compute, job.cpu_only, items.len(), started, cancel, &send, work)?;
+    let fleet = run_fleet(&job.compute, job.cpu_only, items.len(), started, cancel, &send, work);
+    solver::release_prefetch();
+    let fleet = fleet?;
     let mut tally = Tally { points: Vec::with_capacity(n_drag), notes, gpu: 0, cpu: 0, fallback: None };
     tally.notes.extend(lost_notes(&fleet));
     let mut raw: Vec<solver::PolarPoint> = Vec::new();

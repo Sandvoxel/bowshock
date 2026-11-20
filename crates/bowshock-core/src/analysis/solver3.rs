@@ -152,6 +152,60 @@ fn extras_of(case: &Case3, g: &Grid3, ratio: &[f64], tractions: &[bowshock_cfd::
     (eddy, cf)
 }
 
+/// The case of the run that follows the current one ([`Analysis::hint_next`]), until the GPU sweep starts building it ahead.
+static NEXT_HINT: std::sync::Mutex<Option<Case3>> = std::sync::Mutex::new(None);
+
+/// A GPU solver of the run that follows, being built on a background thread while the GPU iterates the current point: the key it answers to ([`Case3::build_key`], extended
+/// precision) and the thread. One is held.
+#[cfg(feature = "gpu")]
+static AHEAD: std::sync::Mutex<Option<((String, bool), std::thread::JoinHandle<Result<crate::engine::gpu3::GpuRunner3, Error>>)>> = std::sync::Mutex::new(None);
+
+/// Whether the GPU solver of the next run is built ahead too (the host solver is, always): not with `BOWSHOCK_NO_RUNNER_AHEAD` (the measurement switch of the A/B runs).
+#[cfg(feature = "gpu")]
+fn runner_ahead() -> bool {
+    std::env::var_os("BOWSHOCK_NO_RUNNER_AHEAD").is_none()
+}
+
+/// Starts the build of the hinted case, once (the hint is taken): its GPU solver (host solver, the geometry arrays and the state on the device) on a background thread, or only its
+/// host solver. Luma's context is shared between threads, each with its own recordings: the uploads of the next run overlap with the iterations of this one.
+#[cfg(feature = "gpu")]
+fn fire_next_hint(now: &crate::engine::gpu3::GpuRunner3) {
+    let Some(case) = NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else { return };
+    if !runner_ahead() || !now.room_for_next() {
+        case.prefetch_solver();
+        return;
+    }
+    let key = (case.build_key(), false);
+    let spawned = std::thread::Builder::new()
+        .name("prefetch-runner".into())
+        .spawn(move || crate::engine::gpu3::GpuRunner3::new(&case, bowshock_cfd::gpu::Precision::F32));
+    if let Ok(handle) = spawned {
+        *AHEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, handle));
+    }
+}
+
+/// The GPU solver built ahead for `key`, waited for when it is still being built; `None` when there is none, it is for another case or it failed (the caller builds its own).
+#[cfg(feature = "gpu")]
+fn take_ahead(key: &(String, bool)) -> Option<crate::engine::gpu3::GpuRunner3> {
+    let (k, handle) = AHEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?;
+    if k != *key {
+        return None;
+    }
+    let t = std::time::Instant::now();
+    let mut runner = handle.join().ok()?.ok()?;
+    runner.built_ahead(t.elapsed().as_secs_f64());
+    Some(runner)
+}
+
+/// Ends the building ahead (the end of a solve): the hint is dropped and the solvers built ahead and not taken are let go.
+#[doc(hidden)]
+pub fn release_prefetch() {
+    *NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    #[cfg(feature = "gpu")]
+    drop(AHEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+    crate::engine::cache3::release_prebuilt();
+}
+
 /// The most iterations of a seed wedge: it only has to settle the base wake roughly, the finned run takes it from there.
 const SEED_MAX_ITERATIONS: usize = 3000;
 
@@ -444,11 +498,21 @@ impl Runner3 for Gpu3 {
     }
 
     fn post(&self, r: &GpuState, case: &Case3) -> Result<Post3, Error> {
-        let u = r.runner.gpu.state_f64()?;
+        // the state and the readings the run ended with (`GpuRunner3::end`), not read from the device again
+        let end = r.runner.end.as_ref();
+        let u = if end.is_some() { r.runner.host.u.clone() } else { r.runner.gpu.state_f64()? };
         let (mut eddy, mut cf) = (Vec::new(), Vec::new());
         // a viscous run keeps its field's extras: the eddy ratio from the device's `mu_t` and the molecular viscosity of the device state, the skin friction from the
         // device's viscous face fluxes (which the wall forces were reduced from)
-        if let (Some(host), Some((_, mu_t)), Some(fluxes)) = (r.runner.host.rans(), r.runner.gpu.turb_state()?, r.runner.gpu.viscous_flux()?) {
+        let read;
+        let fluxes = match end {
+            Some(e) => e.flux.as_ref(),
+            None => {
+                read = r.runner.gpu.viscous_flux()?;
+                read.as_ref()
+            }
+        };
+        if let (Some(host), Some((_, mu_t)), Some(fluxes)) = (r.runner.host.rans(), r.runner.gpu.turb_state()?, fluxes) {
             let g = &r.runner.host.grid;
             let ratio: Vec<f64> = u
                 .iter()
@@ -462,7 +526,7 @@ impl Runner3 for Gpu3 {
             let tractions = bowshock_cfd::viscous3::wall_tractions(g, &solid, &host.dirs, &fluxes[0], &fluxes[1], &fluxes[2]);
             (eddy, cf) = extras_of(case, g, &ratio, &tractions);
         }
-        Ok(Post3 { drag: r.runner.drag_parts(case)?, u, eddy, cf })
+        Ok(Post3 { drag: r.runner.end_drag_parts(case)?, u, eddy, cf })
     }
 
     fn carry(&self, r: &GpuState, case: &Case3, cfl: f64) -> Result<Option<Carried>, Error> {
@@ -494,13 +558,22 @@ impl Gpu3 {
             Some(s) => GpuState { reused: true, ..s },
             None => {
                 let precision = if extended { bowshock_cfd::gpu::Precision::Extended } else { bowshock_cfd::gpu::Precision::F32 };
-                GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key, reused: false }
+                let ahead = if extended { None } else { take_ahead(&(case.build_key(), false)) };
+                let runner = match ahead {
+                    Some(runner) => runner,
+                    None => crate::engine::gpu3::GpuRunner3::new(case, precision)?,
+                };
+                GpuState { runner, key, reused: false }
             }
         };
+        // the iterations of a finned point are the time the next run's host set-up is built in (a wedge's are too short to hide a build in)
+        if !extended {
+            fire_next_hint(&state.runner);
+        }
         let p = match start {
             Some(start) => {
-                let (u, turb) = start.on(case, &state.runner.host.grid);
-                state.runner.gpu.set_state_turb(&u, turb.as_deref())?;
+                let (u, turb) = bowshock_cfd::timing::timed("start_field", || start.on(case, &state.runner.host.grid));
+                bowshock_cfd::timing::timed("start_upload", || state.runner.gpu.set_state_turb(&u, turb.as_deref()))?;
                 if let Start::Neighbour { cfl, .. } = start {
                     state.runner.start_cfl = *cfl;
                 }
@@ -646,6 +719,89 @@ impl Analysis {
         case.build_solver_cached().map(|_| ())
     }
 
+    /// The host-side set-up of condition `c` as a point of the sweep builds it, with its seed wedge when the point is seeded (`seed`): the notes of
+    /// [`bowshock_cfd::timing`] (mesher, wall distance, solver arrays, ...) of building the solver from an empty grid cache, and the seconds of the two builds (instrumentation of
+    /// the fixed costs, DESIGN3D item 69).
+    #[doc(hidden)]
+    pub fn host_build_probe(&self, c: Condition, seed: bool) -> Result<(Vec<(&'static str, f64)>, f64, f64), Error> {
+        self.check_solver3(&[c])?;
+        let flow = self.wall_flow(&[c.mach])?;
+        let level = self.resolution.level();
+        let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), false)?;
+        *crate::engine::cache3::shared().lock().unwrap_or_else(|e| e.into_inner()) = crate::engine::cache3::GridCache::new(3);
+        let _ = bowshock_cfd::timing::take();
+        let t = std::time::Instant::now();
+        let s = case.build_solver_cached()?;
+        let main_s = t.elapsed().as_secs_f64();
+        let cells = s.grid.ni * s.grid.nj * s.grid.nk;
+        drop(s);
+        let mut notes = bowshock_cfd::timing::take();
+        notes.push(("cells", cells as f64));
+        // the rest of a GPU runner's set-up (the geometry arrays and the wall faces) on Luma's CPU backend: the host work of it, the device's copy cost left out
+        #[cfg(feature = "gpu")]
+        {
+            let t = std::time::Instant::now();
+            let runner = crate::engine::gpu3::GpuRunner3::new_cpu(&case, bowshock_cfd::gpu::Precision::F32)?;
+            let total = t.elapsed().as_secs_f64();
+            notes.extend(runner.setup_parts().iter().copied());
+            notes.push(("runner_new", total));
+        }
+        let wedge_s = if seed {
+            let wedge = self.seed_case(&case, c, level)?;
+            let t = std::time::Instant::now();
+            drop(wedge.build_solver_cached()?);
+            t.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
+        Ok((notes, main_s, wedge_s))
+    }
+
+    /// Tells the GPU sweep which run follows the one about to start: the host solver of the first point of `next` (conditions as `run` takes them) is built on a background thread
+    /// while the GPU iterates the first cold point of the run that is coming ([`Case3::prefetch_solver`]), and the run after finds it ready. One hint is held: a newer one replaces
+    /// it. Only the 3D engine without a warm start uses it (the warm sweep solves in another order); other analyses and conditions that do not make a case are ignored.
+    /// The hint changes nothing about the solve: the solver built is the one `run` would build.
+    #[doc(hidden)]
+    pub fn hint_next(&self, next: &[Condition]) {
+        if crate::engine::timing::no_fixedcost() || self.engine != Engine::Solver3 || self.warm_start || next.is_empty() || self.check_solver3(next).is_err() {
+            return;
+        }
+        let first = next
+            .iter()
+            .copied()
+            .min_by(|a, b| (a.alpha_deg != 0.0).cmp(&(b.alpha_deg != 0.0)).then(a.mach.total_cmp(&b.mach)).then(a.alpha_deg.total_cmp(&b.alpha_deg)));
+        let machs: Vec<f64> = next.iter().map(|c| c.mach).collect();
+        let case = first.and_then(|c| {
+            let flow = self.wall_flow(&machs).ok()?;
+            self.solver3_case(c, self.resolution.level(), Self::tier3(c, self.resolution, flow), false).ok()
+        });
+        *NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = case;
+    }
+
+    /// The seed wedge of condition `c` (a finned sector's) solved on the CPU (`cpu`) or the GPU: seconds and iterations (instrumentation of the seed's cost, DESIGN3D item 69).
+    #[doc(hidden)]
+    pub fn seed_probe(&self, c: Condition, cpu: bool) -> Result<(f64, usize), Error> {
+        self.check_solver3(&[c])?;
+        let flow = self.wall_flow(&[c.mach])?;
+        let level = self.resolution.level();
+        let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), false)?;
+        let wedge = self.seed_case(&case, c, level)?;
+        let t = std::time::Instant::now();
+        let seed = if cpu {
+            Cpu3.seed(&wedge)?
+        } else {
+            #[cfg(feature = "gpu")]
+            {
+                Gpu3.seed(&wedge)?
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                return Err(Error::Unsupported("the `gpu` feature is not enabled".into()));
+            }
+        };
+        Ok((t.elapsed().as_secs_f64(), seed.map_or(0, |s| s.iterations)))
+    }
+
     /// The flow the walls of a wall-resolved grid are sized for: the viscous knobs of the analysis (`viscous`, `roughness`, the fins' roughness, `grid_mach`)
     /// as the engine's [`WallFlow`]; `None` for an Euler analysis.
     fn wall_flow(&self, machs: &[f64]) -> Result<Option<WallFlow>, Error> {
@@ -728,7 +884,11 @@ impl Analysis {
     fn seed_case(&self, case: &Case3, c: Condition, level: u32) -> Result<Case3, Error> {
         let mut wedge = self.case_of(Kind::Wedge, c, level, case.tier, false)?;
         wedge.progress = None;
-        wedge.numerics.max_iter = wedge.numerics.max_iter.min(SEED_MAX_ITERATIONS);
+        // `BOWSHOCK_SEED_MAX_IT` / `BOWSHOCK_SEED_DRIFT` (a factor on the wedge's `drift_tol`): the measurement knobs of the seed's iterations (DESIGN3D item 69)
+        let num = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok());
+        let cap = num("BOWSHOCK_SEED_MAX_IT").map_or(SEED_MAX_ITERATIONS, |n| n as usize);
+        wedge.numerics.max_iter = wedge.numerics.max_iter.min(cap);
+        wedge.numerics.drift_tol *= num("BOWSHOCK_SEED_DRIFT").unwrap_or(1.0);
         Ok(wedge)
     }
 
