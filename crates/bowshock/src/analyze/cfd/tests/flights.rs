@@ -137,6 +137,9 @@ fn fixtures() -> Vec<Fixture> {
         f.fins.thickness = probe("FLIGHTVAL_FIN_THICK_IN").unwrap_or(f.fins.thickness);
         f.fins.span = probe("FLIGHTVAL_SPAN_IN").unwrap_or(f.fins.span);
         f.fins.sweep = probe("FLIGHTVAL_SWEEP_IN").unwrap_or(f.fins.sweep);
+        if let Ok(s) = std::env::var("FLIGHTVAL_SECTION") {
+            f.fins.section = s;
+        }
     }
     match std::env::var("FLIGHTVAL_CASES") {
         Ok(list) => {

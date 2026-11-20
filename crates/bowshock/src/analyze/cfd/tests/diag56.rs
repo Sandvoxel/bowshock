@@ -41,6 +41,29 @@ fn hook(c: &mut solver::engine::case3::Case3) {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
         let label = std::env::var("DIAG_ROCKET").unwrap_or_default();
         solver::engine::grid3::print_quality(&label, &g);
+        if let Ok(v) = std::env::var("DIAG_CELL") {
+            let v: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
+            let (ci, cj, ck, span) = (v[0], v[1], v[2], v[3]);
+            let node = |i: usize, j: usize, k: usize| {
+                let n = (k * (g.nj + 1) + j) * (g.ni + 1) + i;
+                (g.x[n], g.y[n].hypot(g.z[n]), g.z[n].atan2(g.y[n]).to_degrees())
+            };
+            let show = |i: usize, j: usize, k: usize| {
+                let (a, b) = (node(i, j, k), node(i + 1, j + 1, k + 1));
+                let c = node(i + 1, j, k);
+                let d = node(i, j + 1, k);
+                format!(
+                    "({i},{j},{k}) x {:.4}..{:.4} (top row {:.4}..{:.4}) r {:.4}..{:.4} th {:.3}..{:.3} solid {} vol {:.3e}",
+                    a.0, c.0, d.0, node(i + 1, j + 1, k).0, a.1, d.1, a.2, b.2, g.part[g.cell(i, j, k)], g.vol[g.cell(i, j, k)]
+                )
+            };
+            for i in ci.saturating_sub(span)..=(ci + span).min(g.ni - 1) {
+                println!("CELL i-scan {}", show(i, cj, ck));
+            }
+            for k in 0..=(ck + span).min(g.nk - 1) {
+                println!("CELL k-scan {}", show(ci, cj, k));
+            }
+        }
         if let (Some(j), Some(k)) = (env_f("DIAG_ROW_J"), env_f("DIAG_ROW_K")) {
             let (j, k) = (j as usize, k as usize);
             let xs: Vec<String> = (0..=g.ni).map(|i| format!("{:.4}", g.x[(k * (g.nj + 1) + j) * (g.ni + 1) + i])).collect();
