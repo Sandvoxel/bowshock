@@ -141,6 +141,7 @@ pub(crate) fn base_grid(body: &BaseBody, level: u32) -> BaseGridParams {
         n_nose: 48 * f,
         n_seg,
         n_wake: 40 * f,
+        wake_near: None,
         n_sting,
         n_gap: 12 * f,
         nj_out: 64 * f,

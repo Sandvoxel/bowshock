@@ -430,6 +430,9 @@ pub struct BaseGridParams {
     pub n_nose: usize,
     pub n_seg: Vec<usize>,
     pub n_wake: usize,
+    /// The first `n` of the `n_wake` cells behind the base cover `length` (nose diameters, geometric from the last cell of the body; the remaining cells go geometrically to
+    /// `x_down`): the recirculation region of a subsonic base wake resolved by cells of its own size instead of the fan that starts from the body's end cell. `None`: the fan alone.
+    pub wake_near: Option<(f64, usize)>,
     /// Rows inside the sting (solid; 0 without sting, otherwise >= 2), rows between the sting (or axis) and the base
     /// radius behind the base (these rows are solid beside the body), rows above the body surface.
     pub n_sting: usize,
@@ -520,10 +523,21 @@ pub(crate) fn base_axial_nodes(p: &BaseGridParams) -> Result<(Vec<f64>, usize), 
     }
     let i_end = xs.len() - 1; // node index of the base plane is xs.len() - 1 at this point
     let d_base = xs[i_end] - xs[i_end - 1];
-    let wake = geometric_offsets(d_base, p.x_down, p.n_wake);
     let x_base = bb.x_base();
-    for k in 1..=p.n_wake {
-        xs.push(x_base + wake[k]);
+    match p.wake_near {
+        Some((length, n)) if n >= 1 && n < p.n_wake && length > 0.0 && length < p.x_down => {
+            let near = geometric_offsets(d_base, length, n);
+            let d_last = near[n] - near[n - 1];
+            let far = geometric_offsets(d_last, p.x_down - length, p.n_wake - n);
+            xs.extend(near[1..].iter().map(|o| x_base + o));
+            xs.extend(far[1..].iter().map(|o| x_base + length + o));
+        }
+        _ => {
+            let wake = geometric_offsets(d_base, p.x_down, p.n_wake);
+            for k in 1..=p.n_wake {
+                xs.push(x_base + wake[k]);
+            }
+        }
     }
     Ok((xs, i_end))
 }
@@ -712,6 +726,7 @@ mod tests {
             n_nose: 24,
             n_seg: if boat > 0.0 { vec![16, 8] } else { vec![16] },
             n_wake: 16,
+            wake_near: None,
             n_sting: if sting > 0.0 { 4 } else { 0 },
             n_gap: 8,
             nj_out: 20,
@@ -840,6 +855,7 @@ mod tests {
             n_nose: 24,
             n_seg: vec![20, 10, 12, 10],
             n_wake: 16,
+            wake_near: None,
             n_sting: 0,
             n_gap: 8,
             nj_out: 20,
