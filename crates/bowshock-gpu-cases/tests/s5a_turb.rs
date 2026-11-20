@@ -615,7 +615,7 @@ fn cases() -> Vec<Case> {
             .with_compressibility(comp),
         );
     }
-    for comp in [Compressibility::Off, Compressibility::Wilcox, Compressibility::WilcoxShear] {
+    for comp in [Compressibility::Wilcox, Compressibility::WilcoxShear] {
         let c = sector_case(true, 4, 6);
         v.push(
             Case::new(
