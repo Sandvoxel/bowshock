@@ -370,19 +370,13 @@ impl Gpu3 {
 }
 
 /// Quality of a 3D point, first match wins: [`Quality::Failed`] on a non-finite or blown-up state (the run stopped `NonFinite`), a cell whose density or
-/// pressure is not positive, a non-finite force or drag, a pressure at the outer boundaries more than 100 % off the free stream, or an area-mean base Cp
+/// pressure has collapsed (`collapsed`: below a thousandth of the free stream's; the CFL controller's health check, which a run that has used up its answers goes on
+/// with: a state with a vacuum at the leading edge of a fin settles, and its forces are those of the defect), a non-finite force or drag, a pressure at the outer boundaries more than 100 % off the free stream, or an area-mean base Cp
 /// below the vacuum limit `-2 / (gamma M^2)`: the guards of the 2D facade's `quality`. Otherwise by how the run stopped.
 #[allow(clippy::too_many_arguments)]
-fn quality3(stop: StopReason, mach: f64, min_rho: f64, min_p: f64, finite: bool, farfield_dp: f64, cp_base: f64) -> Quality {
+fn quality3(stop: StopReason, mach: f64, collapsed_state: bool, finite: bool, farfield_dp: f64, cp_base: f64) -> Quality {
     let below_vacuum = cp_base < -2.0 / (GAMMA * mach * mach); // false for NaN
-    let positive = |x: f64| x > 0.0; // false for NaN
-    if matches!(stop, StopReason::NonFinite | StopReason::Cancelled)
-        || !positive(min_rho)
-        || !positive(min_p)
-        || !finite
-        || farfield_dp > FARFIELD_DP_FAILED
-        || below_vacuum
-    {
+    if matches!(stop, StopReason::NonFinite | StopReason::Cancelled) || collapsed_state || !finite || farfield_dp > FARFIELD_DP_FAILED || below_vacuum {
         return Quality::Failed;
     }
     match stop {
@@ -816,7 +810,7 @@ impl Analysis {
             Forces { cn, cm: if x_cp.is_finite() { -cn * x_cp / self.d_ref } else { 0.0 }, x_cp, ca }
         });
         let finite = total.is_finite() && forces.is_none_or(|f| f.cn.is_finite() && f.ca.is_finite());
-        let quality = quality3(r.stop_reason, c.mach, min_rho, min_p, finite, farfield_dp, cp_base);
+        let quality = quality3(r.stop_reason, c.mach, crate::engine::run3::collapsed(min_rho, min_p, &case.freestream()), finite, farfield_dp, cp_base);
 
         let mut warnings = Vec::new();
         if (0.7..1.05).contains(&c.mach) && self.has_sharp_corner() {

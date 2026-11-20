@@ -59,6 +59,9 @@ pub struct Fins3 {
 /// stretched (or shrunk) by at most `1 + 1 / ZONE_REACH`.
 const ZONE_REACH: f64 = 3.0;
 
+/// The height over the tip row, in units of the largest move of the edges, over which the move fades away above the fin (at least four rows).
+const FADE_REACH: f64 = 1.5;
+
 /// The chord at which a pointed or elliptical planform is cut at the tip, as a fraction of the root chord.
 pub const TIP_CHORD_FLOOR: f64 = 0.04;
 
@@ -1066,9 +1069,13 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         }
         let i_up = (pl.i_floor..=pl.i_seg0).rev().find(|&i| pl.x_le_root - nodes0[i] >= ZONE_REACH * up).unwrap_or(pl.i_floor);
         let i_down = (pl.i_seg1..=ni).find(|&i| nodes0[i] - pl.x_te_root >= ZONE_REACH * down).unwrap_or(ni);
-        for jj in 0..=(pl.j_tip + 3).min(nj - j_off) {
+        // the move fades away over the rows above the tip: four, or as many as lift the row `FADE_REACH` times the move above the tip (a row a move higher is a shear of 45
+        // degrees, and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid did at 75 degrees)
+        let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
+        let nfade = (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up.max(down)).unwrap_or(nj - j_off - pl.j_tip);
+        for jj in 0..(pl.j_tip + nfade).min(nj - j_off + 1) {
             let j = j_off + jj;
-            let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / 4.0 };
+            let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / nfade as f64 };
             let (_, x_le, chord) = row(jj);
             let mut knots = Vec::new();
             if i_up < pl.i_le {
@@ -1500,7 +1507,7 @@ pub fn print_quality(label: &str, g: &Grid3) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::body_grid::{BaseBody, Body, Nose};
+    use crate::engine::body_grid::{BaseBody, Body, Nose, Segment};
     use crate::engine::case::Case;
     use crate::engine::meshing::Wake;
     use crate::engine::numerics::Numerics;
@@ -1665,6 +1672,45 @@ mod tests {
             }
             eprintln!("nk = {nk}: max k stretching ratio next to fin layers: {all:.3} (footprint cells: {foot:.3})");
         }
+    }
+
+    /// A fin that starts where its segment starts (the fin can of a rocket) and is swept: the sweep is spread over the cells ahead of the leading edge (and the move of the
+    /// trailing edge over those behind it) instead of stretching the one cell next to the edge, which was 2 400 times the volume of the fin cell behind it for the delta fin of the
+    /// Rabia fixture (DESIGN3D item 57).
+    #[test]
+    fn the_sweep_of_a_fin_at_the_start_of_its_segment_is_spread_over_many_cells() {
+        let mut p = params(
+            0,
+            Some(Fins3 {
+                count: 4,
+                root_chord: 3.0,
+                tip_chord: 0.0,
+                span: 1.0,
+                sweep: 2.4,
+                thickness: 0.08,
+                te_to_base: 0.0,
+                profile: FinProfile::Rounded,
+                planform: None,
+            }),
+        );
+        let nose = Nose::Cone { half_angle: 10f64.to_radians() };
+        p.sting.body =
+            BaseBody { body: Body { nose }, segments: vec![Segment { length: 6.0, slope: 0.0 }, Segment { length: 3.0, slope: 0.0 }], sting_radius: 0.0 };
+        p.sting.n_seg = vec![24, 16];
+        let g = body_grid3(&p).unwrap();
+        let j_tip = g.solid[0].j.end;
+        let first = p.sting.n_up + p.sting.n_nose;
+        let mut worst = (1.0f64, 0, 0);
+        // the rows up to half the span: near a pointed tip the fin piece itself shrinks to nothing
+        for j in 1..j_tip / 2 {
+            let xs: Vec<f64> = (0..=g.ni).map(|i| g.x[j * (g.ni + 1) + i]).collect();
+            let (q, i) = max_ratio(&xs, first);
+            if q > worst.0 {
+                worst = (q, i, j);
+            }
+        }
+        eprintln!("sweep at a segment start: widest neighbour ratio {:.2} at i {} row {}", worst.0, worst.1, worst.2);
+        assert!(worst.0 < 2.0, "neighbouring cell widths differ by {:.1} at i {} of row {}", worst.0, worst.1, worst.2);
     }
 
     /// Axial node positions along the wall row of a 3D grid.
