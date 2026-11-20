@@ -462,11 +462,21 @@ impl Runner3 for Gpu3 {
     }
 
     fn post(&self, r: &GpuState, case: &Case3) -> Result<Post3, Error> {
-        let u = r.runner.gpu.state_f64()?;
+        // the state and the readings the run ended with (`GpuRunner3::end`), not read from the device again
+        let end = r.runner.end.as_ref();
+        let u = if end.is_some() { r.runner.host.u.clone() } else { r.runner.gpu.state_f64()? };
         let (mut eddy, mut cf) = (Vec::new(), Vec::new());
         // a viscous run keeps its field's extras: the eddy ratio from the device's `mu_t` and the molecular viscosity of the device state, the skin friction from the
         // device's viscous face fluxes (which the wall forces were reduced from)
-        if let (Some(host), Some((_, mu_t)), Some(fluxes)) = (r.runner.host.rans(), r.runner.gpu.turb_state()?, r.runner.gpu.viscous_flux()?) {
+        let read;
+        let fluxes = match end {
+            Some(e) => e.flux.as_ref(),
+            None => {
+                read = r.runner.gpu.viscous_flux()?;
+                read.as_ref()
+            }
+        };
+        if let (Some(host), Some((_, mu_t)), Some(fluxes)) = (r.runner.host.rans(), r.runner.gpu.turb_state()?, fluxes) {
             let g = &r.runner.host.grid;
             let ratio: Vec<f64> = u
                 .iter()
@@ -480,7 +490,7 @@ impl Runner3 for Gpu3 {
             let tractions = bowshock_cfd::viscous3::wall_tractions(g, &solid, &host.dirs, &fluxes[0], &fluxes[1], &fluxes[2]);
             (eddy, cf) = extras_of(case, g, &ratio, &tractions);
         }
-        Ok(Post3 { drag: r.runner.drag_parts(case)?, u, eddy, cf })
+        Ok(Post3 { drag: r.runner.end_drag_parts(case)?, u, eddy, cf })
     }
 
     fn carry(&self, r: &GpuState, case: &Case3, cfl: f64) -> Result<Option<Carried>, Error> {

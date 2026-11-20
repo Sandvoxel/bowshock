@@ -68,6 +68,13 @@ fn fits(cells: usize, need: u64, resident: u64, budget: Option<u64>) -> Result<(
     }
 }
 
+/// What the end of [`GpuRunner3::run_on`] read from the device state, kept for the facade's report of the same state (it takes these instead of reading them again): the wall forces
+/// per class, `(all faces, faces up to the base station)`, and the viscous face fluxes of a RANS run. Valid until the next run.
+pub struct EndReadings {
+    pub forces: (WallForces, WallForces),
+    pub flux: Option<[Vec<[f64; 5]>; 3]>,
+}
+
 /// GPU solver plus the host solver (grid and config) of one 3D case.
 pub struct GpuRunner3 {
     pub gpu: GpuSolver3,
@@ -87,6 +94,8 @@ pub struct GpuRunner3 {
     /// The CFL the next warm run starts its ramp at instead of restarting it at `cfl0` (taken by [`GpuRunner3::run_on`]; at most the run's `cfl_max`): a run that goes on from
     /// a converged field (a neighbouring Mach number, the next angle) is not a start-up, so it need not creep up from `cfl0`. `None`: the ramp restarts.
     pub start_cfl: Option<f64>,
+    /// The readings of the end of the last run (`None` before it and while it runs; the host solver's `u` is the state they belong to).
+    pub end: Option<EndReadings>,
     /// The finer parts of the set-up (see [`PointTiming::parts`]), moved to the timing of the first run.
     setup_parts: Vec<(&'static str, f64)>,
 }
@@ -123,6 +132,7 @@ impl GpuRunner3 {
             upload_seconds,
             cfl_events: Vec::new(),
             start_cfl: None,
+            end: None,
             setup_parts: Vec::new(),
         };
         bowshock_cfd::timing::timed("wall_faces", || runner.upload_wall_faces(case))?;
@@ -240,10 +250,15 @@ impl GpuRunner3 {
 
     /// The largest first-cell `y+` of the streamwise no-slip walls of the device state (`run3::y_plus_max` from the downloaded state and viscous face fluxes; `None` for Euler).
     pub fn y_plus_report(&self) -> Result<Option<f64>, Error> {
-        let (Some(visc), Some(fluxes)) = (self.visc, self.gpu.viscous_flux()?) else { return Ok(None) };
+        let Some(fluxes) = self.gpu.viscous_flux()? else { return Ok(None) };
+        self.y_plus_from(&self.gpu.state_f64()?, &fluxes)
+    }
+
+    /// [`GpuRunner3::y_plus_report`] from the state `u` and the viscous face fluxes of the device state.
+    fn y_plus_from(&self, u: &[bowshock_cfd::gas3::Cons3], fluxes: &[Vec<[f64; 5]>; 3]) -> Result<Option<f64>, Error> {
+        let Some(visc) = self.visc else { return Ok(None) };
         let g = &self.host.grid;
         let r = self.host.rans().ok_or_else(|| Error::Gpu("the host solver has no viscous state".into()))?;
-        let u = self.gpu.state_f64()?;
         let solid: Vec<bool> = g.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
         let mut y_plus_max = 0.0f64;
         let classes = crate::engine::run3::wall_classes(g);
@@ -294,6 +309,14 @@ impl GpuRunner3 {
         Ok(drag_parts_from(case, &self.host.grid, &self.wall_forces()?.0))
     }
 
+    /// [`GpuRunner3::drag_parts`] of the state the last run ended in, from the readings it kept (read again when there are none).
+    pub fn end_drag_parts(&self, case: &Case3) -> Result<DragParts, Error> {
+        match &self.end {
+            Some(e) => Ok(drag_parts_from(case, &self.host.grid, &e.forces.0)),
+            None => self.drag_parts(case),
+        }
+    }
+
     /// Iterate to a stop rule: as [`crate::engine::run3::run3_on`] (`warm`: keep the field, set the free stream of `case`, restart
     /// the CFL ramp).
     pub fn run_on(&mut self, case: &Case3, warm: bool) -> Result<PointResult3, Error> {
@@ -322,6 +345,7 @@ impl GpuRunner3 {
                 p
             }),
         };
+        self.end = None;
         self.gpu.set_config(&cfg)?;
         self.host.cfg = cfg;
         // the motor jet of this case (its state follows the Mach number): the jet cells of a warm state take it, a cold reset starts from it
@@ -431,13 +455,22 @@ impl GpuRunner3 {
             }
         }
         let t_final = Instant::now();
-        let f = self.lift_forces(case)?;
+        let forces = self.wall_forces()?;
+        let f = forces_from(case, &self.host.grid, &forces.1);
         tm.add("final_forces", t_final.elapsed().as_secs_f64());
         let mut result = rule.finish(case, f, stop.unwrap_or(done));
         // the `y+` of the streamwise walls (viscous runs) and the base Cp, from the device state (one state download; the host solver takes it for the pressure integration)
-        result.y_plus_max = self.y_plus_report()?.unwrap_or(f64::NAN);
         let t_part = Instant::now();
-        self.host.u = self.gpu.state_f64()?;
+        let u = self.gpu.state_f64()?;
+        let flux = self.gpu.viscous_flux()?;
+        result.y_plus_max = match &flux {
+            Some(flux) => self.y_plus_from(&u, flux)?.unwrap_or(f64::NAN),
+            None => f64::NAN,
+        };
+        self.host.u = u;
+        if !no_fixedcost() {
+            self.end = Some(EndReadings { forces, flux });
+        }
         tm.add("final_download", t_part.elapsed().as_secs_f64());
         result.cp_base = crate::engine::run3::base_cp(case, &self.host);
         result.cfl_events.clone_from(&ctl.events);
