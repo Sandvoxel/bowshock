@@ -287,11 +287,10 @@ fn print_axial(lines: &mut Lines, id: &str, case: &str, (gated, viscous, known):
 /// Radius of the 1 in sting of the Arcas tunnel models (NASA TN D-4013 p. 4) over the 2.25 in nose diameter.
 const ARCAS_STING: f64 = 0.5 / 2.25;
 
-/// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, Mach 0.6 / 0.8 gated (fins on
-/// 15 %, fins off 12 % or 0.03, the increment 30 % or 0.03) and Mach 0.7-1.2 INFO (reading uncertainty 0.02 at Mach 0.9-1.0), as G-F4 for the short model. `FAIL KNOWN` (DESIGN3D item 55):
-/// the fins-off lines at Mach 0.6 / 0.8: +16.8 / +16.0 % (DESIGN3D item 62, `tests/subdrag.rs`: NOT the friction, which is 0.240 / 0.233 of the 0.292 / 0.293 and within 2 % of a flat-plate estimate
-/// (0.244 / 0.239), the grid (+0.1 %) or the carborundum band (-0.1 %); the excess is attributed in item 62 to the boattail pressure drag (+0.051 / +0.059 on a body whose data leave about 0.006 for it); item 64 does not establish that (the Fox Euler nose + boattail matches the measured one, the friction is open). The test has a 1 in sting
-/// the gate omits (-5 points with it), and a body of the data's friction would need laminar flow to 7 calibres, which the band's roughness Reynolds number of about 750 does not support).
+/// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, on the test's 1 in sting
+/// ([`ARCAS_STING`]), Mach 0.6 / 0.8 gated (fins on 15 %, fins off 12 % or 0.03, the increment 30 % or 0.03) and Mach 0.7-1.2 INFO (reading uncertainty 0.02 at Mach 0.9-1.0), as G-F4 for the
+/// short model. The fins-off lines read +10.2 / +9.0 % with the sting and the boattail end-cell refinement (DESIGN3D item 65; free wake: +16.8 / +16.0 %, item 62, which found the friction right,
+/// within 2 % of a flat-plate estimate, and the grid, the transition band and the reference area not the cause; item 65: the free-wake excess is grid-converged), all six lines PASS.
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
 fn gate_x4_arcas_long_axial_force() {
@@ -307,8 +306,8 @@ fn gate_x4_arcas_long_axial_force() {
         match (a, b) {
             (Ok((so, vo, go)), Ok((sn, vn, gn))) => {
                 let (gated, viscous) = ([0.6, 0.8].contains(&m), go && gn);
-                // fins off at Mach 0.6 / 0.8: +16 % (boattail pressure drag of the free-wake solve, DESIGN3D item 62)
-                print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_off"), (gated, viscous, true), vo, off, Band::RelAbs(0.12, 0.03), &so);
+                // fins off at Mach 0.6 / 0.8: +10.2 / +9.0 % on the sting (+16 % on a free wake, DESIGN3D items 62, 65), inside the band: no longer KNOWN
+                print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_off"), (gated, viscous, false), vo, off, Band::RelAbs(0.12, 0.03), &so);
                 print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_on"), (gated, viscous, false), vn, on, Band::Rel(0.15), &sn);
                 compare(&mut lines, gated, viscous, false, "G-X4", &format!("arcas-long-M{m:.2}:increment"), vn - vo, on - off, Band::RelAbs(0.30, 0.03));
             }
