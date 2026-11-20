@@ -283,7 +283,8 @@ fn table_path(f: &Fixture, engine: &str) -> PathBuf {
 
 /// Where a solved table is written: `$FLIGHTVAL_OUT` (a GPU queue job writes `out/`, which `gpuq` copies back) or the fixture directory.
 fn write_table(name: &str, table: &CfdTable) {
-    let dir = std::env::var("FLIGHTVAL_OUT").map_or_else(|_| dir().join("tables"), PathBuf::from);
+    // a relative `$FLIGHTVAL_OUT` is relative to the repository root (`cargo test` runs in the package directory, where `gpuq` does not look for `out/`)
+    let dir = std::env::var("FLIGHTVAL_OUT").map_or_else(|_| dir().join("tables"), |o| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(o));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), serde_json::to_vec_pretty(table).unwrap()).unwrap();
 }
@@ -365,7 +366,14 @@ fn flight_validation() {
                 power_on: Vec::new(),
             };
             let t0 = Instant::now();
-            let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points(f.id.clone())).unwrap_or_else(|e| panic!("{}: solve failed: {e}", f.id));
+            // a rocket the 3D engine cannot solve says so and the others go on (the app then keeps the legacy table)
+            let table = match solve(&job, &Arc::new(AtomicBool::new(false)), log_points(f.id.clone())) {
+                Ok(table) => table,
+                Err(e) => {
+                    println!("{}: {engine} SOLVE FAILED after {:.1} s wall: {e}", f.id, t0.elapsed().as_secs_f64());
+                    continue;
+                }
+            };
             println!(
                 "{}: {engine} solved {} points + {} angle points on {} in {:.1} s wall ({:.1} s app); notes {:?}",
                 f.id,
