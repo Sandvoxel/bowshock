@@ -3,7 +3,7 @@
 //! Models: `fox` (default; NASA TM X-2439 configuration 4, tangent ogive 2 d, cylinder 2 d, 10 degree boattail of 1 d, sting 0.13 d; boattail drag and base `Cp` of the data) and
 //! `arcas` (the long Arcas model of G-X4 without fins, `C_A,corr` of the data; the 1 in sting of the test with the token `sting`).
 //! `WR_MACHS` (comma list; default the Fox Mach numbers, `0.6,0.8` for `arcas`), `WR_VARIANTS` (comma list, default `base`), tokens joined by `+`:
-//! - `fox` / `arcas`, `euler` (Euler tier; the Fox default is RANS, Coarse tier at Re_D 0.5e6), `sting` (Arcas only);
+//! - `fox` / `arcas` (`sector`: the four-fin Coarse sector of G-X4 instead of the wedge), `euler` (Euler tier; the Fox default is RANS, Coarse tier at Re_D 0.5e6), `sting` (Arcas only);
 //! - `lvl<N>`, `ref<NN>` (`with_refinement(NN / 10)`), `iters<N>`;
 //! - region refinements of the base-wake grid: `seg<k>` the boattail cells, `cyl<k>` the cylinder cells, `wake<k>` the cells behind the base, `gap<k>` the rows between sting and base
 //!   radius, `njo<k>` the rows above the body, `dx<k>` the end-cell size at the nose tip, shoulder and base corner, `drw<k>` the first cell height (each divided / multiplied by `k`);
@@ -47,12 +47,14 @@ fn case_of(m: f64, variant: &str) -> (Case3, f64, f64, f64, f64) {
     let kind = if euler { TierKind::Euler } else { TierKind::Coarse };
     let (mut c, bt, cpb, ca, af) = if parts.contains(&"arcas") {
         let r = arcas_rocket(arcas_stab::LONG_TUBE_LENGTH - arcas::TUBE_LENGTH, arcas::TRANSONIC_RE_PER_M, arcas::TRANSONIC_T0_K);
+        let sting = if parts.contains(&"sting") { STING_ARCAS } else { 0.0 };
         let (mut body, _) = r.body.to_internal().expect("body");
-        if parts.contains(&"sting") {
-            body = body.with_sting(STING_ARCAS);
+        if sting > 0.0 {
+            body = body.with_sting(sting);
         }
-        let ca = arcas_stab::LONG_TRANSONIC.iter().find(|x| (x.0 - m).abs() < 1e-9).map_or(f64::NAN, |x| x.2);
-        let c = Case3::wedge(m, body, level).with_tier(tier(kind, r.flow(m, 1.2)));
+        let fins = parts.contains(&"sector");
+        let ca = arcas_stab::LONG_TRANSONIC.iter().find(|x| (x.0 - m).abs() < 1e-9).map_or(f64::NAN, |x| if fins { x.3 } else { x.2 });
+        let c = if fins { r.sector_on_sting(m, 1.2, kind, sting) } else { Case3::wedge(m, body, level).with_tier(tier(kind, r.flow(m, 1.2))) };
         (c, f64::NAN, if m < 0.7 { 0.055 } else { 0.08 }, ca, r.area_factor())
     } else {
         let body =
@@ -170,6 +172,9 @@ fn wr1_study() {
                 p.friction.total,
                 sol.point.y_plus_max
             );
+            if g.nk > 1 {
+                continue;
+            }
             // the wall Cp over the last body segment, extrapolated wall pressure, in 12 bins
             let p_inf = h.cfg.freestream[4];
             let q = 0.5 * m * m;
