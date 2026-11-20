@@ -3,7 +3,7 @@
 //! compile peak), before and after `Context::trim` (idle pool given back), for a chain of runners in one process.
 //!
 //! ```text
-//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim] [--ext] [--euler] [--run-on N] [--snaps N]
+//! mem_items --chain anf[@SUB][,gf1,anfwedge,half,anfhalf,wedge,..] [--sub N] [--keep] [--iters N] [--reclaim] [--ext] [--euler] [--run-on N] [--snaps N] [--chord N] [--across N] [--refine S]
 //! ```
 //! `anf` (default) is `finned_table --anf --tier coarse`; `gf1` the G-F1 sector of `mem_stages`; `anfhalf` the ANF half domain at 2 degrees (Lift tier, `Between`); `half` the same with the G-F1 fins.
 //! `--reclaim` gives the idle pool back after every row (measures the steady state; without it the rows show the natural footprint, pool included).
@@ -146,6 +146,16 @@ fn main() -> Result<(), String> {
         let mut case = case_of(which, 2.0, sub_item)?;
         if args.iter().any(|a| a == "--euler") {
             case.viscous = None;
+        }
+        // grid knobs: `--chord N` cells over the fin root chord (32 is the 688 k-cell sector of item 49, the default 64 the 825 k one), `--across N` cells across the fin, `--refine S` uniform refinement
+        if let Some(n) = value("--chord") {
+            case.grid.fin_chord_cells = Some(n.parse().map_err(|e| format!("--chord: {e}"))?);
+        }
+        if let Some(n) = value("--across") {
+            case.grid.fin_cells_across = n.parse().map_err(|e| format!("--across: {e}"))?;
+        }
+        if let Some(s) = value("--refine") {
+            case = case.with_refinement(s.parse().map_err(|e| format!("--refine: {e}"))?);
         }
         let mut r = GpuRunner3::new(&case, if args.iter().any(|a| a == "--ext") { Precision::Extended } else { Precision::F32 }).map_err(|e| e.to_string())?;
         let cells = r.host.grid.ni * r.host.grid.nj * r.host.grid.nk;

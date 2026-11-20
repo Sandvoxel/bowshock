@@ -105,7 +105,7 @@ dependencies = [
  "objc2-foundation",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1128,7 +1128,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2103,7 +2103,7 @@ checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 [[package]]
 name = "luma"
 version = "0.5.0"
-source = "git+https://github.com/flipnoteman/Luma.git?rev=231c98697467c666be09e100ed558c27a19cfa62#231c98697467c666be09e100ed558c27a19cfa62"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=620c688893d9769735ab34695ec6a9388bfd97b9#620c688893d9769735ab34695ec6a9388bfd97b9"
 dependencies = [
  "bytemuck",
  "encase",
@@ -2118,7 +2118,7 @@ dependencies = [
 [[package]]
 name = "luma-core"
 version = "0.5.0"
-source = "git+https://github.com/flipnoteman/Luma.git?rev=231c98697467c666be09e100ed558c27a19cfa62#231c98697467c666be09e100ed558c27a19cfa62"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=620c688893d9769735ab34695ec6a9388bfd97b9#620c688893d9769735ab34695ec6a9388bfd97b9"
 dependencies = [
  "libc",
  "log",
@@ -2128,7 +2128,7 @@ dependencies = [
 [[package]]
 name = "luma-cpu"
 version = "0.5.0"
-source = "git+https://github.com/flipnoteman/Luma.git?rev=231c98697467c666be09e100ed558c27a19cfa62#231c98697467c666be09e100ed558c27a19cfa62"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=620c688893d9769735ab34695ec6a9388bfd97b9#620c688893d9769735ab34695ec6a9388bfd97b9"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -2142,7 +2142,7 @@ dependencies = [
 [[package]]
 name = "luma-cuda"
 version = "0.5.0"
-source = "git+https://github.com/flipnoteman/Luma.git?rev=231c98697467c666be09e100ed558c27a19cfa62#231c98697467c666be09e100ed558c27a19cfa62"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=620c688893d9769735ab34695ec6a9388bfd97b9#620c688893d9769735ab34695ec6a9388bfd97b9"
 dependencies = [
  "cudarc",
  "libloading 0.8.9",
@@ -2153,7 +2153,7 @@ dependencies = [
 [[package]]
 name = "luma-metal"
 version = "0.5.0"
-source = "git+https://github.com/flipnoteman/Luma.git?rev=231c98697467c666be09e100ed558c27a19cfa62#231c98697467c666be09e100ed558c27a19cfa62"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=620c688893d9769735ab34695ec6a9388bfd97b9#620c688893d9769735ab34695ec6a9388bfd97b9"
 dependencies = [
  "block2",
  "bytemuck",
@@ -2167,7 +2167,7 @@ dependencies = [
 [[package]]
 name = "luma-wgpu"
 version = "0.5.0"
-source = "git+https://github.com/flipnoteman/Luma.git?rev=231c98697467c666be09e100ed558c27a19cfa62#231c98697467c666be09e100ed558c27a19cfa62"
+source = "git+https://github.com/flipnoteman/Luma.git?rev=620c688893d9769735ab34695ec6a9388bfd97b9#620c688893d9769735ab34695ec6a9388bfd97b9"
 dependencies = [
  "bytemuck",
  "libc",
@@ -2689,7 +2689,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3136,7 +3136,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3571,7 +3571,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4345,7 +4345,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -790,3 +790,30 @@ Open: unseeded, the Mach 1.3 sector at CFL 100 left a non-physical state (minimu
 | G-F1, G-F5 | not runnable: no viscous engine (G-F1 panics "engine is inviscid" by design; G-F5 prints INFO of the pressure drag) | - | [0.92, 1.12]; 8 % |
 
 Not run on the wedge: the `case2d` smoke cases of G-W4 (transonic and subsonic: they build the 2D engine case of `bowshock-cases` with its own numerics), RANS.
+
+53. **Luma 620c688 (v0.5.0 pin bump), trims reduced to one, guard recalibrated, 2 cells across the fin on the Lift half domain (lumapin2, 2026-11-19).** *Changes:* (1) `Cargo.toml`/`Cargo.lock` pin `620c688` (reverts exact-size sharing, resident accounting of plans/loops/scratch, single-pass reductions, stream-ordered CUDA pool); no API change. (2) `LazySolver3::run_monitored` no longer calls `Context::trim` around the trace; `GpuRunner3::new` keeps its trim on a grid-shape change. (3) `device_bytes3` is a staircase: `300 MiB + 850 B * n + 1200 B * n.next_power_of_two()`, x(1 + 0.03 (sub_iters - 2)), x1.6 double-float, x0.82 Euler (was 300 MiB + 4100 B/cell linear). (4) `Analysis` Lift-tier half domain (`Kind::Half`, `solver3.rs`) takes `fin_cells_across = 2` (`HALF_FIN_CELLS_ACROSS`). Tools: `mem_items --chord/--across/--refine`, `tools/memprof/guard_cal.sh`, `final_check.sh`, `examples/half_across.rs`.
+
+*Memory* (process peak of `nvidia-smi -lms 5`, MiB incl. CUDA context; f32, SST, sub_iters 2, compile + 300 iterations of `run_on`):
+
+| | item 49 (231c986) 3090 | 620c688 3090 (`1-20261119-132953-27426`, `0-20261119-153522-18551`) | 620c688 3080L (`0-20261119-125936-17440`) |
+|---|---|---|---|
+| sector 688 k | 2796 | **1954** (compile 1890) | - (825 k: 1858) |
+| sector 825 k (64 chord cells) | - | 1954 | 1858 |
+| half 1.35 M | 4844 | **3586** (2 cells across, 1.38 M: 3584) | 3522 (item 49: 4748) |
+| sector / half steady after `trim` | 1694 / 2648 | 1858 / 3394 | 1762 / 3234 |
+| 2.16 M / 4.8 M / 6.8 M sector | - / 17.9 / 21.9 GiB | 6370 / 13474 / 15010 | 6274 (2.16 M), 6562 (3.29 M) |
+| full solve (28 points) peak | 4084 (chord 32) | 3632 (`0-20261119-150745-17974`) | pending |
+
+The peak falls 25-35 % (no exact-size arena on top of the intermediates), the steady figure rises 10 % (sector) / 26 % (half): the plan keeps full-size buffers again (Luma resident 1071 -> 1412 MiB at 688 k). Memory is a staircase in the cells (Luma's power-of-two classes: 688 k and 825 k have equal resident bytes; 4.8 M and 6.8 M differ by the 630 B/cell state only). Double-float x1.57, Euler x0.80, sub_iters 1 / 5 x0.96 / 1.08 (2.16 M cells, 3080L `0-20261119-142733-17544`).
+
+*Trim decision.* Without the pre-trace trim the peak is equal (half 3522 / 3522 on the 3080L); without the post-trace trim 132 / 264 MiB idle remain after the compile, the peak does not rise (3490 against 3522, 3090 3586 against 3618: noise), and after `run_on` the idle pool is 236 / 472 MiB either way. **Both removed.** The grid-shape trim matters: a chain sector, half, sector without it peaks at 5122 MiB against 3618 (`0-20261119-150745-19281`, 3090), none at all 5218. Final code check (`0-20261119-153522-18551`): 1954 / 1954 / 3586, chains 3586.
+
+*Resident accounting:* `resident_bytes` + idle pool + 0.3 GiB CUDA context = process figure within 3 % (sector 1412 + 132 + 322 = 1866 against 1824 after the compile; half 2817 + 264 + 322 = 3403 against 3360); the compile transient above resident is 0.5-1.7 GiB.
+
+*Guard:* the staircase reproduces the seven measured f32 peaks at 0 to +15 % (6.8 M cells +3 %) and the double-float / Euler / sub_iters points from above; admits up to 8.39 M cells on the 3090 (about 17 GiB estimated, 14.7 measured at 6.8 M). Test `the_device_estimate_bounds_the_measured_peaks`.
+
+*Half domain, 2 cells across the fin* (alpha 2 deg, Lift tier, 3080L `0-20261119-150745-24021`; 1 -> 2 cells): Mach 0.8 CN 0.64715 -> 0.64398 (-0.5 %), CA 0.56312 -> 0.56070 (-0.4 %), x_cp 8.3695 -> 8.3648 d; Mach 2 CN 0.39230 -> 0.39226 (0.0 %), CA 0.53101 -> 0.52743 (-0.7 %), x_cp 7.6765 unchanged; same iterations (810 / 610), cells +2.4 %, wall +2 % (31.4 -> 31.9 s, 23.4 -> 24.0 s). Full solve LIFT lines: CN -0.1 to -1.0 % (M0.5 0.5354 -> 0.5303, M3.0 0.2807 -> 0.2785), x_cp within 0.003 d; all 20 DRAG lines identical to `a4934af`. Kept.
+
+*Time and gates.* Full solve 3090: 265.6 s / 38 700 it with the trims (`0-20261119-150745-17974`; 266.6 s / 38 800 it before), 273.7 s and 285.5 s on the final code (`...-24837`, `...-9504`) while the host load average was 14-27: fixed costs per point rose 29.2 -> 31.9 -> 36.4 s (CPU-bound), iterating 240.8 -> 241.9 -> 246.8 s; [INFERENCE] CPU contention, not the trim removal (a clean repeat was not obtained). Gates (3090, `0-20261119-155254-12455`): fins G-F1 PASS, G-F4 14 PASS + 4 KNOWN, G-S Mach 2 PASS, Mach 0.8 FAIL KNOWN (0.559531 / 0.478874 as item 52); lift G-F5 10/10, G-L1 30 PASS + 1 FAIL (Mach 0.79 in-plane +13.4 %): the tally of HANDOFF3D section 0. Not run when this was written: 3080L full solve, memory check and wedge / gpucases gates (queued: `0-20261119-163540-7029`, `...-153523-18056`, `...-155254-4332`).
+
+*Luma issue (draft, not filed):* "Steady footprint after the revert of exact-size sharing is back to the full-size plan (1412 MiB resident at 688 k cells against 1071); the compile peak is fine. Request: a `trim`-like call that releases the recorded intermediates of a compiled loop that the replay never reads, or size-class slack reporting in `memory_stats` (resident 825 k = 688 k cells: classes cost up to 2x)."
