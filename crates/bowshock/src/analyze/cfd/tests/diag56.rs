@@ -1,6 +1,6 @@
 //! Diagnostic of the slow points of the flight-validation rockets (DESIGN3D item 56): one drag point through the facade path the app uses, with the grid's quality
 //! numbers and the state at every snapshot. `DIAG_ROCKET=rabia-short-fin-can` (a flight fixture; `example` the app's finned example), `DIAG_MACHS=0.8`,
-//! `DIAG_RES=draft|coarse`, `DIAG_COLLAPSE=1` (the cells of the final state under the positivity guard, with the part they touch), `DIAG_OWNGRID=1`, `DIAG_CPU=1`, `DIAG_GRID=1` (grid statistics before the run), `DIAG_MAXIT`, `DIAG_SNAP=<from>` (state every 50 iterations from there);
+//! `DIAG_RES=draft|coarse`, `DIAG_ALPHA=2` (the app's stability node: half domain at that angle), `DIAG_COLLAPSE=1` (the cells of the final state under the positivity guard, with the part they touch), `DIAG_OWNGRID=1`, `DIAG_CPU=1`, `DIAG_GRID=1` (grid statistics before the run), `DIAG_MAXIT`, `DIAG_SNAP=<from>` (state every 50 iterations from there);
 //! the fixture probes of `flights.rs` (`FLIGHTVAL_BLUNT_IN`, `FLIGHTVAL_TIP_IN`, ...) apply.
 
 use std::sync::{Arc, Mutex};
@@ -184,7 +184,10 @@ fn diag56_point() {
     println!("PLAN fins {:?} outline {:?} body {:?}", plan.fins, plan.outline, plan.body);
     let machs: Vec<f64> = std::env::var("DIAG_MACHS").map(|v| v.split(',').map(|m| m.trim().parse().unwrap()).collect()).unwrap_or_else(|_| vec![0.8]);
     for mach in machs {
+        // `DIAG_ALPHA=2` solves the stability node of the app (the half domain at that angle: Coarse, no drag stop rule, grid sized for its own Mach number)
+        let alpha = env_f("DIAG_ALPHA").unwrap_or(0.0);
         let res = match std::env::var("DIAG_RES").as_deref() {
+            _ if alpha != 0.0 => solver::Resolution::Coarse,
             Ok("draft") => solver::Resolution::Draft,
             _ => solver::Resolution::Coarse,
         };
@@ -197,10 +200,14 @@ fn diag56_point() {
             .keep_fields(true)
             .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: altitude } })
             .roughness(plan.body_roughness)
-            .drag_tolerance(DRAG_TOLERANCE)
             .case3_hook(hook);
-        // the app's shared grid: a drag node's grid is sized for max(its Mach, 1) (`DIAG_OWNGRID=1`: for its own Mach number)
-        if std::env::var_os("DIAG_OWNGRID").is_none() {
+        if alpha == 0.0 {
+            a = a.drag_tolerance(DRAG_TOLERANCE);
+        }
+        // the app's shared grid: a drag node's grid is sized for max(its Mach, 1), a stability node's for its own (`DIAG_OWNGRID=1`: a drag node's for its own Mach number too)
+        if alpha != 0.0 {
+            a = a.grid_mach(mach.min(3.0));
+        } else if std::env::var_os("DIAG_OWNGRID").is_none() {
             a = a.grid_mach(mach.clamp(1.0, 3.0));
         }
         if let Some(f) = plan.fins.as_ref().filter(|_| std::env::var_os("DIAG_NOFINS").is_none()) {
@@ -213,13 +220,18 @@ fn diag56_point() {
             std::ops::ControlFlow::Continue(())
         });
         let t = Instant::now();
-        let polar = a.run(&[solver::Condition::new(mach, 0.0)]).expect("solves");
+        let polar = a.run(&[solver::Condition::new(mach, alpha)]).expect("solves");
         let wall = t.elapsed().as_secs_f64();
         let p = &polar.points[0];
         let d = &p.detail;
         println!(
-            "POINT {rocket} M {mach} wall {wall:.1} s quality {:?} stop {:?} its {} cd {:.5} cp_base {:.4}",
-            p.quality, d.stop_reason, d.iterations, p.drag.total, d.cp_base
+            "POINT {rocket} M {mach} alpha {alpha} wall {wall:.1} s quality {:?} stop {:?} its {} cd {:.5} cp_base {:.4} cn {:?}",
+            p.quality,
+            d.stop_reason,
+            d.iterations,
+            p.drag.total,
+            d.cp_base,
+            p.forces.map(|f| f.cn)
         );
         for r in &d.rollbacks {
             println!("ROLLBACK {r:?}");
