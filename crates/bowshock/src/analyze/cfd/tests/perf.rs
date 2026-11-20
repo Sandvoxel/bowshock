@@ -337,9 +337,20 @@ fn half_domain_against_the_sting_grid() {
     }
 }
 
+/// The grid setting of the timing runs: what the app does (`shared_grid()`), unless `BOWSHOCK_SHARED_GRID` says `1` / `on` / `true` (every node on the grid sized for the table's highest
+/// Mach number) or `0` / `off` / `false` (every node on the grid sized for its own Mach number).
+fn shared_grid_setting() -> bool {
+    match std::env::var("BOWSHOCK_SHARED_GRID").ok().as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "on" | "true") => true,
+        Some("0" | "off" | "false") => false,
+        _ => shared_grid(),
+    }
+}
+
 /// Where the time of the 3D engine goes, through the app path: the FINNED example rocket as the app solves it under `BOWSHOCK_ENGINE=3d`: 10 sector points
 /// at zero incidence, then 8 Mach numbers at 2 and 6 degrees on the half domain, one `run` per node (`solve`). Prints one line per solved point (the runner's
 /// `PointTiming` joined with the facade's `FacadeTiming`), the sums by kind and the whole solve, and a `PERF` line.
+/// The grid setting is the app's (`shared_grid()`) unless `BOWSHOCK_SHARED_GRID=0|1` overrides it (see [`shared_grid_setting`]).
 /// `tools/gpuq/gpuq submit --host local --name engine3d-timing -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock engine3d_finned_timing --run-ignored only --no-capture`.
 #[test]
 #[ignore = "BOWSHOCK_ENGINE=3d: solves the finned example's table and angles on the GPU"]
@@ -348,16 +359,24 @@ fn engine3d_finned_timing() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     assert!(plan.fins.is_some());
-    let shared = std::env::var("BOWSHOCK_SHARED_GRID").is_ok();
+    let shared = shared_grid_setting();
+    // `BOWSHOCK_MACHS=3.0` (a comma list): these Mach numbers instead of the table's, for the drag and for the angles (one node of each: the biggest grids, in a minute)
+    let machs: Option<Vec<f64>> = std::env::var("BOWSHOCK_MACHS").ok().map(|v| v.split(',').filter_map(|m| m.trim().parse().ok()).collect());
+    let draft = std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft");
     let job = Job {
         plan,
         altitude: 120.0,
-        nodes: nodes((0.1, 3.0)).unwrap(),
+        nodes: machs.clone().unwrap_or_else(|| nodes((0.1, 3.0)).unwrap()),
         stage: 1,
-        grid: if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse },
+        grid: if draft { CfdGrid::Draft } else { CfdGrid::Coarse },
         compute: Default::default(),
         cpu_only: false,
-        stability: lift_nodes((0.1, 3.0)).unwrap(),
+        // as the app: the draft grid solves the drag alone; `BOWSHOCK_NO_ANGLES` leaves the angles out of a coarse solve (the drag table alone)
+        stability: if draft || std::env::var_os("BOWSHOCK_NO_ANGLES").is_some() {
+            Vec::new()
+        } else {
+            machs.unwrap_or_else(|| lift_nodes((0.1, 3.0)).unwrap())
+        },
     };
     let _ = solver::engine::timing::take_timings();
     let _ = solver::take_facade_timings();
@@ -438,6 +457,123 @@ fn engine3d_finned_timing() {
     println!("SUM {} runs, {iterations} iterations: iterating {run_total:.1} s of {wall:.1} s wall; fixed costs per point (build, context, upload, reset, first chunk, facade) {fixed:.1} s; points at the iteration cap: {capped:?} = {capped_s:.1} s", runs.len());
     let all = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, iterations];
     println!("PERF {}", serde_json_perf(wall, all[13]));
+}
+
+/// The draft-first flow as the app runs it (DESIGN3D item 57), through the app path on the finned example rocket: the draft solve (the drag at every Mach node, no angles) and then
+/// the coarse solve of the same job (drag and the 3D angles), in one process like the app's two solves. Prints the time to the first result, the total, the two drag tables and
+/// their difference per Mach number, the coarse angles, and a `PERF` line. `BOWSHOCK_DRAFT_ONLY=1` stops after the draft solve (a time on a slow device or backend).
+/// `tools/gpuq/gpuq submit --host local --name draft-first -- env BOWSHOCK_ENGINE=3d cargo nextest run --release -p bowshock engine3d_draft_first --run-ignored only --no-capture`.
+#[test]
+#[ignore = "BOWSHOCK_ENGINE=3d: solves the finned example's draft and coarse tables on the GPU"]
+fn engine3d_draft_first() {
+    assert_eq!(solver::Engine::from_env(), solver::Engine::Solver3, "run with BOWSHOCK_ENGINE=3d");
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = |grid: CfdGrid| Job {
+        plan: plan.clone(),
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: if grid == CfdGrid::Draft { Vec::new() } else { lift_nodes((0.1, 3.0)).unwrap() },
+    };
+    // one `RUN` line per run of the solver (the timing model of DESIGN3D item 57 is fitted on these): pass, dimension, Mach, angle, cells, iterations executed, stop, run seconds, ms per iteration
+    let solve = |grid: CfdGrid| {
+        let _ = solver::engine::timing::take_timings();
+        let t = Instant::now();
+        let table = solve_sized(&job(grid), &Arc::new(AtomicBool::new(false)), |_| (), shared_grid_setting()).expect("the example solves");
+        let wall = t.elapsed().as_secs_f64();
+        for r in solver::engine::timing::take_timings() {
+            let per_iter = if r.chunks_rest > 0 { 1000.0 * r.rest_chunks_s / (r.chunks_rest * 50) as f64 } else { f64::NAN };
+            println!("RUN {grid:?} {}D {:.2} {:.0} {} {} {} {:.2} {per_iter:.2}", r.dim, r.mach, r.alpha_deg, r.cells, r.iters_exec, r.stop, r.run_s);
+        }
+        (table, wall)
+    };
+    println!("DEVICE {:?}", solver::gpu_name());
+    let (draft, t_draft) = solve(CfdGrid::Draft);
+    println!("DRAFT-FIRST first result: {} points on {} in {t_draft:.1} s", draft.points.len(), draft.backend);
+    if std::env::var_os("BOWSHOCK_DRAFT_ONLY").is_some() {
+        for p in &draft.points {
+            println!(
+                "DRAFT M {:.2} cd {:.5} friction {:.5} pressure {:.5} base {:.5} fins {:.5} {:?}",
+                p.mach, p.cd, p.friction, p.pressure, p.base, p.fins, p.quality
+            );
+        }
+        println!("PERF {{\"case\":\"3d-engine-draft-only\",\"precision\":\"f32\",\"cells\":null,\"iters\":0,\"us_per_iter\":0,\"wall_s\":{t_draft:.3}}}");
+        return;
+    }
+    let (coarse, t_coarse) = solve(CfdGrid::Coarse);
+    println!(
+        "DRAFT-FIRST final result: {} points and {} angle points in {t_coarse:.1} s; total {:.1} s ({:.0} % over the coarse solve alone)",
+        coarse.points.len(),
+        coarse.lift.as_ref().map_or(0, |l| l.points.len()),
+        t_draft + t_coarse,
+        100.0 * t_draft / t_coarse
+    );
+    println!("| Mach | CD draft | CD coarse | diff % | friction % | pressure % | base % | fins % |");
+    println!("|---|---|---|---|---|---|---|---|");
+    let pct = |d: f64, c: f64| 100.0 * (d - c) / c;
+    for (d, c) in draft.points.iter().zip(&coarse.points) {
+        println!(
+            "| {:.2} | {:.5} | {:.5} | {:+.1} | {:+.1} | {:+.1} | {:+.1} | {:+.1} |",
+            c.mach,
+            d.cd,
+            c.cd,
+            pct(d.cd, c.cd),
+            pct(d.friction, c.friction),
+            pct(d.pressure, c.pressure),
+            pct(d.base, c.base),
+            pct(d.fins, c.fins)
+        );
+    }
+    if let Some(l) = &coarse.lift {
+        for p in &l.points {
+            println!("LIFT M {:.2} alpha {:.0} CN {:.4} x_cp {:.4} {:?}", p.mach, p.alpha_deg, p.cn, p.x_cp, p.quality);
+        }
+    }
+    println!(
+        "PERF {{\"case\":\"3d-engine-draft-first\",\"precision\":\"f32\",\"cells\":null,\"iters\":0,\"us_per_iter\":0,\"wall_s\":{:.3}}}",
+        t_draft + t_coarse
+    );
+}
+
+/// What a smaller device does to the biggest grids of the app's coarse solve (DESIGN3D item 57), emulated on a big one: the sector (Mach 3) and the half domain at 2 degrees (Mach 3) of the
+/// example rocket on the shared grid (the Mach-3 grid at every node, as the app solves), on the GPU alone (no CPU fallback), `BOWSHOCK_ITERS` iterations (default 400) each. Run it under
+/// `LUMA_MEMORY_BUDGET=<bytes>` (Luma's budget of array data is 80 % of the device's memory: a 6 GiB card has 5 153 960 755, an 8 GiB card 6 871 947 674), with and without
+/// `BOWSHOCK_GPU_MEM_GUARD=off`, through `tools/gpuq/gpumem` for the process peak. Prints per domain the cells, the ms per iteration and the guard's refusal if there is one.
+#[test]
+#[ignore = "BOWSHOCK_ENGINE=3d: the biggest grids of the example's coarse solve on the GPU"]
+fn engine3d_memory_budget() {
+    assert_eq!(solver::Engine::from_env(), solver::Engine::Solver3, "run with BOWSHOCK_ENGINE=3d");
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let iters: usize = std::env::var("BOWSHOCK_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    for (what, condition) in [("sector", solver::Condition::from(3.0)), ("half domain 2 deg", solver::Condition::new(3.0, 2.0))] {
+        let mut analysis = solver::Analysis::new(&plan.body)
+            .unwrap()
+            .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: 120.0 } })
+            .roughness(plan.body_roughness)
+            .resolution(solver::Resolution::Coarse)
+            .backend(solver::Backend::Gpu)
+            .grid_mach(3.0)
+            .max_iterations(iters);
+        if let Some(fins) = &plan.fins {
+            analysis = analysis.fins(fins.clone()).fin_outline(plan.outline.clone());
+        }
+        let _ = solver::engine::timing::take_timings();
+        let t = Instant::now();
+        match analysis.run(&[condition]) {
+            Ok(_) => {
+                for r in solver::engine::timing::take_timings() {
+                    let per_iter = if r.chunks_rest > 0 { 1000.0 * r.rest_chunks_s / (r.chunks_rest * 50) as f64 } else { f64::NAN };
+                    println!("MEMBUDGET {what}: {} cells, {} iterations, {per_iter:.2} ms/it, {:.1} s", r.cells, r.iters_exec, t.elapsed().as_secs_f64());
+                }
+            }
+            Err(e) => println!("MEMBUDGET {what}: refused: {e}"),
+        }
+    }
 }
 
 fn serde_json_perf(wall: f64, iters: f64) -> String {
@@ -744,7 +880,7 @@ fn finned_drag_split() {
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let t_all = Instant::now();
     for &mach in &machs {
-        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d()).unwrap_or_else(|_| panic!("the node analysis"));
+        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d(), mach).unwrap_or_else(|_| panic!("the node analysis"));
         let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
         let polar = analysis.run(&[mach]).expect("the point solves");

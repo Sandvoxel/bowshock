@@ -256,7 +256,9 @@ impl State {
     /// wanted now.
     pub(crate) fn solve_status(&self) -> cfd::Status {
         let lift = cfd::lift_status(&self.cfd.plan, self.cfd.table.as_ref().and_then(|t| t.lift.as_ref()), self.cond.mach);
-        cfd::solve_status(&self.cfd.status, &lift, self.cfd.angles)
+        // a draft table has no 3D angles and the coarse solve that follows it brings them: they are not missing while that solve is on its way
+        let refining = self.cfd.refine.is_some() || (self.cfd.solving.is_some() && self.cfd.table.as_ref().is_some_and(|t| t.grid == CfdGrid::Draft));
+        cfd::solve_status(&self.cfd.status, &lift, self.cfd.angles && !refining)
     }
 
     /// Handles one of the screen's messages.
@@ -544,6 +546,7 @@ impl State {
         let geometry = (*self.cfd.plan).as_ref().ok().map(|p| p.geometry);
         self.cfd.fields.retain_for(self.cfd.table.as_deref(), geometry);
         let force = std::mem::take(&mut self.cfd.force);
+        let refine = std::mem::take(&mut self.cfd.refine);
         let (Ok(plan), Some(nodes)) = (self.cfd.plan.as_ref(), cfd::nodes(self.cond.mach)) else {
             return Task::none();
         };
@@ -554,13 +557,17 @@ impl State {
         if force.is_some() {
             self.cfd.failed = None;
         }
-        let wanted = force.is_some() || (self.cfd.status == cfd::Status::Missing && self.cfd.failed.as_ref().map(|f| f.0) != Some(key));
+        let wanted = force.is_some() || refine.is_some() || (self.cfd.status == cfd::Status::Missing && self.cfd.failed.as_ref().map(|f| f.0) != Some(key));
         if self.method != Method::CfdTable || self.cfd.solving.is_some() || !wanted {
             return Task::none();
         }
         self.cfd.serial += 1;
         let serial = self.cfd.serial;
-        let grid = force.unwrap_or(CfdGrid::Coarse);
+        let asked = refine.or(force).unwrap_or(CfdGrid::Coarse);
+        // The coarse solve of a table that is missing or stale goes through the draft grid first (a result in a fraction of the time, then the coarse table replaces it); the
+        // solve that follows a draft table goes straight to its grid.
+        let draft_first = refine.is_none() && cfd::draft_first(asked, &self.cfd.status);
+        let (grid, then) = if draft_first { (CfdGrid::Draft, Some(asked)) } else { (asked, None) };
         let job = Arc::new(cfd::Job {
             plan: plan.clone(),
             altitude: self.cond.altitude,
@@ -569,7 +576,8 @@ impl State {
             grid,
             compute: ctx.compute.clone(),
             cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu,
-            stability: if self.cfd.angles { cfd::lift_nodes(self.cond.mach).unwrap_or_default() } else { Vec::new() },
+            // the draft grid solves the drag alone (its angles are not worth their time, DESIGN3D item 57): the stability stays on Extended until the coarse solve brings the 3D angles
+            stability: if self.cfd.angles && grid != CfdGrid::Draft { cfd::lift_nodes(self.cond.mach).unwrap_or_default() } else { Vec::new() },
         });
         let tracker = solve::Tracker::new(job.units());
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::events(demo, &job));
@@ -584,6 +592,7 @@ impl State {
             tracker,
             job: Some(job),
             grid,
+            then,
             altitude: Some(self.cond.altitude.clamp(0.0, 20_000.0)),
             started: Instant::now(),
             cancelling: false,
@@ -642,7 +651,14 @@ impl State {
                 self.cfd.store_fields(&table, std::mem::take(&mut solving.fields));
                 if ctx.doc.store_cfd_table(table) {
                     self.cfd.summary = Some((table_key, summary));
-                    ctx.notify(brief);
+                    match solving.then {
+                        // the draft table is on screen: the next refresh starts the solve that replaces it
+                        Some(next) => {
+                            self.cfd.refine = Some(next);
+                            ctx.notify(cfd::draft_ready(&brief));
+                        }
+                        None => ctx.notify(brief),
+                    }
                 } else {
                     self.cfd.failed = Some((key, "the solver returned no usable table".to_string()));
                 }
@@ -652,7 +668,10 @@ impl State {
                 let seconds = solving.started.elapsed().as_secs_f64().max(solving.tracker.clock());
                 self.cfd.failed = Some((key, "solve cancelled".to_string()));
                 let how_far = solve_view::how_far_brief(&solving.tracker);
-                match solving.job.as_deref().and_then(|job| cfd::partial_table(job, &solving.tracker, seconds)) {
+                // a refinement of a draft table that is on screen: the complete draft table stays, a partial coarse one would replace it with less
+                let refining = solving.grid != CfdGrid::Draft && self.cfd.table.as_ref().is_some_and(|t| t.grid == CfdGrid::Draft && Some(t.key) == key);
+                let partial = solving.job.as_deref().and_then(|job| cfd::partial_table(job, &solving.tracker, seconds)).filter(|_| !refining);
+                match partial {
                     Some(table) => {
                         ctx.notify(format!("Cancelled after {how_far}"));
                         let (grid, altitude) = (solving.grid, solving.altitude.unwrap_or_default());
@@ -660,8 +679,14 @@ impl State {
                         let fields = std::mem::take(&mut solving.fields);
                         self.cfd.stopped = Some(Stopped { key, tracker: solving.tracker, table: Some(table), seconds, grid, altitude, keep_label, fields });
                     }
+                    None if refining => ctx.notify(cfd::refine_cancelled()),
                     None => ctx.notify("CFD solve cancelled"),
                 }
+            }
+            // the draft solve failed (the draft grid is the less robust one): the coarse solve it was a first look for goes ahead on its own
+            Err(e) if solving.then.is_some() => {
+                ctx.notify(cfd::draft_failed(&e));
+                self.cfd.refine = solving.then;
             }
             Err(e) => {
                 ctx.notify(format!("CFD solve stopped: {e}"));
@@ -834,6 +859,8 @@ pub(crate) struct Cfd {
     pub(crate) failed: Option<(Option<u64>, String)>,
     /// Re-solve or Refine was pressed: solve on this grid whether or not a table exists.
     force: Option<CfdGrid>,
+    /// A draft-first solve stored its table: the next refresh solves on this grid (see [`cfd::draft_first`]).
+    refine: Option<CfdGrid>,
     serial: u64,
     /// Scripted solves the next solves play instead of running the solver (`BOWSHOCK_CFD_DEMO`, for screenshots).
     demo: VecDeque<solve_demo::Demo>,
@@ -865,6 +892,7 @@ impl Default for Cfd {
             summary: None,
             failed: None,
             force: None,
+            refine: None,
             serial: 0,
             demo: VecDeque::new(),
         }
@@ -879,6 +907,8 @@ pub(crate) struct Solving {
     job: Option<Arc<cfd::Job>>,
     /// The grid it solves on.
     pub(crate) grid: CfdGrid,
+    /// The grid the solve hands on to when its table is stored: a draft-first solve (see [`cfd::draft_first`]) is followed by this one, which replaces its table.
+    pub(crate) then: Option<CfdGrid>,
     /// The altitude that sets the Reynolds number (m).
     pub(crate) altitude: Option<f64>,
     /// When it began (the screen's clock).

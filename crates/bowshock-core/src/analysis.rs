@@ -92,7 +92,7 @@ impl Engine {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Resolution {
     /// Grid level 0 with wall functions on the body and the fins and about a quarter of the cells (`Tier::Draft`): the 3D engine's quick option at zero incidence
-    /// with the viscous terms; everywhere else (Euler, the angles, the legacy engine) it is [`Resolution::Coarse`].
+    /// with the viscous terms (below Mach 0.8 its safe variant, `Case3::draft_subsonic`); everywhere else (Euler, the angles, the legacy engine) it is [`Resolution::Coarse`].
     Draft,
     /// Grid level 0.
     Coarse,

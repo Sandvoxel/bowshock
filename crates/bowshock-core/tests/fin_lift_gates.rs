@@ -354,6 +354,17 @@ fn gate_f5_anf_cd0() {
     lines.finish();
 }
 
+/// The Mach number the G-L1 grids are sized for: the gate's 3.147 unless `BOWSHOCK_GATE_GRID_MACH` says `own` (the point's own Mach number, a per-point grid), `floorX` (its own, not below
+/// X) or a number (DESIGN3D item 57: which sizing is closer to the data).
+fn gate_grid_mach(mach: f64) -> f64 {
+    match std::env::var("BOWSHOCK_GATE_GRID_MACH").ok().as_deref() {
+        None => 3.147,
+        Some("own") => mach,
+        Some(v) if v.starts_with("floor") => mach.max(v["floor".len()..].parse().expect("floorX")),
+        Some(v) => v.parse().expect("BOWSHOCK_GATE_GRID_MACH: own, floorX or a number"),
+    }
+}
+
 /// G-L1: the ANF's `CN_alpha` (`CN / alpha` at 2 degrees, per rad) and `x_cp` (calibers from the tip) at 2 and 6 degrees (6 degrees is warm-started from 2) on the half
 /// domain with the lift tier in both roll phases, against `bowshock_reference::anf` at the points the Euler gate gates (`out/gate/anf_3d.md`: wind tunnel M 0.69,
 /// 0.79, 1.728, 1.99, 2.48; free flight 1.8, 2.351, 2.665): CN_alpha 13 %, `x_cp` 0.25 cal, no worse than that gate. The 6-degree nonlinearity is INFO. The tunnel (`wt`)
@@ -379,7 +390,7 @@ fn gate_l1_anf_cn_alpha_and_cp() {
     let items: Vec<(&str, anf::AnfPoint, FinPhase, &str)> = points.iter().flat_map(|&(t, p)| PHASES.iter().map(move |&(ph, name)| (t, p, ph, name))).collect();
     let runs = par_map(&items, |&(tag, p, ph, _)| -> Result<(Solved, Solved, Case3), String> {
         let tunnel = tag == "wt";
-        let (c2, c6) = (anf_half(p.mach, 2.0, ph, 3.147, tunnel), anf_half(p.mach, 6.0, ph, 3.147, tunnel));
+        let (c2, c6) = (anf_half(p.mach, 2.0, ph, gate_grid_mach(p.mach), tunnel), anf_half(p.mach, 6.0, ph, gate_grid_mach(p.mach), tunnel));
         let mut s = Session::new(&c2)?;
         let r2 = s.run(&c2, false)?;
         let r6 = s.run(&c6, true)?;

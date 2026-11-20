@@ -334,6 +334,25 @@ pub const DRAG_FROM: &str = "Drag from the solver";
 pub const DRAFT_TOOLTIP: &str =
     "Re-solve on the draft grid: wall functions and about a quarter of the cells, much quicker, Cd within about 1 % at Mach 2 and less certain below Mach 0.8";
 
+/// The toast of a draft-first solve that stored its table: `brief` is the solve's own (`10 points and the angles in 1 min 2 s`).
+pub fn draft_ready(brief: &str) -> String {
+    format!("Draft table: {brief} · refining on the coarse grid")
+}
+
+/// The toast of a draft solve that failed: the coarse solve goes ahead.
+pub fn draft_failed(why: &str) -> String {
+    format!("Draft solve stopped: {why}; solving on the coarse grid")
+}
+
+/// The toast of a refinement that was cancelled: the draft table stays.
+pub fn refine_cancelled() -> &'static str {
+    "Refinement cancelled; the draft table stays"
+}
+
+/// The line under a draft table while the coarse solve that replaces it runs (the stability is still Extended's: the draft solve takes the drag alone).
+pub const REFINING_NOTE: &str =
+    "A draft table, a first look (wall functions, about a quarter of the cells); the coarse solve now running replaces it and adds the 3D angles.";
+
 /// The note for a point that converged only after the solver took the run back to an earlier state and restarted it at a lower CFL limit (the 3D solver's controller).
 pub fn restart_note(mach: f64, r: &bowshock_model::CfdRestart) -> String {
     let times = if r.rollbacks == 1 { "after a restart".to_string() } else { format!("after {} restarts", r.rollbacks) };

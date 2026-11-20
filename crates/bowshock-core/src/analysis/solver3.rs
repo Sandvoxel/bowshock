@@ -26,7 +26,7 @@
 
 use super::*;
 use crate::engine::axisym_init::{axisym_to_sector, AxisymInit};
-use crate::engine::case3::{Tier, WallFlow};
+use crate::engine::case3::{Tier, WallFlow, DRAFT_SAFE_BELOW_MACH};
 use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
@@ -536,6 +536,9 @@ impl Analysis {
         if kind == Kind::Half && matches!(case.tier, Tier::Lift(_)) {
             case.grid.fin_cells_across = HALF_FIN_CELLS_ACROSS;
         }
+        if matches!(tier, Tier::Draft(..)) && c.mach < DRAFT_SAFE_BELOW_MACH {
+            case = case.draft_subsonic();
+        }
         if let Some(t) = self.wall_temperature_ratio {
             case.wall_thermal = WallThermal::Isothermal(t);
         }
@@ -922,6 +925,42 @@ mod tests {
         // an explicit reference diameter is the facade's own business
         let b = Analysis::new(&spec).unwrap().reference_diameter(0.1);
         assert!((b.area_ratio() - 1.0).abs() < 1e-12);
+    }
+
+    /// Each resolution maps to its own tier at zero incidence, and every one to the lift tier at an angle of attack.
+    #[test]
+    fn the_resolutions_map_to_their_tiers() {
+        use crate::engine::case3::SUTHERLAND_SEA_LEVEL;
+        let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let tier = |alpha: f64, r: Resolution| Analysis::tier3(Condition::new(1.0, alpha), r, Some(flow));
+        assert!(matches!(tier(0.0, Resolution::Draft), Tier::Draft(..)));
+        assert!(matches!(tier(0.0, Resolution::Coarse), Tier::Coarse(_)));
+        assert!(matches!(tier(0.0, Resolution::Medium), Tier::Fine(_)));
+        assert!(matches!(tier(0.0, Resolution::Fine), Tier::Fine(_)));
+        for r in [Resolution::Draft, Resolution::Coarse, Resolution::Medium, Resolution::Fine] {
+            assert!(matches!(tier(2.0, r), Tier::Lift(_)));
+            assert!(matches!(Analysis::tier3(Condition::new(1.0, 0.0), r, None), Tier::Euler));
+        }
+    }
+
+    /// The Draft tier takes its safe subsonic variant (`Case3::draft_subsonic`: the full domain and wake) below Mach 0.8, in the case of the facade and in the wedge that seeds a
+    /// sector, and keeps the Draft grid (5 L / 3 L domain) from Mach 0.8 up; the other tiers are not touched.
+    #[test]
+    fn the_draft_tier_is_safe_below_mach_08() {
+        use crate::engine::case3::SUTHERLAND_SEA_LEVEL;
+        let a = tiny_finned().wake(Wake::Base);
+        let flow = WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
+        let domain = |c: &Case3| {
+            let b = c.grid.base.as_ref().expect("the base-wake grid");
+            (b.x_up, b.x_down)
+        };
+        let draft = |mach: f64| a.solver3_case(Condition::from(mach), 0, Tier::draft(flow), false);
+        let (slow, fast) = (draft(0.5), draft(0.8));
+        assert!(domain(&slow).0 > domain(&fast).0 && domain(&slow).1 > domain(&fast).1, "{:?} {:?}", domain(&slow), domain(&fast));
+        assert_eq!(domain(&slow), domain(&a.seed_case(&slow, Condition::from(0.5), 0)));
+        let coarse = |mach: f64| a.solver3_case(Condition::from(mach), 0, Tier::Coarse(flow), false);
+        assert_eq!(domain(&coarse(0.5)), domain(&coarse(0.8)));
+        assert_eq!(domain(&slow), domain(&coarse(0.5)), "the safe variant is the full domain of the wall-resolved tiers");
     }
 
     /// The ANF-like rocket on the tiny sting grid (20 k cells), Euler, CPU: a sector at zero incidence and a half domain at 4 degrees.

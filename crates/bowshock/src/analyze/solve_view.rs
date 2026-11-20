@@ -48,6 +48,8 @@ struct Shown<'a> {
     running: bool,
     cancelling: bool,
     grid: CfdGrid,
+    /// The grid a draft-first solve goes on to.
+    then: Option<CfdGrid>,
     /// The altitude of the Reynolds number; `None` for the Euler 3D solve.
     altitude: Option<f64>,
     stopped: Option<&'a Stopped>,
@@ -62,12 +64,22 @@ fn shown(state: &State) -> Option<Shown<'_>> {
             running: true,
             cancelling: s.cancelling,
             grid: s.grid,
+            then: s.then,
             altitude: s.altitude,
             stopped: None,
         });
     }
     let s = cfd.stopped.as_ref()?;
-    Some(Shown { tracker: &s.tracker, elapsed: s.seconds, running: false, cancelling: false, grid: s.grid, altitude: Some(s.altitude), stopped: Some(s) })
+    Some(Shown {
+        tracker: &s.tracker,
+        elapsed: s.seconds,
+        running: false,
+        cancelling: false,
+        grid: s.grid,
+        then: None,
+        altitude: Some(s.altitude),
+        stopped: Some(s),
+    })
 }
 
 /// Whether the solve (or its stopped state) is what the screen shows: the CFD table method on an analysis that uses it.
@@ -191,6 +203,14 @@ fn grid_name(grid: CfdGrid) -> &'static str {
     }
 }
 
+/// The grid of a solve on show, with the one it goes on to: `draft grid, then coarse`.
+fn grid_label(s: &Shown<'_>) -> String {
+    match s.then {
+        Some(next) => format!("{}, then {}", grid_name(s.grid), grid_name(next).trim_end_matches(" grid")),
+        None => grid_name(s.grid).to_string(),
+    }
+}
+
 fn muted<'a>(s: impl text::IntoFragment<'a>, size: f32) -> Element<'a, Message> {
     text(s).size(size).style(theme::muted).boxed()
 }
@@ -239,7 +259,7 @@ pub fn compact(state: &State) -> Vec<Element<'_, Message>> {
     let (elapsed, left) = clock(t, s.elapsed);
     out.push(muted(format!("{:.0} % · {elapsed}", 100.0 * t.fraction()), 12.0));
     out.push(muted(left, 12.0));
-    out.push(muted(format!("{} · {}", device(t), grid_name(s.grid)), 12.0));
+    out.push(muted(format!("{} · {}", device(t), grid_label(&s)), 12.0));
     out.extend(machine_lines(t, true));
     out
 }
@@ -321,7 +341,7 @@ pub fn centre<'a>(state: &'a State, ctx: &'a Ctx) -> Option<Element<'a, Message>
         row![muted(format!("ran {}", duration_text(s.elapsed)), 12.0)]
     };
     let altitude = crate::units::with_unit_scaled(s.altitude.unwrap_or_default(), Quantity::Altitude, ctx.units, 0);
-    let place = super::cfd::place(&device(t), grid_name(s.grid), &altitude, s.running && t.phase() == Phase::Stability);
+    let place = super::cfd::place(&device(t), &grid_label(&s), &altitude, s.running && t.phase() == Phase::Stability);
     let mut place_row: Vec<Element<'a, Message>> = vec![muted(place, 12.0)];
     place_row.extend(fallback_chip(t));
     let machines = machine_lines(t, s.running);

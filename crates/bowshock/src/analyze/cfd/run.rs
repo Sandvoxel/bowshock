@@ -1,6 +1,6 @@
 use super::fields::FieldRef;
-use super::fresh::now;
-use super::plan::{lift_key, nodes, table_key, Plan, DRAG_TOLERANCE, LIFT_ALPHAS, SHARED_GRID, SOLVER_CEILING};
+use super::fresh::{now, Status};
+use super::plan::{lift_key, nodes, table_key, Plan, DRAG_SIZING_MACH_FLOOR, DRAG_TOLERANCE, LIFT_ALPHAS, SHARED_GRID, SOLVER_CEILING};
 use super::remote::{self, Failed};
 use super::share::{self, Lost, Stop};
 use super::wording;
@@ -466,6 +466,21 @@ pub fn solves_3d() -> bool {
     solver::Engine::from_env() == solver::Engine::Solver3
 }
 
+/// `BOWSHOCK_DRAFT_FIRST=off` turns the draft-first flow off (a solve for the coarse grid then goes straight to it).
+pub const DRAFT_FIRST_ENV: &str = "BOWSHOCK_DRAFT_FIRST";
+
+/// Whether a solve for `grid` goes through the draft grid first (DESIGN3D item 57): the 3D engine, a coarse solve, and no fresh drag table on screen to keep until the coarse one is in
+/// (`verdict`, the drag table's [`status`](super::fresh::status): [`Status::Missing`] or [`Status::Stale`]; a table that is fresh, of any grid, is not replaced by a quicker, rougher one). The draft table is stored when it finishes, the plots
+/// and the table show it, and the coarse solve of the same job follows and replaces it.
+pub fn draft_first(grid: CfdGrid, verdict: &Status) -> bool {
+    draft_first_rule(solves_3d(), std::env::var(DRAFT_FIRST_ENV).is_ok_and(|v| v.eq_ignore_ascii_case("off")), grid, verdict)
+}
+
+/// [`draft_first`] with its two switches given: the 3D engine, and the opt-out.
+fn draft_first_rule(three_d: bool, opted_out: bool, grid: CfdGrid, verdict: &Status) -> bool {
+    three_d && !opted_out && grid == CfdGrid::Coarse && matches!(verdict, Status::Missing | Status::Stale)
+}
+
 /// What a node needs solved.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum NodeKind {
@@ -473,6 +488,17 @@ pub(super) enum NodeKind {
     Drag,
     /// A Mach number at the angles of attack.
     Lift,
+}
+
+/// The Mach number the walls of a node's grid are sized for on a table with a shared sizing (DESIGN3D item 57): a drag node its own Mach number but not below
+/// [`DRAG_SIZING_MACH_FLOOR`], an angle node its own Mach number (user decision: the Lift tier's CN is not grid-converged under any sizing, 4-7 % per refinement step, and the own-Mach
+/// grid is the cheapest), neither above `table_max`. Sized for its own Mach number a low-Mach drag node has a first cell at 30-50 wall units on the fins and is not grid-converged
+/// (Mach 0.1: CD +8 % at refinement 1, still falling at 1.333); sized for Mach 1 and up it is within 0.3 % of the Mach-3 sizing for a third to half less time.
+pub(super) fn sizing_mach(kind: NodeKind, mach: f64, table_max: f64) -> f64 {
+    match kind {
+        NodeKind::Lift => mach.min(table_max),
+        NodeKind::Drag => mach.max(DRAG_SIZING_MACH_FLOOR).min(table_max),
+    }
 }
 
 /// The [`solver::Analysis`] of one node of either kind: the body, the fins with their outline, the resolution (a drag node's is the job's grid, the angles are always solved
@@ -485,6 +511,7 @@ pub(super) fn node_analysis(
     altitude: f64,
     grid_mach: f64,
     shared_grid: bool,
+    mach: f64,
 ) -> Result<solver::Analysis, Failed> {
     let mut analysis = solver::Analysis::new(&job.plan.body)
         .map_err(|e| Failed::Message(e.to_string()))?
@@ -501,7 +528,7 @@ pub(super) fn node_analysis(
         analysis = analysis.drag_tolerance(DRAG_TOLERANCE);
     }
     if shared_grid {
-        analysis = analysis.grid_mach(grid_mach);
+        analysis = analysis.grid_mach(sizing_mach(kind, mach, grid_mach));
     }
     if let Some(fins) = &job.plan.fins {
         analysis = analysis.fins(fins.clone()).fin_outline(job.plan.outline.clone());
@@ -551,7 +578,7 @@ fn solve_lift_node(
     cancel: &Arc<AtomicBool>,
     send: &Outbox,
 ) -> Result<LiftNode, Failed> {
-    let mut analysis = node_analysis(job, NodeKind::Lift, session, job.altitude.clamp(0.0, SOLVER_CEILING), grid_mach, shared_grid)?;
+    let mut analysis = node_analysis(job, NodeKind::Lift, session, job.altitude.clamp(0.0, SOLVER_CEILING), grid_mach, shared_grid, mach)?;
     let progress = sink(started, cancel.clone(), send.clone(), true, machine);
     let conditions: Vec<solver::Condition> = LIFT_ALPHAS.iter().map(|&a| solver::Condition::new(mach, a)).collect();
     let mut polar = match session {
@@ -626,7 +653,7 @@ pub(super) fn solve_sized(
                 return solve_lift_node(&job, grid_mach, shared_grid, job.stability[node - n_drag], session, machine, started, &cancel, &send).map(Node::Lift);
             }
             let mach = job.nodes[node];
-            let mut analysis = node_analysis(&job, NodeKind::Drag, session, altitude, grid_mach, shared_grid)?;
+            let mut analysis = node_analysis(&job, NodeKind::Drag, session, altitude, grid_mach, shared_grid, mach)?;
             let progress = sink(started, cancel.clone(), send.clone(), false, machine);
             let mut polar = match session {
                 Session::Remote(r) => {
@@ -750,4 +777,39 @@ pub(super) fn solve_sized(
         table.notes.extend(stability_notes);
     }
     Ok(table)
+}
+
+#[cfg(test)]
+mod draft_first_tests {
+    use super::*;
+
+    /// Only a coarse solve on the 3D engine with nothing fresh on screen goes through the draft grid; Quick, Refine, a fresh table, the legacy engine and the opt-out do not.
+    #[test]
+    fn only_a_coarse_solve_with_no_fresh_table_goes_through_the_draft_grid() {
+        let rule = |three_d, off, grid, verdict: Status| draft_first_rule(three_d, off, grid, &verdict);
+        assert!(rule(true, false, CfdGrid::Coarse, Status::Missing));
+        assert!(rule(true, false, CfdGrid::Coarse, Status::Stale));
+        assert!(!rule(true, false, CfdGrid::Coarse, Status::Fresh));
+        assert!(!rule(true, false, CfdGrid::Draft, Status::Missing));
+        assert!(!rule(true, false, CfdGrid::Medium, Status::Missing));
+        assert!(!rule(false, false, CfdGrid::Coarse, Status::Missing));
+        assert!(!rule(true, true, CfdGrid::Coarse, Status::Missing));
+        assert!(!rule(true, false, CfdGrid::Coarse, Status::Unsupported("x".into())));
+    }
+}
+
+#[cfg(test)]
+mod sizing_tests {
+    use super::*;
+
+    /// An angle node is sized for its own Mach number, a drag node for its own with a floor, and none above the table's highest.
+    #[test]
+    fn the_nodes_are_sized_for_their_own_mach_number_the_drag_nodes_with_a_floor() {
+        assert_eq!(sizing_mach(NodeKind::Lift, 0.5, 3.0), 0.5);
+        assert_eq!(sizing_mach(NodeKind::Lift, 3.0, 2.0), 2.0);
+        assert_eq!(sizing_mach(NodeKind::Drag, 0.1, 3.0), DRAG_SIZING_MACH_FLOOR);
+        assert_eq!(sizing_mach(NodeKind::Drag, 2.3, 3.0), 2.3);
+        assert_eq!(sizing_mach(NodeKind::Drag, 0.1, 0.5), 0.5);
+        assert_eq!(sizing_mach(NodeKind::Drag, 3.0, 3.0), 3.0);
+    }
 }

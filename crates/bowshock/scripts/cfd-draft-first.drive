@@ -1,0 +1,22 @@
+# Draft first (DESIGN3D item 57): on the 3D engine a CFD table that is missing is solved on the draft grid first (the drag alone), stored, and then refined on the coarse grid, which
+# replaces it and adds the 3D angles. The solves are scripted (`analyze/solve_demo.rs`, made-up numbers): the first is a draft solve in progress, cancelled and discarded; Re-solve
+# plays a whole draft solve and then the coarse refinement in progress. The draft table is on screen (labelled draft) while the refinement runs; Cancel keeps it.
+#   ICED_TEST_BACKEND=tiny-skia BOWSHOCK_ENGINE=3d BOWSHOCK_CFD_DEMO=mid,done,mid cargo run -q -p bowshock -- drive --example crates/bowshock/scripts/cfd-draft-first.drive out/cfd-draft-first
+viewport 1300x800
+click "Analyze"
+click "CFD table"
+move (100, 700)
+move (102, 702)
+screenshot draft-solving-dark.png
+
+click "Cancel"
+click "Discard"
+click "Re-solve"
+move (100, 700)
+move (102, 702)
+screenshot refining-dark.png
+
+click "Cancel"
+move (100, 700)
+move (102, 702)
+screenshot draft-kept-dark.png

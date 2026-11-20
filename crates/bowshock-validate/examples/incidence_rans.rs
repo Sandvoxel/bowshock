@@ -4,7 +4,7 @@
 //! ```text
 //! cargo run --release -p bowshock-validate --example incidence_rans -- [--mach 2.0] [--alpha 2.0] [--body short|anf|example] [--tier lift|coarse|fine|draft] [--fins 1|0]
 //!     [--chord-cells N] [--fin-section anf|thin] [--span-cells N] [--cfl-max X] [--sub-iters N] [--max-iter N] [--precision f32|df32] [--phase between|inplane] [--first-order N] [--fin-yp Y]
-//!     [--domain half|sector] [--sector-fins gf1|anf|example] [--roe 0|1] [--eps-fix X] [--dt-mode sum|min] [--growth G] [--dt-mode sum|min] [--history-every N]
+//!     [--domain half|sector] [--sector-fins gf1|anf|example|example3] [--mach-max M] [--refine S] [--roe 0|1] [--eps-fix X] [--dt-mode sum|min] [--growth G] [--dt-mode sum|min] [--history-every N]
 //! ```
 //!
 //! The grid is `Case3::base_half` as the G-L1 gate builds it (ANF fins, the sea-level `Re_c` of the 0.03 m ANF, the grid sized for Mach 3.147); `short` is the ANF nose on a
@@ -39,17 +39,24 @@ fn main() -> Result<(), String> {
     let sector = value("--domain").as_deref() == Some("sector");
     let sector_fins = value("--sector-fins");
     let thin = sector && sector_fins.as_deref().is_none_or(|f| f == "gf1");
-    let example = sector && sector_fins.as_deref() == Some("example");
-    let flow = if thin {
+    // `--sector-fins example3` (also with the half domain): the application's example rocket with its THREE fins and its 60 um roughness (DESIGN3D item 57); `example`: the older four-fin helper
+    let example3 = sector_fins.as_deref() == Some("example3");
+    let example = example3 || (sector && sector_fins.as_deref() == Some("example"));
+    let mut flow = if thin {
         WallFlow { re_c: 1.0e6, mach_max: 2.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.368 }
     } else if example {
-        WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL }
+        let ks = if example3 { 7.87e-4 } else { 0.0 };
+        WallFlow { re_c: 1.7e6, mach_max: 3.0, ks_body: ks, ks_fin: ks, sutherland: SUTHERLAND_SEA_LEVEL }
     } else {
         // `--re-l X`: the Reynolds number of the 10-calibre ANF body `Re_L = re_c * mach * 10` (the tunnel's ~4e6) instead of the sea-level free-flight value
         let re_c = value("--re-l")
             .map_or(Ok(1.225 * 340.294 * 0.03 / 1.7894e-5), |v| v.parse::<f64>().map(|re_l| re_l / (10.0 * mach)).map_err(|e| format!("--re-l: {e}")))?;
         WallFlow { re_c, mach_max: 3.147, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL }
     };
+    // `--mach-max M`: the Mach number the walls are sized for (default: the case's own sizing above; the app's shared grid is 3, a per-point grid the node's Mach number)
+    if let Some(m) = value("--mach-max") {
+        flow.mach_max = m.parse().map_err(|e| format!("--mach-max: {e}"))?;
+    }
     let tier = match value("--tier").as_deref().unwrap_or("lift") {
         "lift" => Tier::Lift(flow),
         "coarse" => Tier::Coarse(flow),
@@ -73,7 +80,7 @@ fn main() -> Result<(), String> {
     } else if example {
         let d = 0.0762;
         Some(Fins3 {
-            count: 4,
+            count: if example3 { 3 } else { 4 },
             root_chord: 0.12 / d,
             tip_chord: 0.05 / d,
             span: 0.0762 / d,
@@ -113,6 +120,10 @@ fn main() -> Result<(), String> {
         c.grid.domain = Domain3::Half { phase };
         c
     };
+    // `--refine S`: every cell count x S, the wall spacings / S (`Case3::with_refinement`, DESIGN3D item 47)
+    if let Some(v) = value("--refine") {
+        case = case.with_refinement(v.parse().map_err(|e| format!("--refine: {e}"))?);
+    }
     if let Some(n) = value("--chord-cells") {
         case.grid.fin_chord_cells = Some(n.parse().map_err(|e| format!("--chord-cells: {e}"))?);
     }
