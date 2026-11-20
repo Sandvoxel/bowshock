@@ -69,6 +69,11 @@ const LE_RADIUS_CELLS: f64 = 4.0;
 /// as long as keeps them below it (`ramp_need` in `body_grid3_inner`).
 const RAMP_SLOPE: f64 = 0.5;
 
+/// A fin whose zone is not widened still fades the move of its edges over more than four rows above the tip when four rows lift less than this many moves above it: the
+/// shear of four rows is then steeper than 59 degrees from the radial (Byrum, Cancer Descending, Ion Drive: 10, 5 and 4.8 degrees between the cell edges above the tip; the
+/// example rocket's rows are 0.77 and 1.29 moves high and keep their four).
+const FADE_TRIGGER: f64 = 0.6;
+
 /// EXPERIMENT (removed before the commit of the fix): smallest first chord cell of a row, as a fraction of the root's.
 fn le_floor() -> f64 {
     std::env::var("BOWSHOCK_LE_FLOOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
@@ -1094,7 +1099,7 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         // higher is a shear of 45 degrees; a fin with room ahead of its edge, Byrum's, sheared its rows above the tip within four cells, 10 degrees between the cell edges), and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
         // did at 75 degrees)
         let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
-        let nfade = if widened || std::env::var_os("BOWSHOCK_NFADE_ALL").is_some() {
+        let nfade = if widened || (height((pl.j_tip + 4).min(nj - j_off)) < FADE_TRIGGER * up && std::env::var_os("BOWSHOCK_NFADE_OLD").is_none()) {
             (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip)
         } else {
             4
