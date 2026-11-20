@@ -7,7 +7,7 @@ mod common;
 #[path = "fin_gates/rockets.rs"]
 mod rockets;
 
-use bowshock_cfd::grid3::Grid3;
+use bowshock_cfd::grid3::{Grid3, Part};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow};
 use bowshock_core::engine::grid3::{body_grid3, Domain3, FinPhase};
 use bowshock_reference::{arcas, arcas_stab};
@@ -74,16 +74,13 @@ fn grid_hashes() {
 }
 
 /// The Cancer Descending fixture's sector (DESIGN3D item 73) as the app builds it: three 61 degree rounded fins whose tip trailing edge is 0.42 d behind the root's (the root's is 0.84 d
-/// ahead of the base). Prints the quality numbers and the hash.
-#[test]
-#[ignore = "prints the grid quality of the Cancer Descending sector"]
-fn cancer_sector_quality() {
+/// ahead of the base).
+fn cancer_sector() -> Grid3 {
     use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
-    use bowshock_core::engine::grid3::{print_quality, Fins3};
+    use bowshock_core::engine::grid3::Fins3;
     use bowshock_core::FinProfile;
     let d = 6.0;
-    let nose = Body { nose: Nose::TangentOgive { fineness: 4.0 } };
-    let body = BaseBody::cylinder(nose, 85.0 / d);
+    let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 4.0 } }, 85.0 / d);
     let fins = Fins3 {
         count: 3,
         root_chord: 19.0 / d,
@@ -96,8 +93,71 @@ fn cancer_sector_quality() {
         planform: None,
     };
     let flow = WallFlow { re_c: 3.2e6, mach_max: 1.0, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.4 };
-    let case = Case3::sector(0.5, body, fins, Tier::Coarse(flow), 0);
-    let g = body_grid3(&case.grid).expect("builds");
+    body_grid3(&Case3::sector(0.5, body, fins, Tier::Coarse(flow), 0).grid).expect("builds")
+}
+
+/// The smallest angle (degrees, between the lines) of the mean `i` and `j` edges of the cells of the columns `i_lo..i_hi` and rows `j_lo..j_hi`, over the fluid cells.
+fn min_ij_angle(g: &Grid3, i_lo: usize, i_hi: usize, j_lo: usize, j_hi: usize) -> (f64, usize, usize, usize) {
+    let node = |i: usize, j: usize, k: usize| {
+        let n = (k * (g.nj + 1) + j) * (g.ni + 1) + i;
+        [g.x[n], g.y[n], g.z[n]]
+    };
+    let mut worst = (90.0f64, 0, 0, 0);
+    for k in 0..g.nk {
+        for j in j_lo..j_hi {
+            for i in i_lo..i_hi {
+                if g.part[g.cell(i, j, k)] != bowshock_cfd::grid3::PART_FLUID {
+                    continue;
+                }
+                let (mut ei, mut ej) = ([0.0; 3], [0.0; 3]);
+                for a in 0..2 {
+                    for b in 0..2 {
+                        for q in 0..3 {
+                            ei[q] += 0.25 * (node(i + 1, j + a, k + b)[q] - node(i, j + a, k + b)[q]);
+                            ej[q] += 0.25 * (node(i + b, j + 1, k + a)[q] - node(i + b, j, k + a)[q]);
+                        }
+                    }
+                }
+                let dot = ei.iter().zip(&ej).map(|(a, b)| a * b).sum::<f64>();
+                let norm = |v: [f64; 3]| v.iter().map(|a| a * a).sum::<f64>().sqrt();
+                let ang = (dot / (norm(ei) * norm(ej))).abs().min(1.0).acos().to_degrees();
+                if ang < worst.0 {
+                    worst = (ang, i, j, k);
+                }
+            }
+        }
+    }
+    worst
+}
+
+/// A fin whose tip trailing edge is behind the root's (Cancer Descending, DESIGN3D item 73) leans its trailing-edge columns forward above the tip while the rows beside the edge fall
+/// to the nominal radius: with the fade of the leading-edge rules (4 + 4 columns) the cells above the tip were slivers of 6 degrees between the `i` and `j` edges (the app's Draft
+/// and Coarse points of this rocket were unsteady, C_D 1.47 at Mach 0.5 against 0.55 with the tip edge flush). The fade now keeps the angle above `OVERHANG_EDGE_ANGLE_DEG`.
+#[test]
+fn an_overhanging_trailing_edge_has_no_sliver_cells() {
+    let g = cancer_sector();
+    // the fin's cells: the last column, the first and the last row
+    let (mut i_te, mut j0, mut j1) = (0, usize::MAX, 0);
+    for k in 0..g.nk {
+        for j in 0..g.nj {
+            for i in 0..g.ni {
+                if matches!(g.part_of(i, j, k), Some(Part::Fin(_))) {
+                    (i_te, j0, j1) = (i_te.max(i + 1), j0.min(j), j1.max(j + 1));
+                }
+            }
+        }
+    }
+    assert!(i_te > 0, "no fin cells");
+    let (angle, i, j, k) = min_ij_angle(&g, i_te, i_te + 14, j0, j1 + 16);
+    println!("cancer: smallest i-j angle behind the trailing edge {angle:.1} degrees at ({i},{j},{k})");
+    assert!(angle > 20.0, "a sliver of {angle:.1} degrees behind the overhanging trailing edge at ({i},{j},{k})");
+}
+
+#[test]
+#[ignore = "prints the grid quality of the Cancer Descending sector"]
+fn cancer_sector_quality() {
+    use bowshock_core::engine::grid3::print_quality;
+    let g = cancer_sector();
     print_quality("cancer", &g);
     if let Ok(w) = std::env::var("QUAD") {
         // QUAD=i0,i1,j0,j1,k: the (x, r) of a window of nodes
