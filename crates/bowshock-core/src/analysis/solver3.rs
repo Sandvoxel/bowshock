@@ -769,6 +769,30 @@ impl Analysis {
         *NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = case;
     }
 
+    /// The seed wedge of condition `c` (a finned sector's) solved on the CPU (`cpu`) or the GPU: seconds and iterations (instrumentation of the seed's cost, DESIGN3D item 69).
+    #[doc(hidden)]
+    pub fn seed_probe(&self, c: Condition, cpu: bool) -> Result<(f64, usize), Error> {
+        self.check_solver3(&[c])?;
+        let flow = self.wall_flow(&[c.mach])?;
+        let level = self.resolution.level();
+        let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), false)?;
+        let wedge = self.seed_case(&case, c, level)?;
+        let t = std::time::Instant::now();
+        let seed = if cpu {
+            Cpu3.seed(&wedge)?
+        } else {
+            #[cfg(feature = "gpu")]
+            {
+                Gpu3.seed(&wedge)?
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                return Err(Error::Unsupported("the `gpu` feature is not enabled".into()));
+            }
+        };
+        Ok((t.elapsed().as_secs_f64(), seed.map_or(0, |s| s.iterations)))
+    }
+
     /// The flow the walls of a wall-resolved grid are sized for: the viscous knobs of the analysis (`viscous`, `roughness`, the fins' roughness, `grid_mach`)
     /// as the engine's [`WallFlow`]; `None` for an Euler analysis.
     fn wall_flow(&self, machs: &[f64]) -> Result<Option<WallFlow>, Error> {

@@ -640,6 +640,37 @@ fn host_setup_timing() {
     println!("HOST total {total:.2} s");
 }
 
+/// The seed wedges of the finned example on the CPU (DESIGN3D item 69), no GPU: seconds and iterations of the wedge of a drag node, solved by the CPU solver in f64 (the GPU's
+/// take 0.5 ms per iteration, 12-17 s for the table). `BOWSHOCK_PROBE_MACHS` picks the Mach numbers.
+#[test]
+#[ignore = "timing of the CPU solver on the seed wedges: minutes of CPU"]
+fn cpu_seed_timing() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+        power_on: Vec::new(),
+    };
+    let grid_mach = job.nodes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
+    let session = Session::Local { backend: solver::Backend::Cpu };
+    for &m in &job.nodes {
+        if std::env::var("BOWSHOCK_PROBE_MACHS").is_ok_and(|l| !l.split(',').any(|x| x.trim().parse::<f64>().is_ok_and(|x| (x - m).abs() < 1e-9))) {
+            continue;
+        }
+        let analysis = node_analysis(&job, NodeKind::Drag, &session, altitude, grid_mach, true, m, false).ok().expect("the node's analysis");
+        let (s, its) = analysis.seed_probe(solver::Condition::from(m), true).unwrap();
+        println!("SEEDCPU M {m:.2}: {its} iterations, {s:.2} s = {:.2} ms per iteration", 1e3 * s / its.max(1) as f64);
+    }
+}
+
 /// The draft-first flow as the app runs it (DESIGN3D item 57), through the app path on the finned example rocket: the draft solve (the drag at every Mach node, no angles) and then
 /// the coarse solve of the same job (drag and the 3D angles), in one process like the app's two solves. Prints the time to the first result, the total, the two drag tables and
 /// their difference per Mach number, the coarse angles, and a `PERF` line. `BOWSHOCK_DRAFT_ONLY=1` stops after the draft solve (a time on a slow device or backend).
