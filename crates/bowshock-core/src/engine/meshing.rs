@@ -54,13 +54,21 @@ pub(crate) fn wall_spacing(body: &BaseBody, re_c: f64, mach_max: f64, y_plus: f6
 }
 
 /// Wall-resolve both meridian grids of a case for the first cell height `y1`: radial cell counts for a growth ratio of 1.2, the gap behind the base clustered at
-/// the base corner only.
+/// the base corner only; a body on a sting has two walls bounding the gap (the base corner above, the sting below, a wall on the whole length behind the base), so its rows are
+/// clustered at both ends (`2 layer_count(half the gap)` rows; with the one-sided rows the sting wall cells were as large as the gap's growth made them, `y+` 155-340 on the sting of the
+/// Fox and Arcas tunnel models, DESIGN3D item 65).
 pub(crate) fn resolve_walls(grid_base: &mut BaseGridParams, grid_sting: &mut LargeGridParams, body: &BaseBody, y1: f64) {
     let (re, rs) = (body.base_radius(), body.sting_radius);
     grid_base.dr_wall = y1;
     grid_base.nj_out = layer_count(grid_base.r_far - re, y1);
-    grid_base.n_gap = layer_count(re - rs, grid_base.dr_gap.unwrap_or(y1));
-    grid_base.gap_one_sided = true;
+    let dr_gap = grid_base.dr_gap.unwrap_or(y1);
+    if rs > 0.0 {
+        grid_base.n_gap = 2 * layer_count(0.5 * (re - rs), dr_gap);
+        grid_base.gap_one_sided = false;
+    } else {
+        grid_base.n_gap = layer_count(re - rs, dr_gap);
+        grid_base.gap_one_sided = true;
+    }
     grid_sting.dr_wall = y1;
     grid_sting.nj = layer_count(grid_sting.r_far, y1);
 }

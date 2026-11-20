@@ -794,6 +794,19 @@ mod tests {
     }
 
     #[test]
+    fn wake_near_puts_cells_of_its_own_behind_the_base() {
+        let mut p = base_params(0.0, 1.0);
+        let (xs0, i_end) = base_axial_nodes(&p).expect("nodes");
+        p.wake_near = Some((2.0, 10));
+        let (xs1, i1) = base_axial_nodes(&p).expect("nodes");
+        assert_eq!((xs0.len(), i_end), (xs1.len(), i1), "same cell count, same base plane");
+        let xb = p.body.x_base();
+        assert!((xs1[i_end + 10] - (xb + 2.0)).abs() < 1e-12, "the near region ends at its length");
+        assert!((xs1[xs1.len() - 1] - (xb + p.x_down)).abs() < 1e-12);
+        assert!(xs1.windows(2).all(|w| w[1] > w[0]));
+    }
+
+    #[test]
     fn base_body_profile_is_continuous() {
         let b = base_params(0.0, 1.0).body;
         let xs = b.station(1).0;
