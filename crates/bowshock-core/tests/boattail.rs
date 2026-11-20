@@ -6,6 +6,7 @@
 //! - `lvl<N>`: grid level (default 0); `ref<NN>`: `with_refinement(NN / 10)`;
 //! - `fo`: first order throughout; `nolm`: the low-Mach flux correction off; `lm`: on; `pc`: low-Mach preconditioning of the implicit left-hand side on; `minmod`, `venk`: limiter;
 //! - `sens<lo>_<hi>`: CPU shock-sensor thresholds (relative pressure jump of the Rusanov blend; `sens0_0` is not allowed: `sensoff` = thresholds 1e9);
+//! - `sting<R>`: the sting radius (default 0.13); `cflmax<N>`, `cfl0_<x>`, `sub<N>`, `nobc`, `nolines`: implicit parameters;
 //! - `closed`: the boattail continues as a sting of the base radius to the outflow (`Wake::Sting`, no base, no wake: the pressure drag of nose and boattail must vanish, d'Alembert);
 //! - `round`: the shoulder rounded by four short cones (2.5, 5, 7.5 degrees over 0.2 d) before the 10 degrees; `nosting`: full-disc base; `cyl<L>`: cylinder length (default 2);
 //! - `iters<N>`: cap of the iterations.
@@ -51,7 +52,8 @@ fn body_of(parts: &[&str]) -> BaseBody {
         b = b.with_boattail(1.0, 10f64.to_radians());
     }
     if !parts.contains(&"nosting") && !parts.contains(&"closed") {
-        b = b.with_sting(fox::STING_RADIUS);
+        let r = parts.iter().find_map(|p| p.strip_prefix("sting")).map_or(fox::STING_RADIUS, |v| v.parse::<f64>().expect("stingR"));
+        b = b.with_sting(r);
     }
     b
 }
@@ -88,8 +90,11 @@ fn case_of(m: f64, variant: &str) -> Case3 {
         c.numerics.low_mach = true;
     }
     for p in &parts {
-        if let Some(v) = p.strip_prefix("cfl") {
-            c.numerics.implicit.cfl_max = v.parse().expect("cflN");
+        if let Some(v) = p.strip_prefix("cflmax") {
+            c.numerics.implicit.cfl_max = v.parse().expect("cflmaxN");
+        }
+        if let Some(v) = p.strip_prefix("cfl0_") {
+            c.numerics.implicit.cfl0 = v.parse().expect("cfl0_X");
         }
         if let Some(v) = p.strip_prefix("sub") {
             c.numerics.implicit.sub_iters = v.parse().expect("subN");
@@ -300,6 +305,52 @@ fn bt2_one(m: f64, variant: &str) {
         println!("{tag}   corner (i {}, j {jf}) gpu {} cpu {}", g.ni - 1, f(&ug[cc]), f(&cpu.u[cc]));
         if bad > 0 || dmax > 1e3 {
             break;
+        }
+    }
+}
+
+/// The legacy 2D axisymmetric engine (`bowshock_cases::subsonic::fox_case`, the same grids and numerics without the wedge) on the Fox body: the independent-code comparison of `bt1`.
+/// `BT_MACHS`, `BT_LEVELS` (comma list, default 0).
+#[test]
+#[ignore = "diagnosis: Fox boattail on the legacy 2D engine"]
+fn bt3_fox_legacy_2d() {
+    let machs: Vec<f64> = std::env::var("BT_MACHS").map(|v| v.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or_else(|_| fox::MACH.to_vec());
+    let levels: Vec<u32> = std::env::var("BT_LEVELS").map(|v| v.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or_else(|_| vec![0]);
+    for level in levels {
+        for &m in &machs {
+            let k = fox::MACH.iter().position(|x| (x - m).abs() < 1e-9).expect("a Fox Mach number");
+            let case = bowshock_cases::subsonic::fox_case(false, m, level);
+            let t0 = std::time::Instant::now();
+            let r = bowshock_core::engine::run::run_cold(&case);
+            let tag = format!("BT 2D lvl{level} M{m:.3}");
+            println!(
+                "{tag} iters {} stop {:?} drop {:.2} t {:.0}s | cd_nose {:+.4} cd_aft {:?} cd_base {:+.4} cp_base {:+.4}",
+                r.iters,
+                r.stop_reason,
+                r.drop_orders,
+                t0.elapsed().as_secs_f64(),
+                r.cd_nose,
+                r.cd_aft.iter().map(|a| (a * 1e4).round() / 1e4).collect::<Vec<_>>(),
+                r.cd_base,
+                r.cp_base
+            );
+            let mut cps: Vec<(f64, f64)> = r.wall.iter().map(|w| (w.x, w.cp)).collect();
+            cps.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let at = |x: f64| -> f64 {
+                let i = cps.partition_point(|c| c.0 < x).clamp(1, cps.len() - 1);
+                let (a, b) = (cps[i - 1], cps[i]);
+                a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)
+            };
+            let mut sq = 0.0;
+            let mut n = 0;
+            for &x in fox::OGIVE_CYL_X_D.iter().filter(|&&x| x > 3.0) {
+                if let Some(d) = data_cp(k, x) {
+                    println!("{tag} cp x {x:.3} data {d:+.4} solver {:+.4} diff {:+.4}", at(x), at(x) - d);
+                    sq += (at(x) - d).powi(2);
+                    n += 1;
+                }
+            }
+            println!("{tag} rms Cp x>3 {:.4} (n {n})", (sq / n as f64).sqrt());
         }
     }
 }
