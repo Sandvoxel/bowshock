@@ -55,7 +55,17 @@ fn example_fins() -> Fins3 {
 
 fn byrum_fins() -> Fins3 {
     let d = 3.0;
-    Fins3 { count: 3, root_chord: 11.75 / d, tip_chord: 1.875 / d, span: 3.1875 / d, sweep: 7.875 / d, thickness: 0.25 / d, te_to_base: 1.25 / d, profile: FinProfile::Square, planform: None }
+    Fins3 {
+        count: 3,
+        root_chord: 11.75 / d,
+        tip_chord: 1.875 / d,
+        span: 3.1875 / d,
+        sweep: 7.875 / d,
+        thickness: 0.25 / d,
+        te_to_base: 1.25 / d,
+        profile: FinProfile::Square,
+        planform: None,
+    }
 }
 
 fn half(c: Case3, phase: FinPhase) -> Case3 {
@@ -79,20 +89,24 @@ fn the_swept_flat_face_rule_leaves_the_validation_grids_alone() {
         check(&format!("example wedge {name}"), Case3::wedge(2.0, ex_body(), 0).with_tier(tier), false);
     }
     for phase in [FinPhase::Between, FinPhase::InPlane] {
-        check(&format!("example half Lift {phase:?}"), half(Case3::base_half(2.0, 2f64.to_radians(), ex_body(), Some(example_fins()), Tier::Lift(ex), 0), phase), false);
+        check(
+            &format!("example half Lift {phase:?}"),
+            half(Case3::base_half(2.0, 2f64.to_radians(), ex_body(), Some(example_fins()), Tier::Lift(ex), 0), phase),
+            false,
+        );
     }
     // the Basic Finner (ANF)
     for (name, tier) in [("coarse", Tier::Coarse(f1)), ("fine", Tier::Fine(f1))] {
         check(&format!("finner sector {name}"), Case3::sector(2.0, Case3::anf_body(), Case3::anf_fins(), tier, 0), false);
     }
     check("finner wedge coarse", Case3::wedge(2.0, Case3::anf_body(), 0).with_tier(Tier::Coarse(f1)), false);
-    check("finner half Lift", half(Case3::base_half(2.0, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), Tier::Lift(f1), 0), FinPhase::Between), false);
+    check(
+        "finner half Lift",
+        half(Case3::base_half(2.0, 2f64.to_radians(), Case3::anf_body(), Some(Case3::anf_fins()), Tier::Lift(f1), 0), FinPhase::Between),
+        false,
+    );
     // Arcas, Yuska, AEDC GRM
-    let rockets = [
-        arcas_rocket(0.0, arcas::TRANSONIC_RE_PER_M, arcas::TRANSONIC_T0_K),
-        yuska_rocket(false, false, yuska::TEST_CONDITIONS[0].3),
-        grm_rocket(),
-    ];
+    let rockets = [arcas_rocket(0.0, arcas::TRANSONIC_RE_PER_M, arcas::TRANSONIC_T0_K), yuska_rocket(false, false, yuska::TEST_CONDITIONS[0].3), grm_rocket()];
     for r in &rockets {
         for kind in [TierKind::Coarse, TierKind::Fine] {
             check(&format!("{} sector {kind:?}", r.name), r.sector(2.0, 3.0, kind), false);

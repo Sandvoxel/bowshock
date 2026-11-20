@@ -2393,7 +2393,17 @@ mod tests {
     #[test]
     fn a_wide_swept_flat_face_gets_four_cells_across() {
         use crate::engine::case3::{Case3, Tier};
-        let byrum = Fins3 { count: 3, root_chord: 3.92, tip_chord: 0.625, span: 1.0625, sweep: 2.625, thickness: 0.0833, te_to_base: 0.4167, profile: FinProfile::Square, planform: None };
+        let byrum = Fins3 {
+            count: 3,
+            root_chord: 3.92,
+            tip_chord: 0.625,
+            span: 1.0625,
+            sweep: 2.625,
+            thickness: 0.0833,
+            te_to_base: 0.4167,
+            profile: FinProfile::Square,
+            planform: None,
+        };
         let across = |f: &Fins3, nf: usize, auto: bool| {
             let mut p = Case3::sector(2.0, Case3::anf_body(), f.clone(), Tier::Coarse(flow()), 0).grid;
             p.fin_chord_cells = Some(nf);
