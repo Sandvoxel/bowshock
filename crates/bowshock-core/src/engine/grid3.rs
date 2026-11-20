@@ -65,6 +65,10 @@ const RAMP_REACH: f64 = 0.3;
 /// Cells over the radius of a round fin edge: the first chord cell is at most this fraction of it.
 const LE_RADIUS_CELLS: f64 = 4.0;
 
+/// The slope of the node rows beside a fin edge, bent to meet the tip's cylinder, as a fraction of the slope of the edge the rows are sheared along: the fade of the bend is
+/// as long as keeps them below it (`ramp_need` in `body_grid3_inner`).
+const RAMP_SLOPE: f64 = 0.5;
+
 /// EXPERIMENT (removed before the commit of the fix): smallest first chord cell of a row, as a fraction of the root's.
 fn le_floor() -> f64 {
     std::env::var("BOWSHOCK_LE_FLOOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
@@ -1086,23 +1090,62 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         // taper as it always did (the example rocket's trailing edge moves 0.13 d over a 0.015 d cell, and its table is as it was)
         let room_up = if pl.i_seg0 < pl.i_le { pl.x_le_root - xs[pl.i_seg0] } else { xs[pl.i_le] - xs[pl.i_le.saturating_sub(1)] };
         let widened = up > ZONE_TRIGGER * room_up;
-        // columns ahead of the leading edge: the rows follow the tip's cylinder at full weight over the 4 columns next to the edge and fade away over the next 4; when the sweep
-        // zone is widened ([`ZONE_REACH`]) the sweep shears the rows of those columns by up to the move of the edge, and a fade over cells that short bends them (a slope of
-        // 0.44 against the shear's 0.42 at Mach 2.3 of the Rabia grid) into a fold: the fade is `RAMP_REACH` times the move longer
+        // the move fades away over the rows above the tip: four, or when the zone was widened as many as lift the row `FADE_REACH` times the move above the tip (a row a move
+        // higher is a shear of 45 degrees, and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
+        // did at 75 degrees)
+        let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
+        let nfade = if widened { (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip) } else { 4 };
+        let vj_of = |jj: usize| if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / nfade as f64 };
+        // the tip row stands on one cylinder `r_tip` over the fin: the fraction of its way from the body surface under each column to the boundary
+        let target_ref = pl.span / (r_far - pl.r_t);
+        let tcol: Vec<f64> = r_in.iter().map(|&r| ((pl.r_tip - r) / (r_far - r)).max(0.2 * target_ref)).collect();
+        // How long the fade of the rows' radial bending beside an edge must be: the bend of row `jj` (`bend`) is a slope along the row, the slope of the edge the rows are
+        // sheared along is `dr / shift` (row height over the move of the edge from one row to the next), and a cell folds where the first reaches the second (the cells of the
+        // swept Cancer Descending fin at 63 % span, 60 degrees: 0.45 against 0.53, negative volume). Fading over `bend * shift / dr / RAMP_SLOPE` keeps the slope of the rows at
+        // `RAMP_SLOPE` of the edge's. `x_edge(jj)` is where the edge of row `jj` ends up (the leading edge, or the trailing edge) and `i_ref` the column the bend is that of.
+        let ramp_need = |i_ref: usize, x_edge: &dyn Fn(usize) -> f64| -> f64 {
+            let scale = r_far - r_in[i_ref];
+            let mut need = 0.0f64;
+            for jj in 0..(pl.j_tip + nfade).min(nj - j_off) {
+                let bend = (pl.remap(jj, tcol[i_ref]) - sj[jj]).abs() * scale;
+                let dr = (pl.remap(jj + 1, tcol[i_ref]) - pl.remap(jj, tcol[i_ref])) * scale;
+                let shift = (x_edge(jj + 1) - x_edge(jj)).abs();
+                if dr > 0.0 {
+                    need = need.max(bend * shift / dr / RAMP_SLOPE);
+                }
+            }
+            need
+        };
+        let x_le_eff = |jj: usize| pl.x_le_root + vj_of(jj) * (row(jj).1 - pl.x_le_root);
+        let x_te_eff = |jj: usize| pl.x_te_root + vj_of(jj) * (row(jj).1 + row(jj).2 - pl.x_te_root);
+        let (need_le, need_te) = (ramp_need(pl.i_le, &x_le_eff), ramp_need(pl.i_te, &x_te_eff));
+        if std::env::var_os("BOWSHOCK_RAMP_DEBUG").is_some() {
+            let dx = |n: usize| xs[pl.i_le] - xs[pl.i_le.saturating_sub(n)];
+            let ex = |n: usize| xs[(pl.i_te + n).min(ni)] - xs[pl.i_te];
+            println!("RAMP need le {need_le:.4} (columns give {:.4}, widened {widened}) te {need_te:.4} (columns give {:.4})", dx(8) - dx(4), ex(8) - ex(4));
+        }
+        // columns beside the edges: the rows follow the tip's cylinder at full weight over the 4 columns next to the edge and fade away over the next 4; when the sweep zone is
+        // widened ([`ZONE_REACH`]) the sweep shears the rows of those columns by up to the move of the edge, and a fade over cells that short bends them (a slope of 0.44 against
+        // the shear's 0.42 at Mach 2.3 of the Rabia grid) into a fold: the fade is `RAMP_REACH` times the move longer. Where those columns do not give the length `ramp_need`
+        // asks for, the fade is that long in x instead (the grids that had enough keep their columns bit for bit)
         let wcol = |i: usize| -> f64 {
-            if widened && i < pl.i_le {
+            let columns = |d: usize| if d <= 4 { 1.0 } else { (1.0 - (d as f64 - 4.0) / 4.0).max(0.0) };
+            if i < pl.i_le {
                 let dx = |n: usize| xs[pl.i_le] - xs[pl.i_le.saturating_sub(n)];
-                let (x4, x8) = (dx(4), dx(8).max(dx(4) + RAMP_REACH * up));
+                let x8 = if widened { dx(8).max(dx(4) + RAMP_REACH * up) } else { dx(8) };
+                if !widened && need_le <= x8 - dx(4) {
+                    return columns(pl.i_le - i);
+                }
+                let (x4, x8) = (dx(4), x8.max(dx(4) + need_le));
                 return if xs[pl.i_le] - xs[i] <= x4 { 1.0 } else { (1.0 - (xs[pl.i_le] - xs[i] - x4) / (x8 - x4)).max(0.0) };
             }
-            let d = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
-            if d <= 4 {
-                1.0
-            } else {
-                (1.0 - (d as f64 - 4.0) / 4.0).max(0.0)
+            let ex = |n: usize| xs[(pl.i_te + n).min(ni)] - xs[pl.i_te];
+            if i > pl.i_te && need_te > ex(8) - ex(4) {
+                let (x4, x8) = (ex(4), ex(4) + need_te);
+                return if xs[i] - xs[pl.i_te] <= x4 { 1.0 } else { (1.0 - (xs[i] - xs[pl.i_te] - x4) / (x8 - x4)).max(0.0) };
             }
+            columns(i.saturating_sub(pl.i_te))
         };
-        // the tip row stands on one cylinder `r_tip` over the fin: the fraction of its way from the body surface under each column to the boundary
         let exposed = (pl.i_le..=pl.i_te).map(|i| pl.r_tip - r_in[i]);
         // the tip stands `span` above the largest root radius, so the exposed span is at least `span` there
         let (h_min, h_max) = (exposed.clone().fold(f64::INFINITY, f64::min), exposed.fold(0.0, f64::max));
@@ -1111,8 +1154,6 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 "the exposed span of the fin varies from {h_min:.3} d to {h_max:.3} d along its root (a steep boattail or flare under the fin): the grid rows cannot follow a fin whose exposed span changes by more than a factor 3"
             )));
         }
-        let target_ref = pl.span / (r_far - pl.r_t);
-        let tcol: Vec<f64> = r_in.iter().map(|&r| ((pl.r_tip - r) / (r_far - r)).max(0.2 * target_ref)).collect();
         for j in j_off..=nj {
             for i in 0..=ni {
                 let s = sj[j - j_off] + wcol(i) * (pl.remap(j - j_off, tcol[i]) - sj[j - j_off]);
@@ -1126,14 +1167,9 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         let nodes0: Vec<f64> = xs.clone();
         let i_up =
             if widened { (pl.i_floor..=pl.i_seg0).rev().find(|&i| pl.x_le_root - nodes0[i] >= ZONE_REACH * up).unwrap_or(pl.i_floor) } else { pl.i_seg0 };
-        // the move fades away over the rows above the tip: four, or when the zone was widened as many as lift the row `FADE_REACH` times the move above the tip (a row a move
-        // higher is a shear of 45 degrees, and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
-        // did at 75 degrees)
-        let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
-        let nfade = if widened { (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip) } else { 4 };
         for jj in 0..(pl.j_tip + nfade).min(nj - j_off + 1) {
             let j = j_off + jj;
-            let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / nfade as f64 };
+            let vj = vj_of(jj);
             let (_, x_le, chord) = row(jj);
             let mut knots = Vec::new();
             if i_up < pl.i_le {
@@ -1270,7 +1306,31 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
             }
         }
     }
-    let mut g = Grid3::try_from_nodes(ni, nj, nk, x, y, z).map_err(Error::Grid)?;
+    let dbg = std::env::var_os("BOWSHOCK_FOLD_DUMP").map(|_| (x.clone(), y.clone(), z.clone()));
+    let mut g = match Grid3::try_from_nodes(ni, nj, nk, x, y, z) {
+        Ok(g) => g,
+        Err(e) => {
+            if let Some((x, y, z)) = dbg {
+                let n: Vec<usize> = e.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).take(3).map(|s| s.parse().unwrap()).collect();
+                let (ci, cj, ck) = (n[0], n[1], n[2]);
+                for j in cj.saturating_sub(2)..=(cj + 3).min(nj) {
+                    for k in [ck, ck + 1] {
+                        let row: Vec<String> = (ci.saturating_sub(3)..=(ci + 4).min(ni))
+                            .map(|i| {
+                                let id = (k * (nj + 1) + j) * (ni + 1) + i;
+                                format!("{:.4}/{:.4}", x[id], y[id].hypot(z[id]))
+                            })
+                            .collect();
+                        println!("FOLD j {j} k {k} i {}..: {}", ci.saturating_sub(3), row.join(" "));
+                    }
+                }
+                if let Some((pl, _)) = &plan {
+                    println!("FOLD plan i_le {} i_te {} i_seg0 {} i_seg1 {} i_floor {} j_tip {} j_off {j_off}", pl.i_le, pl.i_te, pl.i_seg0, pl.i_seg1, pl.i_floor, pl.j_tip);
+                }
+            }
+            return Err(Error::Grid(e));
+        }
+    };
     g.sym = sym;
     g.theta_span = span;
     g.roughness = p.roughness;
