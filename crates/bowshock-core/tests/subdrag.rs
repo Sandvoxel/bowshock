@@ -6,7 +6,9 @@
 //! - `trip`: laminar upstream of the carborundum band of the test, 1.25 in aft of the nose tip;
 //! - `sting`: the 1 in sting of the test behind the 1.47 in base (the sting is part of the wall; its wetted area is not counted in the force);
 //! - `ref15`, `ref20`: the grid refined by 1.5 / 2 (cell counts, wall spacing);
-//! - suffixes `+trip`, `+sting` combine them (`ref15+trip+sting`).
+//! - `xtr<N>`: laminar to N calibres from the tip (a trip that does not work: natural transition), turbulent behind;
+//! - `short`: the short model (data `arcas::TRANSONIC`); `euler`: the Euler tier (pressure only);
+//! - tokens combine with `+` (`ref15+trip+sting`).
 //!
 //! Prints `SD <variant> M<mach> ...` lines (`parts`, `y+`, `cfx` / `cpx` binned along the body) for `tools/subdrag_post.py`. Needs `BOWSHOCK_WEDGE_BACKEND=gpu`, `BOWSHOCK_FIN_TIER=coarse`.
 #[path = "fin_gates/common.rs"]
@@ -21,9 +23,10 @@ use bowshock_reference::{arcas, arcas_stab};
 use common::{machs, tier, tier_kind, Session, TierKind};
 use rockets::{arcas_rocket, Rocket};
 
-/// The long model of the transonic tunnel (`rocket_gates::arcas_for(m, true)`).
-fn long_model() -> Rocket {
-    arcas_rocket(arcas_stab::LONG_TUBE_LENGTH - arcas::TUBE_LENGTH, arcas::TRANSONIC_RE_PER_M, arcas::TRANSONIC_T0_K)
+/// The long model of the transonic tunnel (`rocket_gates::arcas_for(m, true)`), or the short one.
+fn model(short: bool) -> Rocket {
+    let extra = if short { 0.0 } else { arcas_stab::LONG_TUBE_LENGTH - arcas::TUBE_LENGTH };
+    arcas_rocket(extra, arcas::TRANSONIC_RE_PER_M, arcas::TRANSONIC_T0_K)
 }
 
 /// Sting radius of the test over the nose diameter (1 in diameter sting, 2.25 in nose).
@@ -37,7 +40,8 @@ fn case_of(r: &Rocket, mach: f64, variant: &str) -> Case3 {
     if parts.contains(&"sting") {
         body = body.with_sting(STING_RADIUS);
     }
-    let mut c = Case3::wedge(mach, body, 0).with_tier(tier(tier_kind(), r.flow(mach, 1.2)));
+    let kind = if parts.contains(&"euler") { TierKind::Euler } else { tier_kind() };
+    let mut c = Case3::wedge(mach, body, 0).with_tier(tier(kind, r.flow(mach, 1.2)));
     for p in &parts {
         if let Some(s) = p.strip_prefix("ref") {
             c = c.with_refinement(s.parse::<f64>().expect("refN") / 10.0);
@@ -45,6 +49,11 @@ fn case_of(r: &Rocket, mach: f64, variant: &str) -> Case3 {
     }
     if parts.contains(&"trip") {
         c = c.with_transition(TRIP_X, 0.0);
+    }
+    for p in &parts {
+        if let Some(x) = p.strip_prefix("xtr") {
+            c = c.with_transition(x.parse::<f64>().expect("xtrN"), 0.0);
+        }
     }
     c
 }
@@ -64,7 +73,7 @@ fn tractions(s: &Session) -> Vec<WallTraction> {
         Session::Cpu(sol) => sol.wall_tractions(),
         Session::Gpu(r) => {
             let g = &r.host.grid;
-            let f = r.gpu.viscous_flux().expect("flux").expect("viscous");
+            let Some(f) = r.gpu.viscous_flux().expect("flux") else { return Vec::new() };
             let solid: Vec<bool> = g.part.iter().map(|&p| p != bowshock_cfd::grid3::PART_FLUID).collect();
             bowshock_cfd::viscous3::wall_tractions(g, &solid, &r.host.rans().expect("rans").dirs, &f[0], &f[1], &f[2])
         }
@@ -96,15 +105,17 @@ fn edges(x_bt: f64, x_end: f64) -> Vec<f64> {
 #[test]
 #[ignore = "diagnosis: Coarse wedge on the GPU"]
 fn sd1_arcas_long_finless() {
-    let rows: Vec<(f64, f64)> = arcas_stab::LONG_TRANSONIC.iter().map(|r| (r.0, r.2)).collect();
+    let long_rows: Vec<(f64, f64)> = arcas_stab::LONG_TRANSONIC.iter().map(|r| (r.0, r.2)).collect();
+    let short_rows: Vec<(f64, f64)> = arcas::TRANSONIC.iter().map(|r| (r.0, r.1)).collect();
     let want = machs(&[0.6, 0.8]);
     let variants: Vec<String> = std::env::var("SD_VARIANTS").unwrap_or_else(|_| "base".into()).split(',').map(|s| s.trim().to_string()).collect();
     let mut machs_run: Vec<f64> = std::env::var("SD_MACHS").map(|v| v.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or(want);
-    machs_run.retain(|m| rows.iter().any(|r| (r.0 - m).abs() < 1e-9));
-    let r = long_model();
+    machs_run.retain(|m| long_rows.iter().any(|r| (r.0 - m).abs() < 1e-9));
     for variant in &variants {
+        let short = variant.split('+').any(|t| t == "short");
+        let (r, rows) = (model(short), if short { &short_rows } else { &long_rows });
         for &m in &machs_run {
-            let data = rows.iter().find(|x| (x.0 - m).abs() < 1e-9).unwrap().1;
+            let Some(data) = rows.iter().find(|x| (x.0 - m).abs() < 1e-9).map(|x| x.1) else { continue };
             let case = case_of(&r, m, variant);
             let tag = format!("SD {variant} M{m:.2}");
             let mut s = match Session::new(&case) {
