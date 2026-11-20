@@ -116,3 +116,22 @@ impl ImplicitParams {
     /// Parameters for viscous runs: the weaker-direction pseudo-time step with a lower CFL limit and one more defect-correction pass.
     pub const VISCOUS: ImplicitParams = ImplicitParams { dt_mode: DtMode::MinDirection, cfl_max: 10.0, sub_iters: 3, ..ImplicitParams::DEFAULT };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `at_iter`: the plain sum before `from_iter` (cap dropped, `cfl_max` as given), the cap and `cfl_max` at most the cap's from there; no cap: unchanged.
+    #[test]
+    fn the_k_cap_starts_at_its_iteration() {
+        let p = ImplicitParams { cfl_max: 100.0, dt_k_cap: Some(KCap { cap: 1.0, from_iter: 300, cfl_max: 25.0 }), ..ImplicitParams::DEFAULT };
+        assert_eq!(p.at_iter(299), ImplicitParams { dt_k_cap: None, ..p });
+        let q = p.at_iter(300);
+        assert_eq!((q.cfl_max, q.dt_k_cap), (25.0, p.dt_k_cap));
+        assert_eq!(p.at_iter(5000).cfl_max, 25.0);
+        // a controller that lowered `cfl_max` below the cap's keeps its value
+        assert_eq!(ImplicitParams { cfl_max: 17.5, ..p }.at_iter(400).cfl_max, 17.5);
+        let plain = ImplicitParams::DEFAULT;
+        assert_eq!(plain.at_iter(1000), plain);
+    }
+}
