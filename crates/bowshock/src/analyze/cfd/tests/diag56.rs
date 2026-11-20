@@ -10,7 +10,7 @@ use super::*;
 use crate::units::UnitSystem;
 
 /// The grid of the last case built by the hook under `DIAG_GRID`/`DIAG_COLLAPSE`: its part table, to name what a collapsed cell sits against.
-static GRID_PARTS: Mutex<Option<(usize, usize, usize, Vec<String>)>> = Mutex::new(None);
+static GRID_PARTS: Mutex<Vec<(usize, usize, usize, Vec<String>)>> = Mutex::new(Vec::new());
 
 fn env_f(name: &str) -> Option<f64> {
     std::env::var(name).ok().map(|v| v.parse().unwrap())
@@ -55,7 +55,7 @@ fn hook(c: &mut solver::engine::case3::Case3) {
                 }
             }
         }
-        *GRID_PARTS.lock().unwrap() = Some((g.ni, g.nj, g.nk, parts));
+        GRID_PARTS.lock().unwrap().push((g.ni, g.nj, g.nk, parts));
     }
     if std::env::var_os("DIAG_GRID").is_some() {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
@@ -275,7 +275,7 @@ fn report_collapsed(label: &str, mach: f64, f: &solver::Field3) {
             }
             let n = f.cell_index(a as usize, b as usize, d as usize);
             if f.solid[n] {
-                let name = parts.as_ref().map_or("solid".to_string(), |(_, _, _, p)| p[n].clone());
+                let name = parts.iter().rev().find(|g| (g.0, g.1, g.2) == (f.ni, f.nj, f.nk)).map_or("solid".to_string(), |g| g.3[n].clone());
                 touching.push(format!("{name}@{di:+},{dj:+},{dk:+}"));
             }
         }
