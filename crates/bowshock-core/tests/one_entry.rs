@@ -1,5 +1,7 @@
 //! `Analysis::run`, the one solve entry: conditions at zero incidence go to the drag solver and those at an angle of attack to the 3D
-//! solver. The numbers it gives are those of the two entries it replaced (`run` over Mach numbers and `run_lift`), bit for bit on the CPU:
+//! solver. The numbers it gives are those of the two entries it replaced (`run` over Mach numbers and `run_lift`), to rounding on the CPU
+//! (compared to a relative `1e-9`, see `near`: on one machine they agree to the last bit, but the mesher's trigonometry and the solver's
+//! `pow`/`exp` are the platform's libm, whose last bit differs between glibc versions, and the iterations carry that to about `1e-13`):
 //! the constants below were taken from those two functions at the commit before they were merged (the drag numbers are the same at the
 //! commit before and after the 3D topology of `cfd-3d` S1, 65c1d78, whose force integration moved the 3D numbers by a few last bits; the
 //! angle-of-attack constants are those of `Analysis::run_lift` at the `cfd-3d` tip 272fc30, whose area-preserving revolve and fin stacks moved them again).
@@ -49,8 +51,15 @@ fn with_3d_grid(fins: bool) -> Analysis {
     })
 }
 
-fn bits(x: f64) -> u64 {
-    x.to_bits()
+/// The bits of the pinned constants (`want` below) as the numbers they are.
+fn num(bits: u64) -> f64 {
+    f64::from_bits(bits)
+}
+
+/// `got` is the pinned number to a relative `1e-9` (an absolute one below 1): a libm that differs in the last bit moves these runs by about `1e-13`, a change of the solver by far more.
+fn near(got: f64, want: u64) -> bool {
+    let want = num(want);
+    (got - want).abs() <= 1e-9 * want.abs().max(1.0)
 }
 
 /// Equal including the NaNs a point at an angle of attack holds (`NaN != NaN` makes `==` of two equal polars false).
@@ -77,7 +86,7 @@ fn same_points(a: &bowshock_core::Polar, b: &bowshock_core::Polar) -> bool {
 }
 
 #[test]
-fn a_euler_drag_sweep_gives_the_numbers_of_the_old_entry_to_the_last_bit() {
+fn a_euler_drag_sweep_gives_the_numbers_of_the_old_entry_to_rounding() {
     let a = Analysis::from_internal(BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 3.0 } }, 6.0))
         .backend(Backend::Cpu)
         .resolution(Resolution::Coarse)
@@ -87,7 +96,7 @@ fn a_euler_drag_sweep_gives_the_numbers_of_the_old_entry_to_the_last_bit() {
     let want = [(0.9, 0x3fd2c5aa7e63f472u64, 0x3fb1696735c5e2fau64, 0x3fccd6a161e4f766u64), (0.5, 0x3fc3288fe1495d5c, 0xbf6723b5c2238a4c, 0x3fc3851eb851eb85)];
     for (pt, (mach, total, fore, base)) in p.points.iter().zip(want) {
         assert_eq!((pt.mach, pt.alpha_deg, pt.forces.is_none()), (mach, 0.0, true));
-        assert_eq!((bits(pt.drag.total), bits(pt.drag.forebody_pressure), bits(pt.drag.base)), (total, fore, base), "Mach {mach}");
+        assert!(near(pt.drag.total, total) && near(pt.drag.forebody_pressure, fore) && near(pt.drag.base, base), "Mach {mach}: {:?}", pt.drag);
         assert_eq!((pt.detail.iterations, pt.quality), (300, Quality::Stalled));
     }
     // an explicit condition at zero incidence is the same run
@@ -96,7 +105,7 @@ fn a_euler_drag_sweep_gives_the_numbers_of_the_old_entry_to_the_last_bit() {
 }
 
 #[test]
-fn a_viscous_finned_drag_sweep_gives_the_numbers_of_the_old_entry_to_the_last_bit() {
+fn a_viscous_finned_drag_sweep_gives_the_numbers_of_the_old_entry_to_rounding() {
     let spec = BodySpec { nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1 }, aft: vec![AftSpec::Tube { length: 0.6 }] };
     let fins = FinSpec {
         count: 4,
@@ -125,14 +134,15 @@ fn a_viscous_finned_drag_sweep_gives_the_numbers_of_the_old_entry_to_the_last_bi
     ];
     for (pt, (mach, w)) in p.points.iter().zip(want) {
         let d = &pt.drag;
-        let got = [d.total, d.forebody_pressure, d.friction.unwrap(), d.base, d.fins.unwrap().friction, d.fins.unwrap().pressure].map(bits);
-        assert_eq!((pt.mach, got), (mach, w));
+        let got = [d.total, d.forebody_pressure, d.friction.unwrap(), d.base, d.fins.unwrap().friction, d.fins.unwrap().pressure];
+        assert_eq!(pt.mach, mach);
+        assert!(got.iter().zip(w).all(|(&g, w)| near(g, w)), "Mach {mach}: {got:?} vs {:?}", w.map(num));
         assert_eq!((pt.detail.iterations, pt.quality), (60, Quality::Stalled));
     }
 }
 
 #[test]
-fn conditions_at_an_angle_of_attack_give_the_numbers_of_the_old_lift_entry_to_the_last_bit() {
+fn conditions_at_an_angle_of_attack_give_the_numbers_of_the_old_lift_entry_to_rounding() {
     // asked for 6 degrees first: solved 2 degrees cold, then 6 degrees warm; the points come back in the order asked for
     let p = finned_3d().max_iterations(3000).run(&[Condition::new(2.0, 6.0), Condition::new(2.0, 2.0)]).unwrap();
     // (angle, CN, CA of the pressure, x_cp [m], iterations, stop): the 8-column trailing-edge taper of the fin layer moved these (CN by 1e-5, CA of the pressure by +3.9 % / +2.7 %)
@@ -143,10 +153,10 @@ fn conditions_at_an_angle_of_attack_give_the_numbers_of_the_old_lift_entry_to_th
     for (pt, (alpha, cn, ca, x_cp, iters, quality)) in p.points.iter().zip(want) {
         let f = pt.forces.expect("forces at an angle of attack");
         assert_eq!((pt.mach, pt.alpha_deg), (2.0, alpha));
-        assert_eq!((bits(f.cn), bits(f.ca), bits(f.x_cp)), (cn, ca, x_cp), "alpha {alpha}");
+        assert!(near(f.cn, cn) && near(f.ca, ca) && near(f.x_cp, x_cp), "alpha {alpha}: {f:?}");
         assert_eq!((pt.detail.iterations, pt.quality), (iters, quality));
         // what a point at an angle of attack holds besides its forces (see PolarPoint)
-        assert_eq!(bits(pt.drag.forebody_pressure), bits(f.ca));
+        assert_eq!(pt.drag.forebody_pressure.to_bits(), f.ca.to_bits());
         assert!(pt.drag.friction.is_none() && pt.drag.fins.is_none() && pt.drag.base.is_nan() && pt.drag.total.is_nan() && !pt.drag.base_modelled);
         assert!(pt.detail.cd_nose.is_nan() && pt.detail.cp_base.is_nan() && pt.detail.y_plus_max.is_nan() && pt.detail.cd_base_solver.is_nan());
         assert!(pt.detail.cd_aft.is_empty() && pt.detail.wall.is_empty() && pt.warnings.is_empty() && pt.cd_uncertainty.is_none());

@@ -2396,7 +2396,10 @@ mod tests {
         assert_eq!(g.nk, sting.nk);
     }
 
-    /// FNV-1a of the node coordinates, the part flags and the solid boxes of a grid.
+    /// FNV-1a of the node coordinates, the part flags and the solid boxes of a grid. The coordinates enter rounded to a 1e-5 d lattice, not by their bits: the mesher's
+    /// trigonometry and powers come from the platform's libm, whose last bit differs between glibc versions (a grid built on Fedora and one built on Ubuntu differ by a few
+    /// ulps), and a coordinate that is zero by symmetry is `+-1e-16` on one and `0` on the other. A one-ulp difference moves a value across a rounding boundary of the lattice
+    /// with a probability of about 1e-10 (the scale is odd so that dyadic coordinates, `1/64`, do not sit on a boundary); any real change of the mesher is far above it.
     fn fingerprint(g: &Grid3) -> u64 {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         let mut eat = |v: u64| {
@@ -2405,7 +2408,7 @@ mod tests {
             }
         };
         [g.ni, g.nj, g.nk].iter().for_each(|&n| eat(n as u64));
-        g.x.iter().chain(&g.y).chain(&g.z).for_each(|v| eat(v.to_bits()));
+        g.x.iter().chain(&g.y).chain(&g.z).for_each(|v| eat((v * 99_991.0).round() as i64 as u64));
         g.part.iter().for_each(|&p| eat(p as u64));
         g.solid.iter().for_each(|b| [b.i.start, b.i.end, b.j.start, b.j.end, b.k.start, b.k.end].iter().for_each(|&n| eat(n as u64)));
         h
@@ -2438,13 +2441,13 @@ mod tests {
         eprintln!("fingerprints {got:x?}");
         assert!(all.iter().all(|p| p.fin_cells_across == 1));
         let expected: [u64; 7] = [
-            9370751059839986959,
-            14583859758804283294,
-            6453443399358374581,
-            17893710889803027280,
-            1387836882980492884,
-            5755310565696465849,
-            11535300992460737863,
+            14057037326834242678,
+            10688397063708268931,
+            9208573530962096701,
+            2405939481951600490,
+            13858543057217682318,
+            14266802391916213331,
+            3202411852899531600,
         ];
         assert_eq!(got, expected);
     }
