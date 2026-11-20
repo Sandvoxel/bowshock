@@ -27,7 +27,8 @@ fn env_f(name: &str, default: f64) -> f64 {
 fn stab_study() {
     let mach = env_f("STUDY_MACH", 0.8);
     let name = std::env::var("STUDY_ROCKET").unwrap_or_else(|_| "arcas".into());
-    let alphas: Vec<f64> = std::env::var("STUDY_ALPHAS").unwrap_or_else(|_| "4,2".into()).split(',').map(|a| a.trim().parse().expect("STUDY_ALPHAS: numbers")).collect();
+    let alphas: Vec<f64> =
+        std::env::var("STUDY_ALPHAS").unwrap_or_else(|_| "4,2".into()).split(',').map(|a| a.trim().parse().expect("STUDY_ALPHAS: numbers")).collect();
     let phase = match std::env::var("STUDY_PHASE").as_deref() {
         Ok("between") => FinPhase::Between,
         _ => FinPhase::InPlane,
@@ -47,7 +48,16 @@ fn stab_study() {
         "grm" => grm_rocket(),
         other => panic!("STUDY_ROCKET {other}"),
     };
-    let mach_max = env_f("STUDY_MACH_MAX", if name == "arcas" { 2.96 } else if name == "grm" { 1.3 } else { 3.47 });
+    let mach_max = env_f(
+        "STUDY_MACH_MAX",
+        if name == "arcas" {
+            2.96
+        } else if name == "grm" {
+            1.3
+        } else {
+            3.47
+        },
+    );
     let q = r.area_factor();
     let build = |alpha: f64| -> Case3 {
         let mut c = r.half(mach, mach_max, alpha, phase, kind);

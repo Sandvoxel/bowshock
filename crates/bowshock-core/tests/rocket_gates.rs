@@ -57,8 +57,37 @@ fn compare(lines: &mut Lines, gated: bool, viscous: bool, known: bool, id: &str,
 /// One reference point of a stability gate: Mach, `CN_alpha` (per rad, reference area of the data) and `x_cp` (calibers from the nose tip); NaN when the data has none.
 type StabPoint = (f64, f64, f64);
 
-/// What one gate compares: the rocket of each Mach number, the fin roll phase, the incidences run (warm-started in this order), the one the data's slope definition is taken at,
-/// and the bands.
+/// How a data set took its slope: the secant from zero incidence to one angle, or the least-squares line (free intercept) through the incidences `nodes` in degrees. The articles are
+/// symmetric, so the solver's `f(-a) = -f(a)` and `f(0) = 0`: only the positive incidences are run.
+#[derive(Clone, Copy)]
+enum Slope {
+    Secant(f64),
+    Fit(&'static [f64]),
+}
+
+impl Slope {
+    /// The slope per degree of the odd function whose values at the run incidences `alphas` are `at(i)`.
+    fn per_degree(self, alphas: &[f64], at: &dyn Fn(usize) -> f64) -> f64 {
+        let value = |a: f64| -> f64 {
+            if a == 0.0 {
+                return 0.0;
+            }
+            let i = alphas.iter().position(|&x| x == a.abs()).unwrap_or_else(|| panic!("incidence {a} is not run"));
+            a.signum() * at(i)
+        };
+        match self {
+            Slope::Secant(a) => value(a) / a,
+            Slope::Fit(nodes) => {
+                let n = nodes.len() as f64;
+                let (ma, mf) = (nodes.iter().sum::<f64>() / n, nodes.iter().map(|&a| value(a)).sum::<f64>() / n);
+                nodes.iter().map(|&a| (a - ma) * (value(a) - mf)).sum::<f64>() / nodes.iter().map(|&a| (a - ma) * (a - ma)).sum::<f64>()
+            }
+        }
+    }
+}
+
+/// What one gate compares: the rocket of each Mach number, the fin roll phase, the incidences run (warm-started in this order), how the data took its `CN_alpha` and its `x_cp`
+/// (`x_cp` of a fit is the ratio of the moment slope to the force slope, the incremental centre of pressure; of a secant `CM / CN` at that angle), and the bands.
 struct StabGate<'a> {
     id: &'static str,
     tag: &'static str,
@@ -66,7 +95,8 @@ struct StabGate<'a> {
     points: Vec<StabPoint>,
     phase: FinPhase,
     alphas: &'static [f64],
-    alpha_ref: f64,
+    cn: Slope,
+    xcp: Slope,
     mach_max: f64,
     cn_band: Band,
     xcp_abs: f64,
@@ -96,36 +126,37 @@ fn run_stability(g: &StabGate) -> Lines {
         match run {
             Ok((sol, q, viscous)) => {
                 let gate = !g.info;
-                let k = g.alphas.iter().position(|&a| a == g.alpha_ref).expect("alpha_ref is one of the incidences");
-                let cna = |i: usize| q * sol[i].lift.cn / g.alphas[i].to_radians();
+                let cn_at = |i: usize| q * sol[i].lift.cn;
+                let m_at = |i: usize| sol[i].lift.cn * sol[i].lift.x_cp;
+                let rad = 180.0 / std::f64::consts::PI;
+                let cna = g.cn.per_degree(g.alphas, &cn_at) * rad;
+                // the secant `CM / CN` at an angle is the run's own `x_cp`; a fit is the moment slope over the force slope (the area factor cancels)
+                let xcp = match g.xcp {
+                    Slope::Secant(a) => sol[g.alphas.iter().position(|&x| x == a).expect("the secant incidence is run")].lift.x_cp,
+                    fit => fit.per_degree(g.alphas, &m_at) / fit.per_degree(g.alphas, &|i| sol[i].lift.cn),
+                };
                 if p.1.is_finite() {
-                    compare(&mut lines, gate, viscous, g.known_cn.contains(&p.0), g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band);
+                    compare(&mut lines, gate, viscous, g.known_cn.contains(&p.0), g.id, &format!("{case}:cn_alpha"), cna, p.1, g.cn_band);
                 }
                 if p.2.is_finite() {
-                    compare(
-                        &mut lines,
-                        gate,
-                        viscous,
-                        g.known_xcp.contains(&p.0),
-                        g.id,
-                        &format!("{case}:x_cp"),
-                        sol[k].lift.x_cp,
-                        p.2,
-                        Band::RelAbs(0.0, g.xcp_abs),
-                    );
+                    compare(&mut lines, gate, viscous, g.known_xcp.contains(&p.0), g.id, &format!("{case}:x_cp"), xcp, p.2, Band::RelAbs(0.0, g.xcp_abs));
                 }
-                let all: Vec<String> =
-                    g.alphas.iter().enumerate().map(|(i, a)| format!("CNa({a}) {:.2} x_cp {:.3} [{}]", cna(i), sol[i].lift.x_cp, sol[i].stop())).collect();
+                let all: Vec<String> = g
+                    .alphas
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| format!("CNa({a}) {:.2} x_cp({a}) {:.3} [{}]", cn_at(i) / a.to_radians(), sol[i].lift.x_cp, sol[i].stop()))
+                    .collect();
                 lines.info(
                     g.id,
                     &format!("{case}:slopes"),
                     &format!(
-                        "{}; data CNa {:.2} x_cp {:.3}; error {:+.1} % / {:+.3} cal",
+                        "{}; CNa {cna:.2} x_cp {xcp:.3}; data CNa {:.2} x_cp {:.3}; error {:+.1} % / {:+.3} cal",
                         all.join(", "),
                         p.1,
                         p.2,
-                        100.0 * (cna(k) / p.1 - 1.0),
-                        sol[k].lift.x_cp - p.2
+                        100.0 * (cna / p.1 - 1.0),
+                        xcp - p.2
                     ),
                 );
             }
@@ -161,7 +192,8 @@ fn gate_x1_arcas_cn_alpha_and_xcp() {
         points: arcas_points(),
         phase: FinPhase::InPlane,
         alphas: &[2.0, 4.0],
-        alpha_ref: 4.0,
+        cn: Slope::Secant(4.0),
+        xcp: Slope::Secant(4.0),
         mach_max: 2.96,
         cn_band: Band::Rel(0.15),
         xcp_abs: 0.35,
@@ -194,8 +226,9 @@ fn gate_x2_yuska_cn_alpha_and_xcp() {
         make,
         points: pts,
         phase,
-        alphas: &[2.0],
-        alpha_ref: 2.0,
+        alphas: &[4.0, 3.0, 2.0, 1.0],
+        cn: Slope::Fit(&[-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
+        xcp: Slope::Fit(&[-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
         mach_max: 3.47,
         cn_band: Band::Rel(0.13),
         xcp_abs: 0.25,
@@ -236,8 +269,9 @@ fn gate_x3_grm_cn_alpha_and_xcp() {
         make: &make,
         points,
         phase: FinPhase::InPlane,
-        alphas: &[2.0, 4.0],
-        alpha_ref: 4.0,
+        alphas: &[4.0, 2.0],
+        cn: Slope::Secant(4.0),
+        xcp: Slope::Fit(&[0.0, 2.0, 4.0]),
         mach_max: 1.3,
         cn_band: Band::Rel(0.13),
         xcp_abs: 0.25,
