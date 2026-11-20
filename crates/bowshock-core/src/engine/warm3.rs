@@ -88,6 +88,23 @@ pub fn warm_plan(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64, max_ma
     steps
 }
 
+/// The runs of [`warm_plan`] (the same arguments): the points that start from one another, each run's indices ascending in Mach number, the runs by their lowest Mach number. A
+/// point that starts from nothing and that no point starts from is a run of one. A machine takes a whole run, since its points are solved one after the other.
+pub fn warm_runs(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64, max_mach: f64) -> Vec<Vec<usize>> {
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    for step in warm_plan(machs, split, sub_up, max_ratio, max_mach) {
+        match step.parent {
+            Some(_) => runs.last_mut().expect("a point with a parent follows its run").push(step.point),
+            None => runs.push(vec![step.point]),
+        }
+    }
+    for run in &mut runs {
+        run.sort_by(|&a, &b| machs[a].total_cmp(&machs[b]));
+    }
+    runs.sort_by(|a, b| machs[a[0]].total_cmp(&machs[b[0]]));
+    runs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +194,20 @@ mod tests {
         assert_eq!(all[0].point, 9);
         assert_eq!(all.iter().filter(|s| s.parent.is_none()).count(), 1);
         assert_eq!(warm_plan(&[2.0], 0.9, true, 4.0, 10.0), vec![WarmStep { point: 0, parent: None }]);
+    }
+
+    #[test]
+    fn the_runs_are_the_chains_of_the_plan_ascending_and_a_point_without_a_neighbour_is_a_run() {
+        let machs = [0.1, 0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3, 3.0];
+        assert_eq!(warm_runs(&machs, 0.9, true, 10.0, 10.0), vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7, 8, 9]]);
+        // only the points up to Mach 0.9 start from a neighbour
+        let sub = warm_runs(&machs, 0.9, true, 10.0, 0.9);
+        assert_eq!(sub[0], vec![0, 1, 2, 3]);
+        assert_eq!(sub.len(), 1 + 6);
+        assert!(sub[1..].iter().all(|r| r.len() == 1));
+        // the same set in a shuffled order gives the same runs
+        let shuffled = [3.0, 0.5, 1.7, 0.1, 0.9, 1.1, 2.3, 0.8, 1.0, 1.3];
+        let runs: Vec<Vec<f64>> = warm_runs(&shuffled, 0.9, true, 10.0, 10.0).into_iter().map(|r| r.into_iter().map(|i| shuffled[i]).collect()).collect();
+        assert_eq!(runs, vec![vec![0.1, 0.5, 0.8, 0.9], vec![1.0, 1.1, 1.3, 1.7, 2.3, 3.0]]);
     }
 }

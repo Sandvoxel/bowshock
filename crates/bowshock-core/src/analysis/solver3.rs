@@ -216,10 +216,12 @@ struct WarmTuning {
     keep_cfl: bool,
 }
 
-/// The Mach number above which a warm sweep solves from the highest point downward ([`WarmTuning::split`]): the app splits a table into runs at it, one machine each.
+/// The runs of a warm sweep over the Mach numbers `machs` ([`crate::engine::warm3::warm_runs`] with the sweep's settings): the indices of the points that start from one
+/// another, ascending, each run solved in one `run` call on one machine; the app makes a work item of each.
 #[doc(hidden)]
-pub fn warm_split_mach() -> f64 {
-    WarmTuning::current().split
+pub fn warm_runs(machs: &[f64]) -> Vec<Vec<usize>> {
+    let t = WarmTuning::current();
+    crate::engine::warm3::warm_runs(machs, t.split, t.sub_up, t.max_ratio, t.max_mach)
 }
 
 impl WarmTuning {

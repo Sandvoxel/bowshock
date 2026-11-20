@@ -41,7 +41,7 @@ pub mod progress;
 pub mod spec;
 
 #[doc(hidden)]
-pub use analysis::{take_facade_timings, warm_split_mach, Engine, FacadeTiming};
+pub use analysis::{take_facade_timings, warm_runs, Engine, FacadeTiming};
 pub use analysis::{
     Analysis, AnalysisSpec, Backend, BackendUsed, Condition, Drag, FinDrag, Forces, PointDetail, Polar, PolarPoint, Quality, Resolution, Rollback, WallCp,
     Warning,

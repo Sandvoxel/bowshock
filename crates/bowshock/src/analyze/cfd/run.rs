@@ -551,17 +551,14 @@ pub(super) struct Item {
     pub(super) nodes: Vec<usize>,
 }
 
-/// The work items of `job`: every drag node, then every stability node, one item each; with `warm` ([`warm_start`]) the nodes of a kind form the two runs the engine chains
-/// from its ends (the points at or below [`solver::warm_split_mach`] from the lowest upward, the others from the highest downward), one item each, so that each point has a
-/// converged neighbour to start from; a run takes the machine for as long as it lasts.
+/// The work items of `job`: every drag node, then every stability node, one item each; with `warm` ([`warm_start`]) the nodes that the engine solves from one another
+/// ([`solver::warm_runs`]: a converged neighbour is each one's start) form one item, since a machine takes them one after the other, and the others stay items of their own.
 pub(super) fn work_list(job: &Job, warm: bool) -> Vec<Item> {
     let items = |machs: &[f64], lift: bool| -> Vec<Item> {
         if !warm {
             return (0..machs.len()).map(|k| Item { lift, nodes: vec![k] }).collect();
         }
-        let split = solver::warm_split_mach();
-        let (sub, sup): (Vec<usize>, Vec<usize>) = (0..machs.len()).partition(|&k| machs[k] <= split);
-        [sub, sup].into_iter().filter(|n| !n.is_empty()).map(|nodes| Item { lift, nodes }).collect()
+        solver::warm_runs(machs).into_iter().map(|nodes| Item { lift, nodes }).collect()
     };
     let mut all = items(&job.nodes, false);
     all.extend(items(&job.stability, true));
@@ -777,6 +774,9 @@ pub(super) fn solve_sized(
             Node::Lift(node) => raw.extend(node.points.iter().cloned()),
         }
     }
+    // the items of a warm solve are runs of the engine's order: back to ascending Mach number (then angle)
+    tally.points.sort_by(|a, b| a.mach.total_cmp(&b.mach));
+    raw.sort_by(|a, b| a.mach.total_cmp(&b.mach).then(a.alpha_deg.total_cmp(&b.alpha_deg)));
     if tally.points.len() < 2 && n_drag >= 2 {
         return Err("the solver did not converge at enough Mach numbers".to_string());
     }

@@ -468,11 +468,15 @@ fn the_warm_start_makes_two_runs_per_kind_and_the_cold_start_one_item_per_node()
     assert!(cold.iter().all(|i| i.nodes.len() == 1));
     let warm = work_list(&job, true);
     assert_eq!(warm.iter().map(|i| (i.lift, i.nodes.len())).collect::<Vec<_>>(), vec![(false, 4), (false, 6), (true, 2), (true, 6)]);
-    let split = solver::warm_split_mach();
+    // every node once, each run ascending
+    for lift in [false, true] {
+        let mut seen: Vec<usize> = warm.iter().filter(|i| i.lift == lift).flat_map(|i| i.nodes.clone()).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..if lift { job.stability.len() } else { job.nodes.len() }).collect::<Vec<_>>());
+    }
     for item in &warm {
         let machs: Vec<f64> = item.nodes.iter().map(|&k| if item.lift { job.stability[k] } else { job.nodes[k] }).collect();
         assert!(machs.windows(2).all(|w| w[0] < w[1]), "ascending: {machs:?}");
-        assert!(machs.iter().all(|&m| (m <= split) == (machs[0] <= split)), "one side of the split: {machs:?}");
     }
 }
 
