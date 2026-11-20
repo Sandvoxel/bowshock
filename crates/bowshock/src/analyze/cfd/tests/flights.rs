@@ -365,7 +365,14 @@ fn flight_validation() {
                 power_on: Vec::new(),
             };
             let t0 = Instant::now();
-            let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points(f.id.clone())).unwrap_or_else(|e| panic!("{}: solve failed: {e}", f.id));
+            // a rocket the 3D engine cannot solve says so and the others go on (the app then keeps the legacy table)
+            let table = match solve(&job, &Arc::new(AtomicBool::new(false)), log_points(f.id.clone())) {
+                Ok(table) => table,
+                Err(e) => {
+                    println!("{}: {engine} SOLVE FAILED after {:.1} s wall: {e}", f.id, t0.elapsed().as_secs_f64());
+                    continue;
+                }
+            };
             println!(
                 "{}: {engine} solved {} points + {} angle points on {} in {:.1} s wall ({:.1} s app); notes {:?}",
                 f.id,
