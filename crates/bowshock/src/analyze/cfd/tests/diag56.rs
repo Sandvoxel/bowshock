@@ -17,6 +17,26 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     if let Some(x) = env_f("DIAG_MAXIT") {
         c.numerics.max_iter = x as usize;
     }
+    if std::env::var_os("DIAG_PLAIN").is_some() {
+        c.numerics.implicit.ddadi = None;
+        c.numerics.implicit.lhs_dis_boost = 0.0;
+        c.numerics.implicit.cfl_max = 20.0;
+    }
+    if let Some(x) = env_f("DIAG_CFLMAX") {
+        c.numerics.implicit.cfl_max = x;
+    }
+    if let Some(x) = env_f("DIAG_FIRST") {
+        c.numerics.first_order_iters = x as usize;
+    }
+    if let Some(x) = env_f("DIAG_ACROSS") {
+        c.grid.fin_cells_across = x as usize;
+    }
+    if let Some(x) = env_f("DIAG_CHORD") {
+        c.grid.fin_chord_cells = Some(x as usize);
+    }
+    if env_f("DIAG_LOWMACH") == Some(0.0) {
+        c.numerics.low_mach = false;
+    }
     if std::env::var_os("DIAG_GRID").is_some() {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
         let label = std::env::var("DIAG_ROCKET").unwrap_or_default();
