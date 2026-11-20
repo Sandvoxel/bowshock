@@ -447,6 +447,100 @@ fn engine3d_finned_timing() {
     println!("PERF {}", serde_json_perf(wall, all[13]));
 }
 
+/// The work items of a solve: one per node without the warm start; with it two runs per kind (the points at or below the split from the lowest up, the others from the highest
+/// down), each ascending, covering every node once.
+#[test]
+fn the_warm_start_makes_two_runs_per_kind_and_the_cold_start_one_item_per_node() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
+    };
+    let cold = work_list(&job, false);
+    assert_eq!(cold.len(), job.nodes.len() + job.stability.len());
+    assert!(cold.iter().all(|i| i.nodes.len() == 1));
+    let warm = work_list(&job, true);
+    assert_eq!(warm.iter().map(|i| (i.lift, i.nodes.len())).collect::<Vec<_>>(), vec![(false, 4), (false, 6), (true, 2), (true, 6)]);
+    let split = solver::warm_split_mach();
+    for item in &warm {
+        let machs: Vec<f64> = item.nodes.iter().map(|&k| if item.lift { job.stability[k] } else { job.nodes[k] }).collect();
+        assert!(machs.windows(2).all(|w| w[0] < w[1]), "ascending: {machs:?}");
+        assert!(machs.iter().all(|&m| (m <= split) == (machs[0] <= split)), "one side of the split: {machs:?}");
+    }
+}
+
+/// Variants of the warm start on the finned example through the app's analysis (`node_analysis`, shared grid, one `run` over the table's Mach numbers): the cold run (`cold`, the
+/// seeded sectors) and `rescale/drift factor/ramp/split/sub[/max Mach]` variants, e.g. `perturbation/0.5/cap/0.9/up` (the `BOWSHOCK_WARM_*` settings of the engine: rescale `none`,
+/// `velocity` or `perturbation`; the factor on the drift tolerance; `cap` or `restart` of the CFL ramp; the split Mach number; `up` or `down` below it; the Mach number above which a point has no neighbour). `BOWSHOCK_VARIANTS` lists
+/// them separated by spaces, `BOWSHOCK_WARM_HALF=1` takes the stability nodes at 2 degrees (CN) instead of the drag nodes (CD), `BOWSHOCK_GRID=draft` the quick grid. Prints the
+/// iterations, the value and its change against the cold run per point, and the totals.
+#[test]
+#[ignore = "GPU: solves the finned example's table once per variant"]
+fn engine3d_warm_variants() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let half = std::env::var_os("BOWSHOCK_WARM_HALF").is_some();
+    let grid = if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse };
+    let machs = if half { lift_nodes((0.1, 3.0)).unwrap() } else { nodes((0.1, 3.0)).unwrap() };
+    let grid_mach = nodes((0.1, 3.0)).unwrap().iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let job = Job { plan, altitude: 120.0, nodes: machs.clone(), stage: 1, grid, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+    let session = Session::Local { backend: solver::Backend::Gpu };
+    let conditions: Vec<solver::Condition> = machs.iter().map(|&m| solver::Condition::new(m, if half { LIFT_ALPHAS[0] } else { 0.0 })).collect();
+    let variants = std::env::var("BOWSHOCK_VARIANTS").unwrap_or_else(|_| {
+        "cold perturbation/0.5/cap/0.9/up perturbation/0.25/cap/0.9/up velocity/0.5/cap/0.9/up perturbation/0.5/cap/0.9/down perturbation/0.5/cap/10/up"
+            .to_string()
+    });
+    let mut reference: Option<Vec<f64>> = None;
+    for name in variants.split_whitespace() {
+        for k in ["RESCALE", "DRIFT", "RAMP", "SPLIT", "SUB", "MAXMACH"] {
+            std::env::remove_var(format!("BOWSHOCK_WARM_{k}"));
+        }
+        let warm = name != "cold";
+        if warm {
+            let f: Vec<&str> = name.split('/').collect();
+            assert!(f.len() == 5 || f.len() == 6, "variant {name}: rescale/drift/ramp/split/sub[/max Mach]");
+            for (k, v) in ["RESCALE", "DRIFT", "RAMP", "SPLIT", "SUB", "MAXMACH"].into_iter().zip(&f) {
+                std::env::set_var(format!("BOWSHOCK_WARM_{k}"), v);
+            }
+        }
+        let kind = if half { NodeKind::Lift } else { NodeKind::Drag };
+        let analysis = node_analysis(&job, kind, &session, 120.0, grid_mach, true, warm).unwrap_or_else(|_| panic!("the node analysis"));
+        let _ = solver::take_facade_timings();
+        let t = Instant::now();
+        let polar = analysis.run(&conditions).expect("the table solves");
+        let wall = t.elapsed().as_secs_f64();
+        let starts = solver::take_facade_timings();
+        let value = |p: &solver::PolarPoint| p.forces.map_or(p.drag.total, |f| f.cn);
+        let values: Vec<f64> = polar.points.iter().map(value).collect();
+        let (mut its, mut worst) = (0usize, 0.0f64);
+        for (k, p) in polar.points.iter().enumerate() {
+            let how = starts.iter().find(|s| s.what == "point" && s.mach == p.mach).map_or("", |s| if s.neighbour.is_empty() { s.seed } else { s.neighbour });
+            let change = reference.as_ref().map_or(0.0, |r| 100.0 * (values[k] / r[k] - 1.0));
+            worst = worst.max(change.abs());
+            its += p.detail.iterations;
+            println!(
+                "VARIANT {name} M {:.2}: {} its, {} {:.5} ({change:+.2} % against cold), {:?}, start {how:?}",
+                p.mach,
+                p.detail.iterations,
+                if half { "CN" } else { "CD" },
+                values[k],
+                p.detail.stop_reason
+            );
+        }
+        println!("VSUM {name}: {its} iterations, {wall:.1} s wall, worst change {worst:.2} %");
+        if reference.is_none() {
+            reference = Some(values);
+        }
+    }
+}
+
 fn serde_json_perf(wall: f64, iters: f64) -> String {
     format!(
         "{{\"case\":\"3d-engine-finned-example\",\"precision\":\"f32\",\"cells\":null,\"iters\":{iters},\"us_per_iter\":{:.3},\"wall_s\":{wall:.3}}}",
@@ -790,8 +884,13 @@ fn finned_subsonic_failure_path() {
         Job { plan, altitude: 120.0, nodes: vec![mach], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
     let _ = solver::engine::timing::take_timings();
     let t = Instant::now();
-    let table =
-        solve_sized(&job, &Arc::new(AtomicBool::new(false)), |e| println!("EVENT {}", format!("{e:?}").chars().take(160).collect::<String>()), solves_3d(), false);
+    let table = solve_sized(
+        &job,
+        &Arc::new(AtomicBool::new(false)),
+        |e| println!("EVENT {}", format!("{e:?}").chars().take(160).collect::<String>()),
+        solves_3d(),
+        false,
+    );
     println!("APP RESULT after {:.1} s: {:?}", t.elapsed().as_secs_f64(), table.as_ref().map(|t| (t.points.len(), t.notes.clone())));
     for r in solver::engine::timing::take_timings() {
         println!("RUN M {:.2}: {} cells, {} its (stop {}), {:.1} s, {}", r.mach, r.cells, r.iters_exec, r.iters_stop, r.run_s, r.stop);

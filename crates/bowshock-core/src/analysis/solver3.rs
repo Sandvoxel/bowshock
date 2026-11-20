@@ -31,10 +31,10 @@ use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
 use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
+use crate::engine::warm3::{rescale, warm_plan, Rescale};
 use bowshock_cfd::gas3::{cons_to_prim3, prim_to_cons3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
 use bowshock_cfd::sst::WallThermal;
-use crate::engine::warm3::{rescale, warm_plan, Rescale};
 
 /// The solved domain of a condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +207,8 @@ struct WarmTuning {
     sub_up: bool,
     /// A neighbour further than this factor in Mach number is not a start (see [`warm_plan`]).
     max_ratio: f64,
+    /// The points above this Mach number start as they do without the flag (see [`warm_plan`]).
+    max_mach: f64,
     rescale: Rescale,
     /// Factor on [`crate::engine::case3::Numerics3::drift_tol`] of a run started from a neighbour: it starts close to the answer, like a seeded run.
     drift_factor: f64,
@@ -228,6 +230,7 @@ impl WarmTuning {
             split: num("BOWSHOCK_WARM_SPLIT", 0.9),
             sub_up: var("BOWSHOCK_WARM_SUB").is_none_or(|v| v != "down"),
             max_ratio: num("BOWSHOCK_WARM_RATIO", 10.0),
+            max_mach: num("BOWSHOCK_WARM_MAXMACH", 10.0),
             rescale: match var("BOWSHOCK_WARM_RESCALE").as_deref() {
                 Some("none") => Rescale::None,
                 Some("velocity") => Rescale::Velocity,
@@ -856,7 +859,9 @@ impl Analysis {
             let to = (from..groups.len()).find(|&g| groups[g].0 != groups[from].0).unwrap_or(groups.len());
             if self.warm_start {
                 let machs: Vec<f64> = (from..to).map(|g| sorted[groups[g].1[0]].mach).collect();
-                steps.extend(warm_plan(&machs, tune.split, tune.sub_up, tune.max_ratio).into_iter().map(|s| (from + s.point, s.parent.map(|p| from + p))));
+                steps.extend(
+                    warm_plan(&machs, tune.split, tune.sub_up, tune.max_ratio, tune.max_mach).into_iter().map(|s| (from + s.point, s.parent.map(|p| from + p))),
+                );
             } else {
                 steps.extend((from..to).map(|g| (g, None)));
             }

@@ -62,9 +62,10 @@ pub struct WarmStep {
 
 /// The order of a warm sweep over the points at the Mach numbers `machs` (distinct, any order): the points above `split` from the highest one downward, the others from the lowest
 /// one upward (`sub_up`) or from the highest of them downward, every point starting from the previous one of its run of the order and each run's first point from nothing. A
-/// point whose Mach number differs from its parent's by more than the factor `max_ratio` (`M_new / M_old` or its inverse) starts from nothing too. The steps come in the order
+/// point whose Mach number differs from its parent's by more than the factor `max_ratio` (`M_new / M_old` or its inverse) starts from nothing too, and so does one with a Mach number
+/// above `max_mach` or whose parent is (a point that starts as fast from its axisymmetric seed does not need a neighbour). The steps come in the order
 /// they are solved in, a parent before its children.
-pub fn warm_plan(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64) -> Vec<WarmStep> {
+pub fn warm_plan(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64, max_mach: f64) -> Vec<WarmStep> {
     let mut idx: Vec<usize> = (0..machs.len()).collect();
     idx.sort_by(|&a, &b| machs[a].total_cmp(&machs[b]));
     let (sub, sup): (Vec<usize>, Vec<usize>) = idx.into_iter().partition(|&i| machs[i] <= split);
@@ -78,7 +79,7 @@ pub fn warm_plan(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64) -> Vec
         for p in run {
             let near = |q: usize| {
                 let r = machs[p] / machs[q];
-                r.max(1.0 / r) <= max_ratio
+                r.max(1.0 / r) <= max_ratio && machs[p].max(machs[q]) <= max_mach
             };
             steps.push(WarmStep { point: p, parent: parent.filter(|&q| near(q)) });
             parent = Some(p);
@@ -153,7 +154,7 @@ mod tests {
     #[test]
     fn the_plan_runs_down_from_the_highest_supersonic_point_and_up_from_the_lowest_subsonic_one() {
         let machs = [0.1, 0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3, 3.0];
-        let plan = warm_plan(&machs, 0.9, true, 10.0);
+        let plan = warm_plan(&machs, 0.9, true, 10.0, 10.0);
         assert_eq!(plan.len(), machs.len());
         let order: Vec<f64> = plan.iter().map(|s| machs[s.point]).collect();
         assert_eq!(order, vec![0.1, 0.5, 0.8, 0.9, 3.0, 2.3, 1.7, 1.3, 1.1, 1.0]);
@@ -166,15 +167,15 @@ mod tests {
             }
         }
         // the sub-split run downward, and the ratio limit
-        let down = warm_plan(&machs, 0.9, false, 4.0);
+        let down = warm_plan(&machs, 0.9, false, 4.0, 10.0);
         let order: Vec<f64> = down.iter().map(|s| machs[s.point]).collect();
         assert_eq!(&order[..4], &[0.9, 0.8, 0.5, 0.1]);
         assert_eq!(down[3].parent, None, "0.5 to 0.1 is a factor 5");
         assert_eq!(down[2].parent.map(|p| machs[p]), Some(0.8));
         // one run from the top, and one point
-        let all = warm_plan(&machs, 0.0, true, 10.0);
+        let all = warm_plan(&machs, 0.0, true, 10.0, 10.0);
         assert_eq!(all[0].point, 9);
         assert_eq!(all.iter().filter(|s| s.parent.is_none()).count(), 1);
-        assert_eq!(warm_plan(&[2.0], 0.9, true, 4.0), vec![WarmStep { point: 0, parent: None }]);
+        assert_eq!(warm_plan(&[2.0], 0.9, true, 4.0, 10.0), vec![WarmStep { point: 0, parent: None }]);
     }
 }
