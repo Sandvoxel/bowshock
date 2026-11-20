@@ -221,3 +221,36 @@ fn variants_build() {
         println!("{v}: {}x{}", s.grid.ni, s.grid.nj);
     }
 }
+
+/// The solver's boattail pressure drag against the data of NASA TM X-2439 (`bowshock_cases::subsonic::fox_tm_x2439`, tangent ogive configuration 4, a 10 degree boattail of 0.647 d base
+/// diameter on a 0.13 d sting, Mach 0.404 / 0.608 / 0.831; the Arcas has a 0.65 d base): Euler wedge at levels 0 and 1, the boattail drag `-int Cp dA/S` and the base annulus
+/// `Cp` printed for `tools/subdrag_post.py fox` to put beside the integral of the tabulated Cp.
+#[test]
+#[ignore = "diagnosis: Euler wedge on the GPU"]
+fn sd2_fox_boattail() {
+    for level in [0u32, 1] {
+        for m in bowshock_cases::subsonic::fox_tm_x2439::MACH {
+            let case = bowshock_cases::subsonic::fox_wedge_case(false, m, level);
+            let mut s = Session::new(&case).expect("session");
+            let sol = s.run(&case, false).expect("run");
+            let p = &sol.parts;
+            println!(
+                "SDFOX level {level} M{m:.3} iters {} stop {:?} cd_nose {:+.4} cd_aft {:?} cd_base {:+.4} cp_base {:+.4}",
+                sol.point.iterations,
+                sol.point.stop_reason,
+                p.nose,
+                p.aft.iter().map(|a| (a * 1e4).round() / 1e4).collect::<Vec<_>>(),
+                p.base,
+                sol.point.cp_base
+            );
+            let h = host(&s);
+            let p_inf = h.cfg.freestream[4];
+            let q = 0.5 * m * m;
+            for w in wall_samples(&h.grid, &h.u) {
+                if matches!(w.class, Wall::Body(_)) && w.face.c[0] > 3.9 {
+                    println!("SDFOX level {level} M{m:.3} cp x {:.4} {:+.5}", w.face.c[0], (w.pw - p_inf) / q);
+                }
+            }
+        }
+    }
+}
