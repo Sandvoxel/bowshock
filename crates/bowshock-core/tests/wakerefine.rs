@@ -55,7 +55,8 @@ fn case_of(m: f64, variant: &str) -> (Case3, f64, f64, f64, f64) {
         let c = Case3::wedge(m, body, level).with_tier(tier(kind, r.flow(m, 1.2)));
         (c, f64::NAN, if m < 0.7 { 0.055 } else { 0.08 }, ca, r.area_factor())
     } else {
-        let body = BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 2.0 } }, 2.0).with_boattail(1.0, 10f64.to_radians()).with_sting(fox::STING_RADIUS);
+        let body =
+            BaseBody::cylinder(Body { nose: Nose::TangentOgive { fineness: 2.0 } }, 2.0).with_boattail(1.0, 10f64.to_radians()).with_sting(fox::STING_RADIUS);
         let k = fox::MACH.iter().position(|x| (x - m).abs() < 1e-9).expect("a Fox Mach number");
         let flow = WallFlow { re_c: fox_re_d(m) / m, mach_max: m, ks_body: 0.0, ks_fin: 0.0, sutherland: SUTHERLAND_SEA_LEVEL };
         let c = Case3::wedge(m, body, level);
@@ -123,9 +124,13 @@ fn wr1_study() {
     let variants: Vec<String> = std::env::var("WR_VARIANTS").unwrap_or_else(|_| "base".into()).split(',').map(|s| s.trim().to_string()).collect();
     for variant in &variants {
         let arcas_model = variant.split('+').any(|t| t == "arcas");
-        let machs: Vec<f64> = std::env::var("WR_MACHS")
-            .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
-            .unwrap_or_else(|_| if arcas_model { vec![0.6, 0.8] } else { fox::MACH.to_vec() });
+        let machs: Vec<f64> = std::env::var("WR_MACHS").map(|v| v.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or_else(|_| {
+            if arcas_model {
+                vec![0.6, 0.8]
+            } else {
+                fox::MACH.to_vec()
+            }
+        });
         for &m in &machs {
             let (case, d_bt, d_cpb, d_ca, af) = case_of(m, variant);
             let tag = format!("WR {variant} M{m:.3}");
@@ -188,7 +193,10 @@ fn wr1_study() {
                 a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)
             };
             let probes: Vec<String> = [0.0, 0.25, 0.5, 0.75, 1.0].iter().map(|f| format!("{:+.3}", at(x_bt + f * (x_end - x_bt) * 0.999))).collect();
-            println!("{tag} boattail wall Cp at 0 / 25 / 50 / 75 / 100 %: {} ; min {cp_min:+.3} at x {x_min:.3} (x_bt {x_bt:.3}, x_base {x_end:.3})", probes.join(" "));
+            println!(
+                "{tag} boattail wall Cp at 0 / 25 / 50 / 75 / 100 %: {} ; min {cp_min:+.3} at x {x_min:.3} (x_bt {x_bt:.3}, x_base {x_end:.3})",
+                probes.join(" ")
+            );
             // grid sizes: axial cell at the shoulder, the base, 1 / 2 / 5 d behind it; the radial cell at 0.25 / 0.5 / 1 d above the axis row at those columns
             let xc: Vec<f64> = (0..g.ni).map(|i| g.xc[g.cell(i, 0, 0)][0]).collect();
             let dx_at = |x: f64| -> f64 {
