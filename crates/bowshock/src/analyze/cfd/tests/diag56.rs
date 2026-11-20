@@ -37,6 +37,9 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     if let Some(x) = env_f("DIAG_ACROSS") {
         c.grid.fin_cells_across = x as usize;
     }
+    if std::env::var_os("DIAG_NO_SWEPT_ACROSS").is_some() {
+        c.grid.fin_across_swept = false;
+    }
     if let Some(x) = env_f("DIAG_CHORD") {
         c.grid.fin_chord_cells = Some(x as usize);
     }

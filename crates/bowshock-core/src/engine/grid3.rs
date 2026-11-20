@@ -80,6 +80,19 @@ const ZONE_TRIGGER: f64 = 0.5;
 /// The height over the tip row, in units of the largest move of the edges, over which the move fades away above the fin (at least four rows).
 const FADE_REACH: f64 = 1.5;
 
+/// A flat leading-edge face on a fin swept by more than this angle from the radial (tangent of the angle: `sweep / span`) is wide for its cells when its half thickness is
+/// more than [`SWEPT_FLAT_FACE`] first chord cells: one cell layer under it is then a fluid cell ahead of the face as wide as the fin (177 times the volume of the
+/// wall cell beside it) that the swept stagnation flow squeezes sideways, and the wall cells at the corner collapse to vacuum (DESIGN3D item 72: Byrum, 68 degrees,
+/// square 0.25 in = 0.083 d, every Coarse drag point non-finite; 0.19 in and thinner settle).
+const SWEPT_FLAT_TAN: f64 = 1.73;
+
+/// Half thickness of a swept flat face, in first chord cells at the edge, from which [`SWEPT_FLAT_ACROSS`] cells go across the fin (Byrum Coarse: 2.27; 1.7 for the 0.19 in fin, 1.1 on the Draft grid).
+const SWEPT_FLAT_FACE: f64 = 1.5;
+
+/// Cells across a fin with a wide swept flat leading-edge face (a half fin owns half of them): the face is then two cells wide on a half fin, as long as the
+/// first chord cell (0.02 d against 0.018 d on Byrum). Two cells across (one on the half fin) are still non-finite; four reach `CdStationary` at Mach 0.8.
+const SWEPT_FLAT_ACROSS: usize = 4;
+
 /// The chord at which a pointed or elliptical planform is cut at the tip, as a fraction of the root chord.
 pub const TIP_CHORD_FLOOR: f64 = 0.04;
 
@@ -179,6 +192,8 @@ pub struct Grid3Params {
     /// Rounded fins keep the first chord cell of the root row down the span (`FinPlan::row_offsets`, DESIGN3D item 66); off by default: it makes the supersonic Rabia points
     /// of the Coarse tier solve (Mach 1.3 / 2.3 in 1 200 iterations) and its Mach 0.8 point fail.
     pub fin_le_rows: bool,
+    /// Raise `fin_cells_across` to [`SWEPT_FLAT_ACROSS`] for a wide flat face on a heavily swept fin ([`SWEPT_FLAT_TAN`]); on by default, off to keep the count as set.
+    pub fin_across_swept: bool,
 }
 
 impl Grid3Params {
@@ -202,6 +217,7 @@ impl Grid3Params {
             fin_cells_across: 1,
             roughness: PartRoughness::default(),
             fin_le_rows: false,
+            fin_across_swept: true,
         }
     }
 }
@@ -1027,6 +1043,18 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     let plan = match &p.fins {
         Some(f) => Some((plan_fins(p, f, &mut xs, &host)?, f)),
         None => None,
+    };
+    // a wide flat face on a swept edge gets more cells across than the grid asks for (the grids of every other fin keep their count bit for bit)
+    let n_fin = match &plan {
+        Some((pl, f))
+            if p.fin_across_swept
+                && matches!(f.profile, FinProfile::Square)
+                && f.sweep > SWEPT_FLAT_TAN * f.span
+                && 0.5 * f.thickness > SWEPT_FLAT_FACE * pl.edge =>
+        {
+            n_fin.max(SWEPT_FLAT_ACROSS)
+        }
+        _ => n_fin,
     };
     let root = plan.as_ref().map(|(pl, f)| (pl.r_t, 0.5 * f.thickness));
     let lay = match (p.domain, &p.fins, &p.fin_stack, root) {
@@ -2358,6 +2386,28 @@ mod tests {
             }
         }
         n
+    }
+
+    /// A wide flat leading-edge face on a heavily swept fin (Byrum's, 68 degrees, 0.083 d thick, 64 chord cells) gets four cells across (two on the sector's half fin);
+    /// a thin one, a less swept one, a rounded one, the 32-chord-cell grid (the face is under 1.5 cells there) and a grid with the rule off keep their one cell.
+    #[test]
+    fn a_wide_swept_flat_face_gets_four_cells_across() {
+        use crate::engine::case3::{Case3, Tier};
+        let byrum = Fins3 { count: 3, root_chord: 3.92, tip_chord: 0.625, span: 1.0625, sweep: 2.625, thickness: 0.0833, te_to_base: 0.4167, profile: FinProfile::Square, planform: None };
+        let across = |f: &Fins3, nf: usize, auto: bool| {
+            let mut p = Case3::sector(2.0, Case3::anf_body(), f.clone(), Tier::Coarse(flow()), 0).grid;
+            p.fin_chord_cells = Some(nf);
+            p.fin_across_swept = auto;
+            let g = body_grid3(&p).unwrap();
+            assert_eq!(g.solid.iter().filter(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_)))).count(), 1);
+            g.solid.iter().find(|b| matches!(g.part_of(b.i.start, b.j.start, b.k.start), Some(Part::Fin(_)))).unwrap().k.len()
+        };
+        assert_eq!(across(&byrum, 64, true), 2);
+        assert_eq!(across(&byrum, 64, false), 1);
+        assert_eq!(across(&byrum, 32, true), 1);
+        assert_eq!(across(&Fins3 { thickness: 0.0417, ..byrum.clone() }, 64, true), 1);
+        assert_eq!(across(&Fins3 { sweep: 1.5, ..byrum.clone() }, 64, true), 1);
+        assert_eq!(across(&Fins3 { profile: FinProfile::Rounded, ..byrum.clone() }, 64, true), 1);
     }
 
     /// `n` cells across a fin, on the uniform half domain: every box is `n` cells thick, its faces are at the profile's half-thickness and the nodes between are
