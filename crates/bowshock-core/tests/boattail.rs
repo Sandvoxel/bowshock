@@ -227,10 +227,12 @@ fn bt2_gpu_vs_cpu() {
 #[cfg(feature = "gpu")]
 fn bt2_one(m: f64, variant: &str) {
     use bowshock_cfd::gpu::Precision;
+    use bowshock_cfd::gpu::Precision;
     let steps: usize = std::env::var("BT_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(140);
     let every: usize = std::env::var("BT_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     let case = case_of(m, variant);
-    let mut r = bowshock_core::engine::gpu3::GpuRunner3::new(&case, Precision::F32).expect("gpu runner");
+    let prec = if std::env::var("BT_PREC").as_deref() == Ok("ext") { Precision::Extended } else { Precision::F32 };
+    let mut r = bowshock_core::engine::gpu3::GpuRunner3::new(&case, prec).expect("gpu runner");
     let mut cpu = case.build_solver_cached().expect("cpu solver");
     let tag = format!("BT2 {variant} M{m:.3}");
     let g = cpu.grid.clone();
@@ -263,6 +265,23 @@ fn bt2_one(m: f64, variant: &str) {
                 }
             }
         }
+        // the five cells with the largest difference in any component (scaled by the free-stream state)
+        let scale = [1.0, 0.6, 0.3, 0.3, 0.3, 2.0];
+        let mut diffs: Vec<(f64, usize, usize, usize)> = Vec::new();
+        for j in 0..g.nj {
+            for i in 0..g.ni {
+                let c = g.cell(i, j, 0);
+                if g.is_solid(i, j, 0) || !ug[c].iter().all(|x| x.is_finite()) {
+                    continue;
+                }
+                for k in 0..5 {
+                    diffs.push(((ug[c][k] - cpu.u[c][k]).abs() / scale[k], i, j, k));
+                }
+            }
+        }
+        diffs.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let top: Vec<String> = diffs.iter().take(5).map(|(d, i, j, k)| format!("{d:.1e}@({i},{j}).{k}")).collect();
+        println!("{tag}   top diffs {}", top.join(" "));
         let place = |(i, j): (usize, usize)| {
             let c = g.cell(i, j, 0);
             format!("(i {i}, j {j}; x {:.3} r {:.3})", g.xc[c][0], g.xc[c][1].hypot(g.xc[c][2]))
