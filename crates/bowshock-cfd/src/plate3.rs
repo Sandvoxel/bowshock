@@ -17,7 +17,7 @@ use crate::grid3::{Grid3, Part, SolidBox};
 use crate::implicit_params::ImplicitParams;
 use crate::limiter::Limiter;
 use crate::solver3::{Config3, RansOpts3, Scheme3, Solver3};
-use crate::sst::{Turbulence, Viscous, WallThermal};
+use crate::sst::{Compressibility, Turbulence, Viscous, WallThermal};
 use crate::transition3::Transition;
 
 /// Sutherland constant of the plate cases (`110.4 K / 300 K`, the 2D tests').
@@ -45,6 +45,8 @@ pub struct PlateCase {
     pub wall_thermal: WallThermal,
     /// Prescribed transition of the plate (`Transition::x_tr` the station on the plate, from its leading edge; `fin_frac` is not used): laminar upstream. `None`: as `turbulence` says.
     pub transition: Option<Transition>,
+    /// Dilatation-dissipation compressibility correction of the SST model (`Off`: the plain model).
+    pub compressibility: Compressibility,
 }
 
 impl PlateCase {
@@ -61,6 +63,7 @@ impl PlateCase {
             slab: 1.0,
             wall_thermal: WallThermal::Adiabatic,
             transition: None,
+            compressibility: Compressibility::Off,
         }
     }
 
@@ -77,6 +80,7 @@ impl PlateCase {
             slab: 1.0,
             wall_thermal: WallThermal::Adiabatic,
             transition: None,
+            compressibility: Compressibility::Off,
         }
     }
 
@@ -157,7 +161,7 @@ pub fn plate_solver3(case: &PlateCase, params: ImplicitParams) -> Solver3 {
         scheme: Scheme3::Implicit(params),
     };
     let grid = plate_grid3(case);
-    let mut opts = RansOpts3 { wall_thermal: case.wall_thermal, transition: case.transition, ..RansOpts3::default() };
+    let mut opts = RansOpts3 { wall_thermal: case.wall_thermal, transition: case.transition, compressibility: case.compressibility, ..RansOpts3::default() };
     if case.ks > 0.0 {
         opts.ks = vec![0.0; grid.ni * grid.nj * grid.nk];
         for i in case.i_le()..grid.ni {
@@ -646,6 +650,45 @@ mod tests {
             r.wall[g.cell(st.col, case.j_first(), 0)][1],
             r.wall[g.cell(st.col, case.j_first(), 0)][2] / r.mu[g.cell(st.col, case.j_first(), 0)]
         );
+    }
+
+    /// The compressibility corrections on the supersonic adiabatic turbulent plate (G2's grid and `Re_x = 5e6 x`, Mach 2 and 3): `cf` at `x = 0.5` and `0.97` and the maximum eddy
+    /// viscosity of every correction against the plain SST model. A correction that hurts an attached boundary layer shows as a `cf` change; the report (DESIGN3D item 54) is the
+    /// printed table, the assertion only that no thresholded correction (Wilcox, Zeman, shear-layer Wilcox) moves `cf` by more than 5 % (Rumsey, NASA/TM-2009-215705: Wilcox / Zeman change adiabatic `cf` slightly up to Mach 10); Sarkar's unthresholded `M_t^2` is reported only.
+    #[test]
+    #[ignore]
+    fn compressibility_corrections_on_the_supersonic_turbulent_plate() {
+        let comps = [Compressibility::Off, Compressibility::Sarkar, Compressibility::Wilcox, Compressibility::Zeman, Compressibility::WilcoxShear];
+        for mach in [2.0, 3.0] {
+            let rows: Vec<(Compressibility, [f64; 2], f64, f64)> = std::thread::scope(|sc| {
+                let hs: Vec<_> = comps
+                    .iter()
+                    .map(|&comp| {
+                        sc.spawn(move || {
+                            let case = PlateCase { mach, re_c: 5e6 / mach, compressibility: comp, ..PlateCase::g2() };
+                            let (s, _, _) = converge(&case, ImplicitParams::VISCOUS, 4.0, 20_000, 0.97);
+                            let (st, mu_t_max) = report(&s, &case, 0.97);
+                            (comp, [station(&s, &case, 0.5).cf, st.cf], mu_t_max, st.y_plus)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().expect("plate run")).collect()
+            });
+            let base = rows[0].1;
+            for (comp, cf, mu_t_max, y_plus) in &rows {
+                println!(
+                    "Mach {mach} {comp:?}: cf(0.5) {:.5e} ({:+.2} %)  cf(0.97) {:.5e} ({:+.2} %)  max mu_t/mu {mu_t_max:.1}  y+ {y_plus:.2}",
+                    cf[0],
+                    100.0 * (cf[0] / base[0] - 1.0),
+                    cf[1],
+                    100.0 * (cf[1] / base[1] - 1.0)
+                );
+                // Sarkar's `F = M_t^2` has no threshold and is known to lower the friction of attached layers (Rumsey); the thresholded forms must not
+                if comp != &Compressibility::Sarkar {
+                    assert!((cf[1] / base[1] - 1.0).abs() < 0.05, "Mach {mach} {comp:?}: cf moved by {:.1} %", 100.0 * (cf[1] / base[1] - 1.0));
+                }
+            }
+        }
     }
 }
 

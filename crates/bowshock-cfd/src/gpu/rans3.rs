@@ -23,7 +23,7 @@ pub(crate) struct TurbRun3 {
 impl TurbRun3 {
     /// The free-stream `[k, omega]` and `mu_t` of every cell (`turbulence3::init`).
     fn init_host(&self, solid: &[bool], rho: f64) -> (Vec<[f64; 2]>, Vec<f64>) {
-        let (turb, mut mu_t) = crate::turbulence3::init(&crate::turbulence3::Sst { re_c: self.re_c }, solid, |_| rho);
+        let (turb, mut mu_t) = crate::turbulence3::init(&crate::turbulence3::Sst::new(self.re_c), solid, |_| rho);
         for (m, g) in mu_t.iter_mut().zip(&self.gamma_host) {
             *m *= g;
         }
@@ -208,7 +208,7 @@ impl LazySolver3 {
             let shape = [g.ni, g.nj, g.nk];
             Some(TurbRun3 {
                 re_c: r.visc.re_c,
-                model: Sst3 { re_c: r.visc.re_c },
+                model: Sst3::new(r.visc.re_c).with_compressibility(r.model.comp),
                 tg: TGeo3::new(&self.ctx, g, &self.solid_host, &sym, &r.bc, &vg, r.law_i_walls)?,
                 dwall: up(&self.ctx, &r.dwall.iter().map(|d| d.min(1e10)).collect::<Vec<_>>(), shape)?,
                 ks: if r.ks.is_empty() { None } else { Some(up(&self.ctx, &r.ks, shape)?) },

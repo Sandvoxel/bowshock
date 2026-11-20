@@ -2,7 +2,7 @@
 //! Coarse tier, the Draft tier (`--tier draft`) or the Draft tier's safe subsonic variant (`--tier draft-safe`: `Case3::draft_subsonic`), `GpuRunner3` in f32, to the case's stop rule.
 //!
 //! ```text
-//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--mach-max M] [--grid-only] [--drift-tol X] [--x-tr X] [--fin-tr F] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
+//! cargo run --release -p bowshock-validate --example finned_table -- --tier coarse|fine|draft|draft-safe --mach 2.0 [--anf] [--wedge] [--tw RATIO] [--gf1] [--fin-cells N] [--chord N] [--refine S] [--mach-max M] [--grid-only] [--drift-tol X] [--x-tr X] [--fin-tr F] [--comp off|sarkar|wilcox|zeman|wilcox-shear] [--te-to-base X (with --anf)] [--sub N] [--max-iter N] [--ddadi OMEGA] [--dis-boost DELTA] [--history-every N] [--dt-mode sum|min]
 //! ```
 //!
 //! One `TABLE` line: tier, Mach number, grid, cells, iterations, stop reason, wall seconds (the whole run, set-up included), ms per iteration, CD total and its parts (coefficients on pi/4
@@ -11,7 +11,7 @@
 
 use bowshock_cfd::gpu::Precision;
 use bowshock_cfd::implicit_params::DtMode;
-use bowshock_cfd::sst::WallThermal;
+use bowshock_cfd::sst::{Compressibility, WallThermal};
 use bowshock_core::engine::body_grid::{BaseBody, Body, Nose};
 use bowshock_core::engine::case3::{Case3, Tier, WallFlow, SUTHERLAND_SEA_LEVEL};
 use bowshock_core::engine::gpu3::GpuRunner3;
@@ -110,6 +110,12 @@ fn main() -> Result<(), String> {
     let fin_tr = value("--fin-tr").map(|v| v.parse::<f64>().map_err(|e| format!("--fin-tr: {e}"))).transpose()?;
     if x_tr.is_some() || fin_tr.is_some() {
         case = case.with_transition(x_tr.unwrap_or(0.0), fin_tr.unwrap_or(0.0));
+    }
+    // `--comp off|sarkar|wilcox|zeman|wilcox-shear`: dilatation-dissipation compressibility correction of the SST model (`Case3::with_compressibility`, DESIGN3D item 54; default off)
+    if let Some(c) = value("--comp") {
+        case = case.with_compressibility(
+            Compressibility::parse(&c).ok_or_else(|| format!("--comp: unknown correction `{c}` (off|sarkar|wilcox|zeman|wilcox-shear)"))?,
+        );
     }
     // `--tw RATIO`: isothermal walls at `T_w = RATIO T_inf` (`Case3::with_wall_thermal`; adiabatic without)
     if let Some(t) = value("--tw") {
@@ -267,6 +273,17 @@ fn main() -> Result<(), String> {
         // the G-F1 reference (flat plate from the leading edge, fully turbulent, Re_c 1e6): the gate's fin friction of Mach 0.5 and 2
         let reference = if mach < 1.0 { 0.014593 } else { 0.008477 };
         println!("GF1-RATIO {tier_name} M{mach}: fin friction {:.6} / reference {reference} = {:.4}", d.fin_friction(), d.fin_friction() / reference);
+    }
+    // the turbulent Mach number `M_t^2 = 2 k / a^2` of the fluid cells (DESIGN3D item 54): the largest value and the number of cells above the Wilcox threshold 1/16
+    if let (Ok(u), Ok(Some((turb, _)))) = (run.gpu.state_f64(), run.gpu.turb_state()) {
+        let g = &run.host.grid;
+        let (mut max, mut above, mut fluid) = (0.0f64, 0usize, 0usize);
+        for c in (0..u.len().min(turb.len())).filter(|&c| g.part[c] == bowshock_cfd::grid3::PART_FLUID) {
+            let w = bowshock_cfd::gas3::cons_to_prim3(&u[c]);
+            let mt2 = 2.0 * turb[c][0] / (bowshock_cfd::gas3::GAMMA * w[4] / w[0]);
+            (max, above, fluid) = (max.max(mt2), above + usize::from(mt2 > 0.0625), fluid + 1);
+        }
+        println!("MT2 {tier_name} M{mach}: max M_t^2 {max:.4}, {above} of {fluid} fluid cells above 1/16");
     }
     println!(
         "TABLE-RUN {tier_name} M{mach}: cfl_max_start {} cfl_max_end {} cfl_ref {} sub_iters {} accepted {} wasted {} wall_s {wall:.1} stop {:?} ca {:.5} window_osc {}",

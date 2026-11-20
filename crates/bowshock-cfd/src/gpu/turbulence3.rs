@@ -41,6 +41,8 @@ pub struct CellIn3<const N: usize> {
     pub s2: A,
     /// Current eddy viscosity.
     pub mu_t: A,
+    /// Squared speed of sound `gamma p / rho` (the CPU `CellIn::a2`).
+    pub a2: A,
 }
 
 /// Blending function `F1` and the cross diffusion `X` of every cell.
@@ -73,17 +75,48 @@ pub trait TurbModel3<const N: usize> {
     fn eddy_viscosity(&self, cell: &CellIn3<N>) -> A;
 }
 
-/// The Menter SST-2003 model `[k, omega]` (the CPU `Sst`).
+/// The Menter SST-2003 model `[k, omega]` (the CPU `Sst`), optionally with a dilatation-dissipation correction.
 #[derive(Clone, Copy, Debug)]
 pub struct Sst3 {
     /// Reynolds number `rho_inf c_inf d / mu_inf` (`omega_inf = 1e-6 re_c`, the eddy-viscosity cap `1e5 / re_c`).
     pub re_c: f64,
+    /// Compressibility correction of the destruction terms (`Off`: the plain model).
+    pub comp: sst2::Compressibility,
 }
 
 impl Sst3 {
+    /// The plain SST model.
+    pub fn new(re_c: f64) -> Self {
+        Sst3 { re_c, comp: sst2::Compressibility::Off }
+    }
+
+    /// This model with the compressibility correction `comp`.
+    pub fn with_compressibility(self, comp: sst2::Compressibility) -> Self {
+        Sst3 { comp, ..self }
+    }
+
     /// `(sqrt(k) / (beta* omega d), 500 nu / (d^2 omega))`.
     fn args(nu: &A, k: &A, om: &A, d: &A) -> (A, A) {
         (k.sqrt() / (c(sst2::BETA_STAR) * om * d), c(500.0) * nu / (d * d * om))
+    }
+
+    /// `xi F(M_t)` of the correction (`Compressibility::xi_f`) from `k`, the squared speed of sound and `F1`.
+    fn xi_f(&self, k: &A, a2: &A, f1: &A) -> A {
+        use sst2::Compressibility as K;
+        let mt2 = match self.comp {
+            K::WilcoxShear => c(2.0) * k / a2 * (c(1.0) - f1),
+            _ => c(2.0) * k / a2,
+        };
+        let f = match self.comp {
+            K::Off => &mt2 * c(0.0),
+            K::Sarkar => mt2,
+            K::Wilcox | K::WilcoxShear => (mt2 - c(sst2::MT0_WILCOX * sst2::MT0_WILCOX)).maximum(c(0.0)),
+            K::Zeman => {
+                let x = (mt2.sqrt() - c(sst2::MT0_ZEMAN)).maximum(c(0.0)) / c(sst2::LAMBDA_ZEMAN);
+                c(1.0) - (-(&x * &x)).exp()
+            }
+        };
+        c(self.comp.xi()) * f
     }
 }
 
@@ -119,12 +152,17 @@ impl TurbModel3<2> for Sst3 {
         let prod = (&cell.mu_t * &cell.s2).minimum(c(10.0 * sst2::BETA_STAR) * rho * k * om);
         let beta = &b.f1 * c(sst2::BETA1) + (c(1.0) - &b.f1) * c(sst2::BETA2);
         let gamma = &b.f1 * c(sst2::GAMMA1) + (c(1.0) - &b.f1) * c(sst2::GAMMA2);
+        // dilatation dissipation (`Compressibility`): beta*_c = beta* (1 + xi F), beta_c = beta - beta* xi F (floored at 0); not built for `Off`
+        let (sink_k, d_k, beta) = if self.comp == sst2::Compressibility::Off {
+            (c(sst2::BETA_STAR) * rho * om * k, c(sst2::BETA_STAR) * om, beta)
+        } else {
+            let xf = self.xi_f(k, &cell.a2, &b.f1);
+            let beta_star = c(sst2::BETA_STAR) * (c(1.0) + &xf);
+            (&beta_star * rho * om * k, &beta_star * om, (beta - c(sst2::BETA_STAR) * &xf).maximum(c(0.0)))
+        };
         (
-            [
-                &prod - c(sst2::BETA_STAR) * rho * om * k,
-                &gamma * rho * &prod / cell.mu_t.maximum(c(1e-30)) - &beta * rho * om * om + (c(1.0) - &b.f1) * &b.x,
-            ],
-            [c(sst2::BETA_STAR) * om, c(2.0) * &beta * om],
+            [&prod - sink_k, &gamma * rho * &prod / cell.mu_t.maximum(c(1e-30)) - &beta * rho * om * om + (c(1.0) - &b.f1) * &b.x],
+            [d_k, c(2.0) * &beta * om],
         )
     }
 
@@ -642,6 +680,7 @@ impl LazySolver3 {
                 None => strain2_3(&dev.cell.grad),
             },
             mu_t: dev.mu_t.clone(),
+            a2: c(GAMMA) * &dev.pres / &dev.rho,
         }
     }
 

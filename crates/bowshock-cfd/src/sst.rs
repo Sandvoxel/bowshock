@@ -74,6 +74,81 @@ impl WallThermal {
     }
 }
 
+/// Dilatation-dissipation compressibility correction of the SST model (`RansOpts3::compressibility`; DESIGN3D item 54). Each variant scales the destruction terms of
+/// both equations with the Wilcox (1992, 1993; Turbulence Modeling for CFD, 3rd ed. 5.4.4) pair
+///
+/// ```text
+///   beta*_c = beta* (1 + xi F(M_t)),   beta_c = beta - beta* xi F(M_t),   M_t^2 = 2 k / a^2
+/// ```
+///
+/// (the `omega` term keeps the log layer of a compressible wall layer consistent; `beta_c` is floored at 0). `Off` (the default) leaves every kernel unchanged.
+///
+/// | variant | `xi` | `F(M_t)` | source |
+/// |---|---|---|---|
+/// | `Sarkar` | 1 | `M_t^2` | Sarkar et al. (1991), written for k-omega by Wilcox |
+/// | `Wilcox` | 3/2 | `(M_t^2 - M_t0^2) H(M_t - M_t0)`, `M_t0 = 1/4` | Wilcox (1992, 1998, 2006) |
+/// | `Zeman` | 3/4 | `(1 - exp(-((M_t - M_t0) / Lambda)^2)) H(M_t - M_t0)`, `M_t0 = 0.2`, `Lambda = 0.66` | Zeman (1990) as written for boundary layers in Rumsey (NASA/TM-2009-215705) eq. 43 |
+/// | `WilcoxShear` | 3/2 | the Wilcox `F` with `M_t^2 = 2 k (1 - F1) / a^2` | Brown (2002) "sstc2": off in the near-wall `F1 = 1` zone, so only free shear layers and the wake see it |
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Compressibility {
+    #[default]
+    Off,
+    Sarkar,
+    Wilcox,
+    Zeman,
+    WilcoxShear,
+}
+
+/// Threshold turbulent Mach number of the Wilcox correction.
+pub const MT0_WILCOX: f64 = 0.25;
+/// Threshold and width of the Zeman form.
+pub const MT0_ZEMAN: f64 = 0.2;
+pub const LAMBDA_ZEMAN: f64 = 0.66;
+
+impl Compressibility {
+    /// The factor `xi`.
+    pub const fn xi(self) -> f64 {
+        match self {
+            Compressibility::Off => 0.0,
+            Compressibility::Sarkar => 1.0,
+            Compressibility::Wilcox | Compressibility::WilcoxShear => 1.5,
+            Compressibility::Zeman => 0.75,
+        }
+    }
+
+    /// Is `M_t` masked by `1 - F1` (a shear-layer-only variant)?
+    pub const fn masks_wall_layer(self) -> bool {
+        matches!(self, Compressibility::WilcoxShear)
+    }
+
+    /// `xi F(M_t)` from `mt2 = 2 k / a^2` (already weighted with `1 - F1` for the masked variant).
+    #[inline]
+    pub fn xi_f(self, mt2: f64) -> f64 {
+        let f = match self {
+            Compressibility::Off => 0.0,
+            Compressibility::Sarkar => mt2,
+            Compressibility::Wilcox | Compressibility::WilcoxShear => (mt2 - MT0_WILCOX * MT0_WILCOX).max(0.0),
+            Compressibility::Zeman => {
+                let x = (mt2.sqrt() - MT0_ZEMAN).max(0.0) / LAMBDA_ZEMAN;
+                1.0 - (-x * x).exp()
+            }
+        };
+        self.xi() * f
+    }
+
+    /// Command-line name: `off`, `sarkar`, `wilcox`, `zeman`, `wilcox-shear`.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "off" | "none" => Compressibility::Off,
+            "sarkar" => Compressibility::Sarkar,
+            "wilcox" => Compressibility::Wilcox,
+            "zeman" => Compressibility::Zeman,
+            "wilcox-shear" | "sstc2" => Compressibility::WilcoxShear,
+            _ => return None,
+        })
+    }
+}
+
 /// Free-stream specific turbulence kinetic energy.
 pub const K_INF: f64 = 9e-9;
 
