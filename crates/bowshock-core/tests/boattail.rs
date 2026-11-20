@@ -227,7 +227,6 @@ fn bt2_gpu_vs_cpu() {
 #[cfg(feature = "gpu")]
 fn bt2_one(m: f64, variant: &str) {
     use bowshock_cfd::gpu::Precision;
-    use bowshock_cfd::gpu::Precision;
     let steps: usize = std::env::var("BT_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(140);
     let every: usize = std::env::var("BT_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     let case = case_of(m, variant);
