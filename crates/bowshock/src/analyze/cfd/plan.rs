@@ -134,7 +134,7 @@ fn sharp_nose(shape: solver::SharpShape) -> solver::NoseShape {
 }
 
 /// Whether the 3D engine (`BOWSHOCK_ENGINE=3d`) is the one the table is solved with: it follows the fins' real outlines and refuses what its mesher cannot build.
-fn three_d() -> bool {
+pub(super) fn three_d() -> bool {
     solver::Engine::from_env() == solver::Engine::Solver3
 }
 
@@ -261,13 +261,19 @@ pub fn plan(rocket: &Rocket, vehicle: &Vehicle, units: UnitSystem) -> Result<Pla
     let mut radius = first.aft_radius;
     for s in &segments[1..] {
         if (s.fore_radius - radius).abs() > 5e-4 {
-            let length = |m: f64| with_unit_scaled(m, Quantity::Length, units, 0);
-            return Err(format!(
-                "there is a step in diameter, {} to {}, at {} from the tip; the solver's body is continuous",
-                length(2.0 * radius),
-                length(2.0 * s.fore_radius),
-                length(s.station)
-            ));
+            if three_d() {
+                // the 3D engine meshes a step as a one-cell chamfer (DESIGN3D item 29); a fin root across it is refused with the fin set's reason
+                aft.push(solver::AftSpec::Step { aft_diameter: 2.0 * s.fore_radius });
+                radius = s.fore_radius;
+            } else {
+                let length = |m: f64| with_unit_scaled(m, Quantity::Length, units, 0);
+                return Err(format!(
+                    "there is a step in diameter, {} to {}, at {} from the tip; the legacy solver's body is continuous (the 3D engine takes steps)",
+                    length(2.0 * radius),
+                    length(2.0 * s.fore_radius),
+                    length(s.station)
+                ));
+            }
         }
         match s.kind {
             BodyKind::Nose(_) => return Err("a second nose cone behind the first; the solver takes one".to_string()),
@@ -376,6 +382,7 @@ impl Plan {
             match *a {
                 solver::AftSpec::Tube { length } => h.u64(10).f(length),
                 solver::AftSpec::Transition { length, aft_diameter } => h.u64(11).f(length).f(aft_diameter),
+                solver::AftSpec::Step { aft_diameter } => h.u64(12).f(aft_diameter),
             };
         }
         match &self.fins {

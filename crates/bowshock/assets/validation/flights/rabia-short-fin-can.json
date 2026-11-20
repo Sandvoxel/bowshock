@@ -1,0 +1,64 @@
+{
+ "id": "rabia-short-fin-can",
+ "name": "Rabia, short fin can (Ray Kinsel), 14 June 2008",
+ "nose": {
+  "shape": "conical",
+  "length": 13.25,
+  "diameter": 3.126,
+  "blunt_radius": 0.031
+ },
+ "body": [
+  {
+   "length": 71.5,
+   "fore_diameter": 3.126,
+   "aft_diameter": 3.126
+  },
+  {
+   "length": 1.0,
+   "fore_diameter": 3.126,
+   "aft_diameter": 3.19
+  },
+  {
+   "length": 11.5,
+   "fore_diameter": 3.19,
+   "aft_diameter": 3.19
+  }
+ ],
+ "fins": {
+  "count": 3,
+  "root_chord": 10.5,
+  "span": 4.25,
+  "sweep": 9.625,
+  "tip_chord": 0.0,
+  "thickness": 0.1875,
+  "section": "rounded",
+  "wedge_fraction": 0.0,
+  "te_to_base": 1.0
+ },
+ "roughness_in": 0.0,
+ "nozzle_diameter_in": 1.187,
+ "rail_guide": null,
+ "launch_weight_lb": 17.68,
+ "cg_in": 51.75,
+ "motor": {
+  "designation": "L730",
+  "manufacturer": "Cesaroni"
+ },
+ "site": {
+  "altitude_ft": 3400,
+  "temperature_f": 85,
+  "rod_angle_deg": 0,
+  "rod_length_ft": 10,
+  "wind_mph": 14
+ },
+ "measured": {
+  "apogee_ft": 10584,
+  "data": "barometric altimeter"
+ },
+ "rasaero": {
+  "table_ft": 10376,
+  "file_ft": 10225.2
+ },
+ "notes": "12.5 in fin can, 3.19 in, behind a 1 in conical shoulder; the can is the last 12.5 in of the 97.25 in airframe (RASAero manual Fig. 38)",
+ "source": "RASAero II Comparisons with Altitude Data, https://www.rasaero.com/comparisons-alt.htm (C. E. Rogers); geometry, weights, motor and site from the example file shipped with the free RASAero II download, https://www.rasaero.com/dl_software_ii.htm (RASAero_II_Setup_Version_1.0.2.0.zip, Examples/Rabia-ShortFinCan.CDX1)"
+}

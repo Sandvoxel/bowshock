@@ -113,3 +113,17 @@ fn uncertainty_is_reported_only_when_asked() {
     let u = on.points[0].cd_uncertainty.expect("both levels finite");
     assert!(u.is_finite(), "{u}");
 }
+
+/// A diameter step is the 3D engine's (DESIGN3D item 29): the legacy engine says so instead of meshing it.
+#[test]
+fn the_legacy_engine_refuses_a_diameter_step() {
+    let spec = BodySpec {
+        nose: NoseSpec { shape: NoseShape::TangentOgive, length: 0.3, diameter: 0.1 },
+        aft: vec![AftSpec::Tube { length: 0.3 }, AftSpec::Step { aft_diameter: 0.12 }, AftSpec::Tube { length: 0.3 }],
+    };
+    let a = Analysis::new(&spec).unwrap().engine(bowshock_core::Engine::Legacy).backend(Backend::Cpu).resolution(Resolution::Coarse);
+    match a.run(&[0.9]) {
+        Err(Error::Unsupported(why)) => assert!(why.contains("diameter step"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}

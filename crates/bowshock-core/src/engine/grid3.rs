@@ -55,6 +55,22 @@ pub struct Fins3 {
     pub planform: Option<Planform>,
 }
 
+/// The width of the zone that absorbs the move of the leading edge along the rows of a swept or tapered fin, in units of the largest move: the cells in it are
+/// stretched (or shrunk) by at most `1 + 1 / ZONE_REACH`.
+const ZONE_REACH: f64 = 3.0;
+
+/// How much longer, in units of the largest move of the leading edge, the fade of the tip's radial bending ahead of the edge is when the zone is widened.
+const RAMP_REACH: f64 = 0.3;
+
+/// Cells over the radius of a round fin edge: the first chord cell is at most this fraction of it.
+const LE_RADIUS_CELLS: f64 = 4.0;
+
+/// A zone is widened when the move of an edge is more than this fraction of the room the segment has for it.
+const ZONE_TRIGGER: f64 = 0.5;
+
+/// The height over the tip row, in units of the largest move of the edges, over which the move fades away above the fin (at least four rows).
+const FADE_REACH: f64 = 1.5;
+
 /// The chord at which a pointed or elliptical planform is cut at the tip, as a fraction of the root chord.
 pub const TIP_CHORD_FLOOR: f64 = 0.04;
 
@@ -271,6 +287,8 @@ struct FinPlan {
     /// Node range `a..=b` of the rebuilt segments under the fin root (one tube, or several segments).
     i_seg0: usize,
     i_seg1: usize,
+    /// The node where the nose ends: the farthest the sweep zone ([`ZONE_REACH`]) reaches upstream.
+    i_floor: usize,
     i_le: usize,
     i_te: usize,
     j_tip: usize,
@@ -700,7 +718,14 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     }
     // minimum chord spacing 0.3 c / nf at the edges: 0.2 resolves the blunt leading edge like 48 cells (ANF face Cp 0.78 -> 1.02) at +1 % cells, 0.1 and below diverge on the
     // example rocket (DESIGN3D item 44)
-    let mut fin_offs = two_sided_nodes(f.root_chord, nf, 0.3 * f.root_chord / nf as f64);
+    let mut edge = 0.3 * f.root_chord / nf as f64;
+    if matches!(f.profile, FinProfile::Rounded) {
+        // a round edge of radius `t / 2` stands in the grid as a polygon of a few cells: with the first cell as wide as the radius its corners turn the flow by 60 degrees and the
+        // swept thick fin of the Rabia fixture (radius 0.03 d, cell 0.031 d) grew a vacuum (p 1e-5, Mach 900) at its leading edge that no CFL cured; a first cell of a fourth of
+        // the radius (not below a tenth of the chord's cell: that and below diverged on the example rocket) settles at Mach 0.8 in 770 iterations (Draft)
+        edge = edge.min((0.5 * f.thickness / LE_RADIUS_CELLS).max(0.1 * f.root_chord / nf as f64));
+    }
+    let mut fin_offs = two_sided_nodes(f.root_chord, nf, edge);
     fin_offs[nf] = x_te_root - x_le_root;
     // the stations between the segments under the root stay nodes (the body parts are split there): the nearest chord node moves onto each
     for k in k0 + 1..=k1 {
@@ -843,10 +868,12 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         Some(pf) => pf.x_extent_up_to(span),
         None => (f.sweep.min(0.0), (f.sweep + f.tip_chord).max(f.root_chord)),
     };
-    if x_le_root + x_front < x_a - 1e-9 {
+    let x_floor = xs[host.n_up + host.n_nose];
+    if x_le_root + x_front < x_floor + ZONE_REACH.recip() * (x_le_root - x_floor) {
         return Err(Error::Unsupported(format!(
-            "the fin outline reaches {:.4} d ahead of its root leading edge, past the start of the aft segments under the root",
-            -x_front
+            "the fin outline reaches {:.4} d ahead of its root leading edge, too close to the end of the nose ({:.4} d ahead of the root)",
+            -x_front,
+            x_le_root - x_floor
         )));
     }
     if x_le_root + x_back > x_te_root + room {
@@ -856,7 +883,21 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
             if i_te == i_seg1 { " (flush with the base)" } else { "" }
         )));
     }
-    Ok(FinPlan { i_seg0: a, i_seg1, i_le, i_te, j_tip, x_le_root, x_te_root, r_t, r_tip: r_ref + span, span, planform: f.planform.clone(), sj })
+    Ok(FinPlan {
+        i_seg0: a,
+        i_seg1,
+        i_floor: host.n_up + host.n_nose,
+        i_le,
+        i_te,
+        j_tip,
+        x_le_root,
+        x_te_root,
+        r_t,
+        r_tip: r_ref + span,
+        span,
+        planform: f.planform.clone(),
+        sj,
+    })
 }
 
 /// Azimuth span and symmetry of the domain of `p`.
@@ -994,7 +1035,35 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
     // half-thickness of the fin layer at every node (`NaN` on the axis and below the body surface)
     let mut half_w = Vec::new();
     if let Some((pl, f)) = &plan {
+        // planform of the row `jj` above the surface
+        let row = |jj: usize| -> (f64, f64, f64) {
+            let frac = pl.span_fraction(jj);
+            match &pl.planform {
+                Some(pf) => {
+                    let h = frac * pl.span;
+                    (frac, pl.x_le_root + pf.x_le(h), pf.chord(h))
+                }
+                None => (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac),
+            }
+        };
+        let mut up = 0.0f64;
+        for jj in 0..=pl.j_tip {
+            up = up.max((row(jj).1 - pl.x_le_root).abs());
+        }
+        // the zone is only widened where the segment's own would stretch its cells by more than `ZONE_TRIGGER` (the move over the room it has, or over the width of the one cell
+        // that absorbs it when it has none): a fin with room keeps the grid it always had. Only the leading edge's: behind the trailing edge the one cell takes the move of the
+        // taper as it always did (the example rocket's trailing edge moves 0.13 d over a 0.015 d cell, and its table is as it was)
+        let room_up = if pl.i_seg0 < pl.i_le { pl.x_le_root - xs[pl.i_seg0] } else { xs[pl.i_le] - xs[pl.i_le.saturating_sub(1)] };
+        let widened = up > ZONE_TRIGGER * room_up;
+        // columns ahead of the leading edge: the rows follow the tip's cylinder at full weight over the 4 columns next to the edge and fade away over the next 4; when the sweep
+        // zone is widened ([`ZONE_REACH`]) the sweep shears the rows of those columns by up to the move of the edge, and a fade over cells that short bends them (a slope of
+        // 0.44 against the shear's 0.42 at Mach 2.3 of the Rabia grid) into a fold: the fade is `RAMP_REACH` times the move longer
         let wcol = |i: usize| -> f64 {
+            if widened && i < pl.i_le {
+                let dx = |n: usize| xs[pl.i_le] - xs[pl.i_le.saturating_sub(n)];
+                let (x4, x8) = (dx(4), dx(8).max(dx(4) + RAMP_REACH * up));
+                return if xs[pl.i_le] - xs[i] <= x4 { 1.0 } else { (1.0 - (xs[pl.i_le] - xs[i] - x4) / (x8 - x4)).max(0.0) };
+            }
             let d = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
             if d <= 4 {
                 1.0
@@ -1019,26 +1088,25 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 rn[j * (ni + 1) + i] = r_in[i] + s * (r_far - r_in[i]);
             }
         }
-        // planform of the row `jj` above the surface
-        let row = |jj: usize| -> (f64, f64, f64) {
-            let frac = pl.span_fraction(jj);
-            match &pl.planform {
-                Some(pf) => {
-                    let h = frac * pl.span;
-                    (frac, pl.x_le_root + pf.x_le(h), pf.chord(h))
-                }
-                None => (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac),
-            }
-        };
-        // sweep and taper: piecewise-linear remap of the segment nodes
+        // sweep and taper: piecewise-linear remap of the segment nodes. The nodes ahead of the leading edge absorb what the edge moves by (the leading edge of the tip row is
+        // `sweep` aft of the root's): over a zone [`ZONE_REACH`] times the largest move wide, so that no cell takes it alone. The zone starts at the segment's start node and,
+        // when the segment has less room than that, goes on past it to the end of the nose: a fin that starts at the start of its segment (a fin can) stretched the one cell
+        // ahead of it by the whole sweep (2.6 d for 3.1 d of sweep, 2 400 times the volume of the cell behind it)
         let nodes0: Vec<f64> = xs.clone();
-        for jj in 0..=(pl.j_tip + 3).min(nj - j_off) {
+        let i_up =
+            if widened { (pl.i_floor..=pl.i_seg0).rev().find(|&i| pl.x_le_root - nodes0[i] >= ZONE_REACH * up).unwrap_or(pl.i_floor) } else { pl.i_seg0 };
+        // the move fades away over the rows above the tip: four, or when the zone was widened as many as lift the row `FADE_REACH` times the move above the tip (a row a move
+        // higher is a shear of 45 degrees, and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
+        // did at 75 degrees)
+        let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
+        let nfade = if widened { (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip) } else { 4 };
+        for jj in 0..(pl.j_tip + nfade).min(nj - j_off + 1) {
             let j = j_off + jj;
-            let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / 4.0 };
+            let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / nfade as f64 };
             let (_, x_le, chord) = row(jj);
-            let mut knots = vec![(pl.i_seg0, nodes0[pl.i_seg0], nodes0[pl.i_seg0])];
-            if pl.i_le == pl.i_seg0 {
-                knots.clear();
+            let mut knots = Vec::new();
+            if i_up < pl.i_le {
+                knots.push((i_up, nodes0[i_up], nodes0[i_up]));
             }
             knots.push((pl.i_le, pl.x_le_root, x_le));
             knots.push((pl.i_te, pl.x_te_root, x_le + chord));
@@ -1334,10 +1402,139 @@ pub fn fin_stack_report(g: &Grid3) -> Option<StackReport> {
     Some(StackReport { y1: height(first), growth_max, cells: ks.len() })
 }
 
+#[doc(hidden)]
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn len3(a: [f64; 3]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+/// Diagnostic: prints the quality numbers of the fluid cells of `g`: volume, edge lengths, aspect ratio, the angles between the mean edge directions, the volume ratio to the neighbours.
+pub fn print_quality(label: &str, g: &Grid3) {
+    let (ni, nj, nk) = (g.ni, g.nj, g.nk);
+    let node = |i: usize, j: usize, k: usize| {
+        let n = (k * (nj + 1) + j) * (ni + 1) + i;
+        [g.x[n], g.y[n], g.z[n]]
+    };
+    let at = |i: usize, j: usize, k: usize| {
+        let c = g.xc[g.cell(i, j, k)];
+        format!("({i},{j},{k}) x {:.4} r {:.4} th {:.1}", c[0], c[1].hypot(c[2]), c[2].atan2(c[1]).to_degrees())
+    };
+    // (value, i, j, k)
+    let mut vol_min = (f64::INFINITY, 0, 0, 0);
+    let mut aspect = (0.0f64, 0, 0, 0);
+    let mut skew = (90.0f64, 0, 0, 0);
+    let mut ratio = [(0.0f64, 0, 0, 0); 3];
+    let mut fluid = 0usize;
+    let mut aspect_hist = [0usize; 5];
+    let mut vol_sum = 0.0;
+    let dims = |i: usize, j: usize, k: usize| {
+        let m = |a: [f64; 3], b: [f64; 3]| len3(sub3(a, b));
+        [m(node(i + 1, j, k), node(i, j, k)), m(node(i, j + 1, k), node(i, j, k)), m(node(i, j, k + 1), node(i, j, k))]
+    };
+    for k in 0..nk {
+        for j in 0..nj {
+            for i in 0..ni {
+                let c = g.cell(i, j, k);
+                if g.part[c] != bowshock_cfd::grid3::PART_FLUID {
+                    continue;
+                }
+                fluid += 1;
+                let v = g.vol[c];
+                vol_sum += v;
+                if v < vol_min.0 {
+                    vol_min = (v, i, j, k);
+                }
+                let mut e = [[0.0; 3]; 3];
+                for a in 0..2 {
+                    for b in 0..2 {
+                        let d = [
+                            sub3(node(i + 1, j + a, k + b), node(i, j + a, k + b)),
+                            sub3(node(i + b, j + 1, k + a), node(i + b, j, k + a)),
+                            sub3(node(i + a, j + b, k + 1), node(i + a, j + b, k)),
+                        ];
+                        for (m, dm) in d.iter().enumerate() {
+                            for q in 0..3 {
+                                e[m][q] += 0.25 * dm[q];
+                            }
+                        }
+                    }
+                }
+                let l = [len3(e[0]), len3(e[1]), len3(e[2])];
+                // the cells on the axis are degenerate by construction: the aspect and the ratios are of the others
+                if g.is_axis(i, j) {
+                    continue;
+                }
+                let asp = l.iter().cloned().fold(0.0, f64::max) / l.iter().cloned().fold(f64::INFINITY, f64::min);
+                if asp > aspect.0 {
+                    aspect = (asp, i, j, k);
+                }
+                let bin = if asp < 10.0 {
+                    0
+                } else if asp < 100.0 {
+                    1
+                } else if asp < 1000.0 {
+                    2
+                } else if asp < 10000.0 {
+                    3
+                } else {
+                    4
+                };
+                aspect_hist[bin] += 1;
+                for (m, n) in [(0, 1), (0, 2), (1, 2)] {
+                    let cs = (e[m][0] * e[n][0] + e[m][1] * e[n][1] + e[m][2] * e[n][2]) / (l[m] * l[n]);
+                    // angle between the two edge directions as lines: 90 is orthogonal
+                    let ang = cs.abs().min(1.0).acos().to_degrees();
+                    if ang < skew.0 {
+                        skew = (ang, i, j, k);
+                    }
+                }
+                for (d, (di, dj, dk)) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)].into_iter().enumerate() {
+                    let (i2, j2, k2) = (i + di, j + dj, k + dk);
+                    if i2 < ni && j2 < nj && k2 < nk && g.part[g.cell(i2, j2, k2)] == bowshock_cfd::grid3::PART_FLUID {
+                        let (a, b) = (g.vol[c], g.vol[g.cell(i2, j2, k2)]);
+                        let r = (a / b).max(b / a);
+                        if r.is_finite() && r > ratio[d].0 {
+                            ratio[d] = (r, i, j, k);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "GRID {label}: {ni} x {nj} x {nk} = {} cells, {fluid} fluid, fluid volume {vol_sum:.4e} (aspect, angles and ratios without the axis cells)",
+        ni * nj * nk
+    );
+    println!("GRID {label}: min volume {:.3e} at {}", vol_min.0, at(vol_min.1, vol_min.2, vol_min.3));
+    println!(
+        "GRID {label}: max aspect {:.1} at {}; cells with aspect <10 / <100 / <1e3 / <1e4 / more: {aspect_hist:?}",
+        aspect.0,
+        at(aspect.1, aspect.2, aspect.3)
+    );
+    println!("GRID {label}: min angle between cell edges {:.2} deg at {}", skew.0, at(skew.1, skew.2, skew.3));
+    for (d, n) in ["i", "j", "k"].iter().enumerate() {
+        let (r, i, j, k) = ratio[d];
+        if r == 0.0 {
+            continue;
+        }
+        let nb = [(1, 0, 0), (0, 1, 0), (0, 0, 1)][d];
+        println!(
+            "GRID {label}: max volume ratio of neighbours in {n} {:.2} at {} (edges {:?} against {:?})",
+            ratio[d].0,
+            at(i, j, k),
+            dims(i, j, k),
+            dims(i + nb.0, j + nb.1, k + nb.2)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::body_grid::{BaseBody, Body, Nose};
+    use crate::engine::body_grid::{BaseBody, Body, Nose, Segment};
     use crate::engine::case::Case;
     use crate::engine::meshing::Wake;
     use crate::engine::numerics::Numerics;
@@ -1502,6 +1699,46 @@ mod tests {
             }
             eprintln!("nk = {nk}: max k stretching ratio next to fin layers: {all:.3} (footprint cells: {foot:.3})");
         }
+    }
+
+    /// A fin that starts where its segment starts (the fin can of a rocket) and is swept: the sweep is spread over the cells ahead of the leading edge instead of stretching the one cell next to the edge, which was 2 400 times the volume of the fin cell behind it for the delta fin of the
+    /// Rabia fixture (DESIGN3D item 57).
+    #[test]
+    fn the_sweep_of_a_fin_at_the_start_of_its_segment_is_spread_over_many_cells() {
+        let mut p = params(
+            0,
+            Some(Fins3 {
+                count: 4,
+                root_chord: 3.0,
+                tip_chord: 0.0,
+                span: 1.0,
+                sweep: 2.4,
+                thickness: 0.08,
+                te_to_base: 0.0,
+                profile: FinProfile::Rounded,
+                planform: None,
+            }),
+        );
+        let nose = Nose::Cone { half_angle: 10f64.to_radians() };
+        p.sting.body =
+            BaseBody { body: Body { nose }, segments: vec![Segment { length: 6.0, slope: 0.0 }, Segment { length: 3.0, slope: 0.0 }], sting_radius: 0.0 };
+        p.sting.n_seg = vec![24, 16];
+        let g = body_grid3(&p).unwrap();
+        let j_tip = g.solid[0].j.end;
+        let first = p.sting.n_up + p.sting.n_nose;
+        let mut worst = (1.0f64, 0, 0);
+        // the rows up to half the span: near a pointed tip the fin piece itself shrinks to nothing
+        for j in 1..j_tip / 2 {
+            let xs: Vec<f64> = (0..=g.ni).map(|i| g.x[j * (g.ni + 1) + i]).collect();
+            // up to the trailing edge: behind it the one cell takes the move of the taper, as it always did
+            let (q, i) = max_ratio(&xs[..=g.solid[0].i.end], first);
+            if q > worst.0 {
+                worst = (q, i, j);
+            }
+        }
+        eprintln!("sweep at a segment start: widest neighbour ratio {:.2} at i {} row {}", worst.0, worst.1, worst.2);
+        // the cell ahead of the edge is the segment's own, 3 times the finer edge cell of the round section (more in the rows of a tapering chord): it was 2 400
+        assert!(worst.0 < 6.0, "neighbouring cell widths differ by {:.1} at i {} of row {}", worst.0, worst.1, worst.2);
     }
 
     /// Axial node positions along the wall row of a 3D grid.

@@ -990,6 +990,9 @@ impl Analysis {
         if self.engine == Engine::Solver3 {
             return self.run_solver3(conditions);
         }
+        if self.body.segments.iter().any(|s| s.is_step()) {
+            return Err(Error::Unsupported("a diameter step needs the 3D engine (Engine::Solver3); the legacy engine's body is continuous".into()));
+        }
         let (drag_at, lift_at): (Vec<usize>, Vec<usize>) = (0..conditions.len()).partition(|&k| conditions[k].alpha_deg == 0.0);
         let lift_conditions: Vec<Condition> = lift_at.iter().map(|&k| conditions[k]).collect();
         if !lift_conditions.is_empty() {

@@ -67,6 +67,7 @@ fn the_example_rocket_maps_to_a_body_and_four_fins() {
             .iter()
             .map(|a| match a {
                 solver::AftSpec::Tube { length } | solver::AftSpec::Transition { length, .. } => *length,
+                solver::AftSpec::Step { .. } => 0.0,
             })
             .sum::<f64>();
     assert!((len - vehicle.length()).abs() < 1e-9, "the body is as long as the rocket: {len} vs {}", vehicle.length());
@@ -172,10 +173,12 @@ fn the_fins_outline_follows_the_document_for_the_3d_engine() {
 #[test]
 fn geometry_the_solver_cannot_take_is_refused_with_a_reason() {
     let (rocket, mut vehicle) = example();
-    // A step in diameter.
-    vehicle.body[1].fore_radius += 0.01;
-    let why = plan(&rocket, &vehicle, UnitSystem::default()).unwrap_err();
-    assert!(why.contains("step in diameter"), "{why}");
+    // A step in diameter: the legacy engine's body is continuous (the 3D engine's steps are in `a_step_in_diameter_is_solved_by_the_3d_engine`).
+    if !three_d() {
+        vehicle.body[1].fore_radius += 0.01;
+        let why = plan(&rocket, &vehicle, UnitSystem::default()).unwrap_err();
+        assert!(why.contains("step in diameter"), "{why}");
+    }
     // A pod: a zero-size separator ahead of the core.
     let (rocket, mut vehicle) = example();
     vehicle.body.insert(0, separator());
@@ -301,4 +304,45 @@ fn a_blunted_nose_is_solved_as_the_blunted_profile() {
         assert!((solved - kind.radius_at(z)).abs() < 1e-9, "z {z}: solver {solved} vs model {}", kind.radius_at(z));
         assert!((solved - first.radius_at(z)).abs() < 1e-9, "z {z}: solver {solved} vs sim {}", first.radius_at(z));
     }
+}
+
+/// The 3D engine meshes a diameter step as a chamfer of one cell (DESIGN3D item 29): a shoulder behind the nose and a booster stepping down map to
+/// `AftSpec::Step`, keep the rocket's length and reference diameter; one too tall for the mesher, and a fin root across a step, are refused with a reason.
+/// The legacy engine (the test's default) refuses every step.
+#[test]
+fn a_step_in_diameter_is_solved_by_the_3d_engine() {
+    let (rocket, vehicle) = example();
+    let n = vehicle.body.len();
+    // the radius jumps by 4 mm at the start of the last body segment
+    let mut stepped = vehicle.clone();
+    stepped.body[n - 1].fore_radius += 0.004;
+    stepped.body[n - 1].aft_radius = stepped.body[n - 1].fore_radius;
+    if !three_d() {
+        let why = plan(&rocket, &stepped, UnitSystem::default()).unwrap_err();
+        assert!(why.contains("step in diameter") && why.contains("3D engine"), "{why}");
+        return;
+    }
+    let mapped = plan(&rocket, &stepped, UnitSystem::default()).expect("the 3D engine takes a step");
+    let steps = mapped.body.aft.iter().filter(|a| matches!(a, solver::AftSpec::Step { .. })).count();
+    assert_eq!(steps, 1, "{:?}", mapped.body.aft);
+    let len = mapped.body.nose.length
+        + mapped
+            .body
+            .aft
+            .iter()
+            .map(|a| match a {
+                solver::AftSpec::Tube { length } | solver::AftSpec::Transition { length, .. } => *length,
+                solver::AftSpec::Step { .. } => 0.0,
+            })
+            .sum::<f64>();
+    // the chamfer is taken from the section after it: the body has the rocket's length (to the chamfer, when it is the last)
+    let to_internal = mapped.body.to_internal().unwrap().0;
+    assert!((to_internal.x_base() * mapped.body.nose.diameter - stepped.length()).abs() < 1e-9, "{len}");
+    assert!((mapped.body.reference_diameter() - 2.0 * stepped.body[n - 1].fore_radius.max(vehicle.body[1].fore_radius)).abs() < 1e-9);
+    // a step taller than the mesher takes is the engine's error, naming the step
+    let mut tall = vehicle.clone();
+    tall.body[n - 1].fore_radius += 0.7 * vehicle.reference_diameter;
+    tall.body[n - 1].aft_radius = tall.body[n - 1].fore_radius;
+    let why = plan(&rocket, &tall, UnitSystem::default()).unwrap_err();
+    assert!(why.contains("step of"), "{why}");
 }

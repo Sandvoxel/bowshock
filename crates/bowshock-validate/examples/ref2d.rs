@@ -74,6 +74,7 @@ fn body_json(b: &BodySpec) -> Value {
         .map(|a| match a {
             AftSpec::Tube { length } => json!({"Tube": {"length": length}}),
             AftSpec::Transition { length, aft_diameter } => json!({"Transition": {"length": length, "aft_diameter": aft_diameter}}),
+            AftSpec::Step { aft_diameter } => json!({"Step": {"aft_diameter": aft_diameter}}),
         })
         .collect();
     json!({"nose": nose_json(&b.nose), "aft": aft})

@@ -37,6 +37,9 @@ fn v5(f: impl FnMut(usize) -> F) -> V5 {
 #[derive(Clone)]
 struct Blk5([E; 25]);
 
+/// A cell's density and pressure may not fall below this fraction of the free stream's by an implicit update (`LazySolver3::damping3`).
+const POSITIVITY_FLOOR: f64 = 1e-2;
+
 impl Blk5 {
     fn zero() -> Blk5 {
         Blk5(std::array::from_fn(|_| E::Z))
@@ -1100,14 +1103,18 @@ impl LazySolver3 {
         v5(|k| &du0[k] + &corr[k])
     }
 
-    /// Positivity damping: `alpha` is the first of `1, 1/2, .., 1/128` for which `U + alpha dU` has `rho > 0`, `p > 0` and five finite components, `0` if
-    /// there is none. Decided in f32 from the f32 view of `U`.
+    /// Positivity damping: `alpha` is the first of `1, 1/2, .., 1/128` for which `U + alpha dU` has five finite components and a density and a pressure that are above
+    /// `POSITIVITY_FLOOR` of the free stream's or not below the cell's own (a cell that is already under the floor may rise), `0` if there is none. Decided in f32 from the f32
+    /// view of `U`. The floor (it was `> 0`) keeps a cell beside a swept thick fin edge from running down to a vacuum (p 1e-5, Mach 900) that no CFL cures: DESIGN3D item 57b.
     fn damping3(&self, u: &V5, du: &V5) -> F {
+        let fs = self.cfg.freestream;
+        let (rho_fl, p_fl) = ((POSITIVITY_FLOOR * fs[0]) as f32, (POSITIVITY_FLOOR * fs[4]) as f32);
+        let w0 = cons_to_prim_f5(u);
         let ok = |a: f32| -> Array<bool> {
             let q: V5 = v5(|k| &u[k] + a * &du[k]);
             let w = cons_to_prim_f5(&q);
             let finite = q.iter().map(|x| x.is_finite()).reduce(|a, b| a & b).expect("the conserved state has five components");
-            w[0].gt(0.0f32) & w[4].gt(0.0f32) & finite
+            (w[0].gt(rho_fl) | w[0].ge(&w0[0])) & w[0].gt(0.0f32) & (w[4].gt(p_fl) | w[4].ge(&w0[4])) & w[4].gt(0.0f32) & finite
         };
         let last = 1.0f32 / 128.0;
         let mut alpha = select(&ok(last), last, 0.0f32);

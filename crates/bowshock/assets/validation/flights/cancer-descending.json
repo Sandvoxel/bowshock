@@ -1,0 +1,57 @@
+{
+ "id": "cancer-descending",
+ "name": "Cancer Descending (Corky Borgman), LDRS 26, Jean Dry Lake",
+ "nose": {
+  "shape": "tangent-ogive",
+  "length": 24,
+  "diameter": 6,
+  "blunt_radius": 0.0
+ },
+ "body": [
+  {
+   "length": 85,
+   "fore_diameter": 6,
+   "aft_diameter": 6
+  }
+ ],
+ "fins": {
+  "count": 3,
+  "root_chord": 19,
+  "span": 9,
+  "sweep": 16,
+  "tip_chord": 5.5,
+  "thickness": 0.375,
+  "section": "rounded",
+  "wedge_fraction": 0.0,
+  "te_to_base": 5.05
+ },
+ "roughness_in": 0.0,
+ "nozzle_diameter_in": 0.0,
+ "rail_guide": {
+  "diameter": 0.5,
+  "height": 0.5
+ },
+ "launch_weight_lb": 49.84,
+ "cg_in": 74.0,
+ "motor": {
+  "designation": "M1297",
+  "manufacturer": "AeroTech"
+ },
+ "site": {
+  "altitude_ft": 2750,
+  "temperature_f": 100,
+  "rod_angle_deg": 0,
+  "rod_length_ft": 10,
+  "wind_mph": 0
+ },
+ "measured": {
+  "apogee_ft": 6188,
+  "data": "barometric altimeters: Transolve 6400 ft and Olsen 5975 ft, averaged"
+ },
+ "rasaero": {
+  "table_ft": 6328,
+  "file_ft": 6327.6
+ },
+ "notes": "the swept fin's tip trailing edge (sweep 16 + tip chord 5.5 = 21.5 in) is 2.5 in behind the root trailing edge (19 in) and the file puts it 0.5 in behind the base; the 3D mesher takes a fin outline that reaches behind the root trailing edge by at most half the root's distance to the base, so the fin is moved 3 in forward (te_to_base 5.05 in instead of 2.0): same fin, different station",
+ "source": "RASAero II Comparisons with Altitude Data, https://www.rasaero.com/comparisons-alt.htm (C. E. Rogers); geometry, weights, motor and site from the example file shipped with the free RASAero II download, https://www.rasaero.com/dl_software_ii.htm (RASAero_II_Setup_Version_1.0.2.0.zip, Examples/CancerDescending.CDX1)"
+}
