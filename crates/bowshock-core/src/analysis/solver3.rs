@@ -155,18 +155,54 @@ fn extras_of(case: &Case3, g: &Grid3, ratio: &[f64], tractions: &[bowshock_cfd::
 /// The case of the run that follows the current one ([`Analysis::hint_next`]), until the GPU sweep starts building it ahead.
 static NEXT_HINT: std::sync::Mutex<Option<Case3>> = std::sync::Mutex::new(None);
 
-/// Starts the host build of the hinted case, once (the hint is taken).
+/// A GPU solver of the run that follows, being built on a background thread while the GPU iterates the current point: the key it answers to ([`Case3::build_key`], extended
+/// precision) and the thread. One is held.
+#[cfg(feature = "gpu")]
+static AHEAD: std::sync::Mutex<Option<((String, bool), std::thread::JoinHandle<Result<crate::engine::gpu3::GpuRunner3, Error>>)>> = std::sync::Mutex::new(None);
+
+/// Whether the GPU solver of the next run is built ahead too (the host solver is, always): not with `BOWSHOCK_NO_RUNNER_AHEAD` (the measurement switch of the A/B runs).
+#[cfg(feature = "gpu")]
+fn runner_ahead() -> bool {
+    std::env::var_os("BOWSHOCK_NO_RUNNER_AHEAD").is_none()
+}
+
+/// Starts the build of the hinted case, once (the hint is taken): its GPU solver (host solver, the geometry arrays and the state on the device) on a background thread, or only its
+/// host solver. Luma's context is shared between threads, each with its own recordings: the uploads of the next run overlap with the iterations of this one.
 #[cfg(feature = "gpu")]
 fn fire_next_hint() {
-    if let Some(case) = NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+    let Some(case) = NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else { return };
+    if !runner_ahead() {
         case.prefetch_solver();
+        return;
     }
+    let key = (case.build_key(), false);
+    let spawned = std::thread::Builder::new()
+        .name("prefetch-runner".into())
+        .spawn(move || crate::engine::gpu3::GpuRunner3::new(&case, bowshock_cfd::gpu::Precision::F32));
+    if let Ok(handle) = spawned {
+        *AHEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((key, handle));
+    }
+}
+
+/// The GPU solver built ahead for `key`, waited for when it is still being built; `None` when there is none, it is for another case or it failed (the caller builds its own).
+#[cfg(feature = "gpu")]
+fn take_ahead(key: &(String, bool)) -> Option<crate::engine::gpu3::GpuRunner3> {
+    let (k, handle) = AHEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?;
+    if k != *key {
+        return None;
+    }
+    let t = std::time::Instant::now();
+    let mut runner = handle.join().ok()?.ok()?;
+    runner.built_ahead(t.elapsed().as_secs_f64());
+    Some(runner)
 }
 
 /// Ends the building ahead (the end of a solve): the hint is dropped and the solvers built ahead and not taken are let go.
 #[doc(hidden)]
 pub fn release_prefetch() {
     *NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    #[cfg(feature = "gpu")]
+    drop(AHEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
     crate::engine::cache3::release_prebuilt();
 }
 
@@ -522,7 +558,12 @@ impl Gpu3 {
             Some(s) => GpuState { reused: true, ..s },
             None => {
                 let precision = if extended { bowshock_cfd::gpu::Precision::Extended } else { bowshock_cfd::gpu::Precision::F32 };
-                GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key, reused: false }
+                let ahead = if extended { None } else { take_ahead(&(case.build_key(), false)) };
+                let runner = match ahead {
+                    Some(runner) => runner,
+                    None => crate::engine::gpu3::GpuRunner3::new(case, precision)?,
+                };
+                GpuState { runner, key, reused: false }
             }
         };
         // the iterations of a finned point are the time the next run's host set-up is built in (a wedge's are too short to hide a build in)
@@ -531,8 +572,8 @@ impl Gpu3 {
         }
         let p = match start {
             Some(start) => {
-                let (u, turb) = start.on(case, &state.runner.host.grid);
-                state.runner.gpu.set_state_turb(&u, turb.as_deref())?;
+                let (u, turb) = bowshock_cfd::timing::timed("start_field", || start.on(case, &state.runner.host.grid));
+                bowshock_cfd::timing::timed("start_upload", || state.runner.gpu.set_state_turb(&u, turb.as_deref()))?;
                 if let Start::Neighbour { cfl, .. } = start {
                     state.runner.start_cfl = *cfl;
                 }
@@ -687,6 +728,15 @@ impl Analysis {
         drop(s);
         let mut notes = bowshock_cfd::timing::take();
         notes.push(("cells", cells as f64));
+        // the rest of a GPU runner's set-up (the geometry arrays and the wall faces) on Luma's CPU backend: the host work of it, the device's copy cost left out
+        #[cfg(feature = "gpu")]
+        {
+            let t = std::time::Instant::now();
+            let runner = crate::engine::gpu3::GpuRunner3::new_cpu(&case, bowshock_cfd::gpu::Precision::F32)?;
+            let total = t.elapsed().as_secs_f64();
+            notes.extend(runner.setup_parts().iter().copied());
+            notes.push(("runner_new", total));
+        }
         let wedge_s = if seed {
             let wedge = self.seed_case(&case, c, level)?;
             let t = std::time::Instant::now();
@@ -707,9 +757,10 @@ impl Analysis {
         if crate::engine::timing::no_fixedcost() || self.engine != Engine::Solver3 || self.warm_start || next.is_empty() || self.check_solver3(next).is_err() {
             return;
         }
-        let first = next.iter().copied().min_by(|a, b| {
-            (a.alpha_deg != 0.0).cmp(&(b.alpha_deg != 0.0)).then(a.mach.total_cmp(&b.mach)).then(a.alpha_deg.total_cmp(&b.alpha_deg))
-        });
+        let first = next
+            .iter()
+            .copied()
+            .min_by(|a, b| (a.alpha_deg != 0.0).cmp(&(b.alpha_deg != 0.0)).then(a.mach.total_cmp(&b.mach)).then(a.alpha_deg.total_cmp(&b.alpha_deg)));
         let machs: Vec<f64> = next.iter().map(|c| c.mach).collect();
         let case = first.and_then(|c| {
             let flow = self.wall_flow(&machs).ok()?;

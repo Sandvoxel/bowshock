@@ -98,12 +98,30 @@ pub struct GpuRunner3 {
     pub end: Option<EndReadings>,
     /// The finer parts of the set-up (see [`PointTiming::parts`]), moved to the timing of the first run.
     setup_parts: Vec<(&'static str, f64)>,
+    /// No run yet: the first run's timing carries the set-up (build, context, upload) whether it is warm (a seeded or neighbour start) or not.
+    fresh: bool,
 }
 
 impl GpuRunner3 {
     /// Builds the host solver of `case` (viscous with SST when `Case3::viscous` is set: the wall forces of the runner then include the shear of the no-slip faces) and
     /// uploads it to the default GPU context.
     pub fn new(case: &Case3, prec: Precision) -> Result<GpuRunner3, Error> {
+        let t0 = Instant::now();
+        let ctx = luma::default_context()?;
+        if ctx.is_cpu() {
+            return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
+        }
+        GpuRunner3::new_in(case, prec, ctx, t0.elapsed().as_secs_f64())
+    }
+
+    /// [`GpuRunner3::new`] on Luma's native CPU backend (the host-side cost of the set-up measured without a GPU: `Analysis::host_build_probe`; the tests of a runner built on another
+    /// thread).
+    #[doc(hidden)]
+    pub fn new_cpu(case: &Case3, prec: Precision) -> Result<GpuRunner3, Error> {
+        GpuRunner3::new_in(case, prec, luma::Context::cpu()?, 0.0)
+    }
+
+    fn new_in(case: &Case3, prec: Precision, ctx: luma::Context, ctx_seconds: f64) -> Result<GpuRunner3, Error> {
         let _ = bowshock_cfd::timing::take();
         let t_build = Instant::now();
         // the grid (mesher, face geometry) comes from the process-wide cache: one `Analysis::run` per Mach node rebuilds neither it nor, with the shared default
@@ -112,11 +130,6 @@ impl GpuRunner3 {
         let visc = host.rans().map(|r| r.visc);
         let build_seconds = t_build.elapsed().as_secs_f64();
         let t0 = Instant::now();
-        let ctx = luma::default_context()?;
-        let ctx_seconds = t0.elapsed().as_secs_f64();
-        if ctx.is_cpu() {
-            return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
-        }
         bowshock_cfd::timing::timed("make_room", || make_room(&ctx, &host, prec))?;
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
@@ -133,11 +146,26 @@ impl GpuRunner3 {
             cfl_events: Vec::new(),
             start_cfl: None,
             end: None,
+            fresh: true,
             setup_parts: Vec::new(),
         };
         bowshock_cfd::timing::timed("wall_faces", || runner.upload_wall_faces(case))?;
         runner.setup_parts = bowshock_cfd::timing::take();
         Ok(runner)
+    }
+
+    /// This runner was built ahead, on a background thread, and waited `wait` seconds for: its set-up time is not the point's (timing only: the seconds of the build and the upload
+    /// become the parts `ahead_build` and `ahead_upload`, `ahead_wait` is what the point waited).
+    pub(crate) fn built_ahead(&mut self, wait: f64) {
+        self.setup_parts.push(("ahead_build", std::mem::take(&mut self.build_seconds)));
+        self.setup_parts.push(("ahead_upload", std::mem::take(&mut self.upload_seconds)));
+        self.setup_parts.push(("ahead_wait", wait));
+    }
+
+    /// The named parts of the set-up of this runner (see [`PointTiming::parts`]); what [`GpuRunner3::run_on`] has not moved to its timing yet.
+    #[doc(hidden)]
+    pub fn setup_parts(&self) -> &[(&'static str, f64)] {
+        &self.setup_parts
     }
 
     /// Uploads the wall faces of the force integration (`run3::wall_faces`, in the order of the CPU integration) to the device.
@@ -323,9 +351,13 @@ impl GpuRunner3 {
         let t_run = Instant::now();
         let g = &self.host.grid;
         let mut tm = PointTiming { dim: 3, mach: case.mach, alpha_deg: case.alpha.to_degrees(), warm, cells: g.ni * g.nj * g.nk, ..Default::default() };
-        if !warm {
+        if std::mem::take(&mut self.fresh) {
             (tm.build_s, tm.ctx_s, tm.upload_s) = (self.build_seconds, self.ctx_seconds, self.upload_seconds);
             tm.parts = std::mem::take(&mut self.setup_parts);
+            // what the caller did between the set-up and this run (the carried start field of a seeded run)
+            for (k, v) in bowshock_cfd::timing::take() {
+                tm.add(k, v);
+            }
         }
         let n = &case.numerics;
         let cfg = Config3 {
@@ -487,9 +519,26 @@ impl GpuRunner3 {
 
 #[cfg(test)]
 mod tests {
-    use super::fits;
+    use super::{fits, GpuRunner3};
+    use crate::engine::case3::Case3;
+    use bowshock_cfd::gpu::Precision;
 
     const GIB: u64 = 1 << 30;
+
+    /// A solver built on another thread (the next run's, built while the GPU iterates this one: `analysis::solver3` `fire_next_hint`) runs on this thread exactly as one built here:
+    /// the device arrays of its geometry are the same, whichever thread uploaded them (Luma's CPU backend: no GPU needed).
+    #[test]
+    fn a_runner_built_on_another_thread_runs_as_one_built_here() {
+        let mut case = Case3::tiny_anf(2.0, 0.0).euler_equations();
+        case.numerics.max_iter = 40;
+        let mut here = GpuRunner3::new_cpu(&case, Precision::F32).unwrap();
+        let there = std::thread::scope(|s| s.spawn(|| GpuRunner3::new_cpu(&case, Precision::F32)).join().unwrap()).unwrap();
+        let mut there = there;
+        let (a, b) = (here.run_on(&case, false).unwrap(), there.run_on(&case, false).unwrap());
+        assert_eq!((a.cn.to_bits(), a.ca.to_bits(), a.iterations), (b.cn.to_bits(), b.ca.to_bits(), b.iterations));
+        assert_eq!(here.host.u, there.host.u, "the same state after the same iterations");
+        assert!(a.ca.is_finite() && a.iterations > 0);
+    }
 
     /// The guard refuses what exceeds the budget less the resident bytes, says how big the grid is and what the device has, and lets everything through without a budget.
     #[test]

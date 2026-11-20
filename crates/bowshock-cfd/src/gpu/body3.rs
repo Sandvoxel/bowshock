@@ -621,6 +621,7 @@ impl LazySolver3 {
         // i boundaries `[layer, j, k]`
         let iface_at =
             |i: usize| -> Vec<&Face3> { (0..nk).flat_map(|k| (0..nj).flat_map(move |j| [(k * nj + j) * (ni + 1) + i; 2])).map(|q| &grid.iface[q]).collect() };
+        let t_bc = std::time::Instant::now();
         let imin = normals(iface_at(0), -1.0, [2, nj, nk])?;
         let imax = normals(iface_at(ni), 1.0, [2, nj, nk])?;
         // j boundaries `[i, layer, k]`
@@ -648,8 +649,12 @@ impl LazySolver3 {
             (0..2).flat_map(|_| (0..nj).flat_map(move |j| (0..ni).map(move |i| (k * nj + j) * ni + i))).map(|q| &grid.kface[q]).collect()
         };
         let ksym = [normals(kplane(0), 1.0, [ni, nj, 2])?, normals(kplane(nk), 1.0, [ni, nj, 2])?];
+        crate::timing::note("g_boundaries", t_bc.elapsed().as_secs_f64());
         // the axis runs: the ghost rows below the row of a run are the weighted state across the axis
+        let t_ax = std::time::Instant::now();
         let axis = crate::axis3::AxisMap::new(grid).runs.iter().map(|run| AxisGeo3::new(ctx, grid, run)).collect::<Result<Vec<_>>>()?;
+        crate::timing::note("g_axis", t_ax.elapsed().as_secs_f64());
+        let t_geo = std::time::Instant::now();
         let geo = Geo3 {
             f: [face_geo(&grid.iface, [ni + 1, nj, nk])?, face_geo(&grid.jface, [ni, nj + 1, nk])?, face_geo(&grid.kface, [ni, nj, nk + 1])?],
             inv_v: up(ctx, &grid.vol.iter().zip(&solid).map(|(v, s)| if *s { 0.0 } else { 1.0 / v }).collect::<Vec<_>>(), [ni, nj, nk])?,
@@ -671,7 +676,8 @@ impl LazySolver3 {
                 [None, None, None]
             },
         };
-        let lg = LGeo3::new(ctx, grid, &solid, &jet_mask)?;
+        crate::timing::note("g_faces_cells_solid", t_geo.elapsed().as_secs_f64());
+        let lg = crate::timing::timed("g_lgeo", || LGeo3::new(ctx, grid, &solid, &jet_mask))?;
         let jet_gpu = match jet {
             Some(j) => {
                 let cells: Vec<usize> = (0..nc).filter(|&c| jet_mask[c]).collect();

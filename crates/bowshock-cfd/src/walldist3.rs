@@ -243,10 +243,21 @@ impl WallBvh {
     /// Distance of `p` to the nearest wall triangle and the index (into the `faces` the hierarchy was built from) of the face the triangle belongs to
     /// (`(f64::INFINITY, u32::MAX)` without a wall).
     pub fn nearest(&self, p: [f64; 3]) -> (f64, u32) {
+        let (d, face, _) = self.nearest_from(p, u32::MAX);
+        (d, face)
+    }
+
+    /// [`WallBvh::nearest`] started from the triangle `hint` (an index into the hierarchy's triangles, as the last element of the result: the nearest triangle of a neighbouring
+    /// point; `u32::MAX` none): the distance to it is the first bound of the walk, which then prunes from the start. The distance is the same one bit for bit (it is the smallest
+    /// of the distances to the triangles, whatever the order they are met in); returns `(distance, face, triangle)`.
+    fn nearest_from(&self, p: [f64; 3], hint: u32) -> (f64, u32, u32) {
         if self.nodes.is_empty() {
-            return (f64::INFINITY, u32::MAX);
+            return (f64::INFINITY, u32::MAX, u32::MAX);
         }
-        let (mut best, mut face) = (f64::INFINITY, u32::MAX);
+        let (mut best, mut face, mut tri) = (f64::INFINITY, u32::MAX, u32::MAX);
+        if let Some((t, f)) = self.tris.get(hint as usize) {
+            (best, face, tri) = (point_triangle_dist2(p, t[0], t[1], t[2]), *f, hint);
+        }
         let mut stack = [0u32; 96];
         let mut sp = 1;
         while sp > 0 {
@@ -256,10 +267,10 @@ impl WallBvh {
                 continue;
             }
             if n.count > 0 {
-                for (t, f) in &self.tris[n.a as usize..(n.a + n.count) as usize] {
+                for (m, (t, f)) in self.tris[n.a as usize..(n.a + n.count) as usize].iter().enumerate() {
                     let d = point_triangle_dist2(p, t[0], t[1], t[2]);
                     if d < best {
-                        (best, face) = (d, *f);
+                        (best, face, tri) = (d, *f, n.a + m as u32);
                     }
                 }
             } else {
@@ -275,7 +286,7 @@ impl WallBvh {
                 }
             }
         }
-        (best.sqrt(), face)
+        (best.sqrt(), face, tri)
     }
 }
 
@@ -296,9 +307,15 @@ pub fn wall_nearest_face3(grid: &Grid3, solid: &[bool], faces: &[WallFace]) -> V
 pub fn wall_distance3(grid: &Grid3, solid: &[bool], faces: &[WallFace]) -> Vec<f64> {
     let bvh = WallBvh::new(faces);
     let mut d = vec![f64::INFINITY; grid.ni * grid.nj * grid.nk];
-    d.par_iter_mut().enumerate().for_each(|(c, out)| {
-        if !solid[c] {
-            *out = bvh.distance(grid.xc[c]);
+    // by rows of `i`: the nearest triangle of the cell before is the first bound of the walk for the next one
+    d.par_chunks_mut(grid.ni).enumerate().for_each(|(row, out)| {
+        let mut hint = u32::MAX;
+        for (i, out) in out.iter_mut().enumerate() {
+            let c = row * grid.ni + i;
+            if !solid[c] {
+                let (dist, _, tri) = bvh.nearest_from(grid.xc[c], hint);
+                (*out, hint) = (dist, tri);
+            }
         }
     });
     d
@@ -418,9 +435,12 @@ mod tests {
         let faces = wall_faces(&g, &solid);
         assert!(faces.len() > 100);
         let (a, b) = (wall_distance3(&g, &solid, &faces), wall_distance3_brute(&g, &solid, &faces));
+        let bvh = WallBvh::new(&faces);
         for c in 0..a.len() {
             assert!(a[c] == b[c] || (a[c] - b[c]).abs() < 1e-14, "cell {c}: {} vs {}", a[c], b[c]);
             assert_eq!(solid[c], a[c].is_infinite());
+            // the walk started from the neighbour's nearest triangle gives the distance of the plain walk bit for bit
+            assert!(solid[c] || a[c].to_bits() == bvh.distance(g.xc[c]).to_bits(), "cell {c}");
         }
     }
 

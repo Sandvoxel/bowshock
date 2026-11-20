@@ -646,7 +646,7 @@ impl Case3 {
         bowshock_cfd::timing::timed("equations", || self.with_equations(s, dwall))
     }
 
-    fn config3(&self) -> Config3 {
+    pub(crate) fn config3(&self) -> Config3 {
         let n = &self.numerics;
         Config3 {
             freestream: self.freestream(),

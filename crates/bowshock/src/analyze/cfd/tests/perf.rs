@@ -622,6 +622,9 @@ fn host_setup_timing() {
     let mut total = 0.0;
     for (kind, machs) in [(NodeKind::Drag, job.nodes.clone()), (NodeKind::Lift, job.stability.clone())] {
         for &m in &machs {
+            if std::env::var("BOWSHOCK_PROBE_MACHS").is_ok_and(|l| !l.split(',').any(|x| x.trim().parse::<f64>().is_ok_and(|x| (x - m).abs() < 1e-9))) {
+                continue;
+            }
             let analysis = node_analysis(&job, kind, &session, altitude, grid_mach, true, m, false).ok().expect("the node's analysis");
             let c = if kind == NodeKind::Lift { solver::Condition::new(m, 2.0) } else { solver::Condition::from(m) };
             let t = Instant::now();

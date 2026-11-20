@@ -82,7 +82,10 @@ impl GridCache {
     pub fn solver(&mut self, case: &Case3) -> Result<Solver3, Error> {
         let (grid, axis) = self.entry(&case.grid)?;
         // the exact wall distance of the SST run is a function of the grid: computed once for the cases that share it
-        let dwall = case.viscous.filter(|v| !crate::engine::timing::no_fixedcost() && v.turbulence == bowshock_cfd::sst::Turbulence::Sst).map(|_| self.wall_distance(&case.grid, &grid));
+        let dwall = case
+            .viscous
+            .filter(|v| !crate::engine::timing::no_fixedcost() && v.turbulence == bowshock_cfd::sst::Turbulence::Sst)
+            .map(|_| self.wall_distance(&case.grid, &grid));
         let (grid, axis) = bowshock_cfd::timing::timed("grid_clone", || (Grid3::clone(&grid), AxisMap::clone(&axis)));
         Ok(case.solver_with_axis(grid, axis, dwall))
     }
@@ -112,21 +115,19 @@ static PREBUILT: Mutex<Vec<(String, std::thread::JoinHandle<Result<Solver3, Erro
 const PREBUILT_MAX: usize = 2;
 
 impl Case3 {
-    /// What the host solver of this case is built from: everything but the progress sink and the snapshot sink (the Mach number and incidence set the free stream the solver starts
-    /// from, the grid parameters and the tier the grid and its wall distance, the numerics and the equations the solver's configuration).
+    /// What the host solver of this case is built from, as text: the grid parameters (the tier's wall spacing included), the solver's configuration (free stream, scheme, limiter),
+    /// the viscous equations with their wall treatment and the jet state. The stop-rule settings, the progress and the snapshot sinks are not part of it: a seeded run of a case
+    /// (whose `drift_tol` is halved) builds the solver of the plain one.
     pub fn build_key(&self) -> String {
         format!(
-            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-            self.mach.to_bits(),
-            self.alpha.to_bits(),
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             self.body,
             self.grid,
-            self.numerics,
-            self.tier,
-            self.jet,
+            self.config3(),
             self.viscous,
-            self.wall_thermal,
-            (self.transition, self.compressibility)
+            (self.wall_thermal, self.transition, self.compressibility, self.numerics.pressure_outflow),
+            self.jet_state3(),
+            self.tier
         )
     }
 
