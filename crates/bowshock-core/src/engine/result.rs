@@ -24,6 +24,8 @@ pub enum StopReason {
     MaxIterations,
     /// The state became non-finite or non-physical.
     NonFinite,
+    /// The 3D runners' fail-fast rule ended a run that shows the signs of one that will not settle ([`crate::engine::run3::StopRule3`], DESIGN3D item 71); the state is not a solution.
+    GaveUp,
     /// The progress callback asked the run to stop ([`crate::progress::ProgressSink`]); the state is not a solution.
     Cancelled,
 }
@@ -39,6 +41,7 @@ impl fmt::Display for StopReason {
             StopReason::ResidualPlateau => "residual plateau",
             StopReason::MaxIterations => "max iterations",
             StopReason::NonFinite => "non-finite residual",
+            StopReason::GaveUp => "gave up",
             StopReason::Cancelled => "cancelled",
         })
     }

@@ -6,6 +6,7 @@
 //! execute up to `SYNC - 1` further iterations and the final forces are those of the state after them.
 
 use crate::engine::case3::Case3;
+use crate::engine::result::StopReason;
 use crate::engine::run3::{
     breakdown_from, coefficients, collapsed, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, CflControl, CflEvent, DragParts,
     LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall, WallForces, MEAN_EVERY, ROLLBACK_RESIDUAL, SAMPLE_EVERY,
@@ -453,6 +454,12 @@ impl GpuRunner3 {
                 .position(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL)
                 .or_else(|| mon.iter().position(|m| m.iter().any(|x| !x.is_finite())))
                 .or_else(|| collapsed(rho_min, p_min, &case.freestream()).then_some(len - 1));
+            // fail-fast (DESIGN3D item 71): a failure after `n.giveup_rollbacks` answers of the controller is the point's end
+            if let (Some(k), true) = (failure, ctl.spent(n.giveup_rollbacks)) {
+                rule.abort(StopReason::GaveUp);
+                stop = Some(done + k + 1);
+                break;
+            }
             if let Some(back) = failure.and_then(|k| ctl.fail(done + k + 1, (cfl_host * ip.growth.powi(k as i32)).min(ctl.cap()))) {
                 let mut cfg = self.host.cfg.clone();
                 if let Scheme3::Implicit(p) = &mut cfg.scheme {

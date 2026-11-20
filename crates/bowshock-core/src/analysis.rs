@@ -1303,7 +1303,7 @@ impl Analysis {
 
 /// Quality of a 3D result: `Failed` on a non-finite state or force, else by stop reason like the drag solver.
 fn lift_quality(d: &PointResult3) -> Quality {
-    if matches!(d.stop_reason, StopReason::NonFinite | StopReason::Cancelled) || !d.cn.is_finite() || !d.ca.is_finite() {
+    if matches!(d.stop_reason, StopReason::NonFinite | StopReason::GaveUp | StopReason::Cancelled) || !d.cn.is_finite() || !d.ca.is_finite() {
         return Quality::Failed;
     }
     match d.stop_reason {
@@ -1312,7 +1312,7 @@ fn lift_quality(d: &PointResult3) -> Quality {
             Quality::Stationary
         }
         StopReason::MaxIterations => Quality::Stalled,
-        StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
+        StopReason::NonFinite | StopReason::GaveUp | StopReason::Cancelled => Quality::Failed,
     }
 }
 
@@ -1581,7 +1581,7 @@ const FARFIELD_DP_FAILED: f64 = 1.0;
 fn quality(d: &PointResult, drag: &Drag) -> Quality {
     let below_vacuum = d.cp_base < -2.0 / (GAMMA * d.mach * d.mach); // false for NaN
     let positive = |x: f64| x > 0.0; // false for NaN
-    if matches!(d.stop_reason, StopReason::NonFinite | StopReason::Cancelled)
+    if matches!(d.stop_reason, StopReason::NonFinite | StopReason::GaveUp | StopReason::Cancelled)
         || !positive(d.min_rho)
         || !positive(d.min_p)
         || !drag.total.is_finite()
@@ -1596,7 +1596,7 @@ fn quality(d: &PointResult, drag: &Drag) -> Quality {
             Quality::Stationary
         }
         StopReason::MaxIterations => Quality::Stalled,
-        StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
+        StopReason::NonFinite | StopReason::GaveUp | StopReason::Cancelled => Quality::Failed,
     }
 }
 

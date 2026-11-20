@@ -71,6 +71,11 @@ pub const MAX_ROLLBACKS: usize = 12;
 /// The hard floor of the controller: it never lowers `cfl_max` below this (half of the fixed rule's `VISCOUS_3D_CFL_MAX` of 10); a point that fails again there is a failed point,
 /// not retried.
 pub const CFL_FLOOR: f64 = 5.0;
+/// Fail-fast (DESIGN3D item 71): a failure after this many answers of the controller ends the run ([`StopReason::GaveUp`]) instead of getting a seventh. Measured: the finned example and
+/// the Lift gates never roll back; Yuska A / B / C (G-X5, Coarse sector) settle after up to six answers (Mach 2.0: CFL cap 11.8, 4 560 iterations, 1 000 wasted); the flight rockets'
+/// Coarse points that settle did so after at most three. What fails after six is a defect of the grid or the wake that the CFL does not touch: Cancer Descending Coarse failed every
+/// answer down to the floor (a cell at 1e-5 of the free-stream pressure at a fin edge) and then ran 8 000 to 41 000 iterations on to the `Fallback` the point ends in anyway.
+pub const GIVEUP_ROLLBACKS: usize = 6;
 
 /// One answer of the CFL controller to a failed stretch of a run: the run went back to the snapshot at `restored_to` with `cfl_max` lowered.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,6 +131,12 @@ impl<S: Clone> CflControl<S> {
     /// Whether the controller still answers failures: switched on, under [`MAX_ROLLBACKS`] answers and a next cap that is not below [`CFL_FLOOR`] (a point that still fails there fails).
     pub fn active(&self) -> bool {
         self.enabled && self.events.len() < MAX_ROLLBACKS && self.cap * CFL_BACKOFF >= CFL_FLOOR
+    }
+
+    /// Whether the controller is switched on and has answered `limit` failures ([`crate::engine::case3::Numerics3::giveup_rollbacks`], `0`: never): the next one is the run's end for the
+    /// fail-fast rule of the runners.
+    pub fn spent(&self, limit: usize) -> bool {
+        self.enabled && limit > 0 && self.events.len() >= limit
     }
 
     /// The controller answers failures (`true`, the default) or only watches (`false`: [`crate::engine::case3::Numerics3::cfl_control`] off).
@@ -832,6 +843,11 @@ pub fn run3_on(case: &Case3, s: &mut Solver3, warm: bool) -> PointResult3 {
             || r > ROLLBACK_RESIDUAL
             || cn.is_some_and(|c| !c.is_finite() || c.abs() > MONITOR_LIMIT || state_collapsed(&s.grid, &s.u, &case.freestream()))
         {
+            if ctl.as_ref().is_some_and(|c| c.spent(case.numerics.giveup_rollbacks)) {
+                it += 1;
+                rule.abort(StopReason::GaveUp);
+                break;
+            }
             if let Some(back) = ctl.as_mut().and_then(|c| c.fail(it + 1, cfl_now)) {
                 let (snapshot, saved_rule) = back.snapshot;
                 s.restore(&snapshot);
@@ -989,6 +1005,11 @@ impl StopRule3 {
             spread: spread(&self.hist, self.nwin),
             tolerance: Some(self.rel_tol),
         })
+    }
+
+    /// Ends the run for `why` without a stop rule firing (a runner's fail-fast): [`StopRule3::finish`] reports it.
+    pub fn abort(&mut self, why: StopReason) {
+        self.reason = why;
     }
 
     /// Marks the run as ended by the sink: [`StopRule3::finish`] reports [`StopReason::Cancelled`].
@@ -1504,6 +1525,35 @@ mod tests {
         assert!(!ctl.active());
         let mut off = CflControl::new('a', 50.0, 1.0).with_enabled(false);
         assert!(off.fail(100, 9.0).is_none() && off.events.is_empty());
+    }
+
+    /// Fail-fast: the controller is spent after `GIVEUP_ROLLBACKS` answers (a switched-off controller never), and the next failure is where the CPU runner ends the run, `GaveUp`.
+    #[test]
+    fn a_failure_after_six_answers_ends_the_run() {
+        let mut ctl = CflControl::new('a', 100.0, 1.0);
+        for k in 0..GIVEUP_ROLLBACKS {
+            assert!(!ctl.spent(GIVEUP_ROLLBACKS), "after {k} answers");
+            ctl.fail(300 + 1000 * k, 50.0).expect("answers");
+        }
+        assert!(ctl.spent(GIVEUP_ROLLBACKS) && !ctl.spent(0), "0 is off");
+        assert!(!CflControl::new('a', 100.0, 1.0).with_enabled(false).spent(GIVEUP_ROLLBACKS));
+        // a point that fails at every CFL: the runner stops at the fourth failure instead of the ninth
+        let mut case = Case3::tiny_anf(2.0, 2f64.to_radians());
+        case.numerics.implicit.cfl_max = 4000.0;
+        case.numerics.implicit.growth = 1.3;
+        case.numerics.giveup_rollbacks = GIVEUP_ROLLBACKS;
+        case.numerics.max_iter = 800;
+        let mut s = case.build_solver().expect("solver");
+        let r = run3_on(&case, &mut s, false);
+        // the failed state is not finite here, which `finish` reports as such; a collapsed cell in a finite state is `GaveUp`
+        assert!(
+            matches!(r.stop_reason, StopReason::GaveUp | StopReason::NonFinite),
+            "{:?} after {} iterations, {:?}",
+            r.stop_reason,
+            r.iterations,
+            r.cfl_events
+        );
+        assert_eq!(r.cfl_events.len(), GIVEUP_ROLLBACKS);
     }
 
     /// The ramp's snapshots are kept: a slowly growing mode that survives a restore to the snapshot before the failure is answered by a restore to a state the lower cap would have

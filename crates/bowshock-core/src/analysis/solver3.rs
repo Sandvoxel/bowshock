@@ -607,7 +607,12 @@ fn unphysical_cell(w: &[f64; 5], fs: &[f64; 5]) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn quality3(stop: StopReason, mach: f64, collapsed_state: bool, finite: bool, farfield_dp: f64, cp_base: f64) -> Quality {
     let below_vacuum = cp_base < -2.0 / (GAMMA * mach * mach); // false for NaN
-    if matches!(stop, StopReason::NonFinite | StopReason::Cancelled) || collapsed_state || !finite || farfield_dp > FARFIELD_DP_FAILED || below_vacuum {
+    if matches!(stop, StopReason::NonFinite | StopReason::GaveUp | StopReason::Cancelled)
+        || collapsed_state
+        || !finite
+        || farfield_dp > FARFIELD_DP_FAILED
+        || below_vacuum
+    {
         return Quality::Failed;
     }
     match stop {
@@ -616,7 +621,7 @@ fn quality3(stop: StopReason, mach: f64, collapsed_state: bool, finite: bool, fa
             Quality::Stationary
         }
         StopReason::MaxIterations => Quality::Stalled,
-        StopReason::NonFinite | StopReason::Cancelled => Quality::Failed,
+        StopReason::NonFinite | StopReason::GaveUp | StopReason::Cancelled => Quality::Failed,
     }
 }
 

@@ -93,6 +93,9 @@ pub struct Numerics3 {
     /// (a ratio that merely repeats, which a tail of two time scales does for a few blocks, is no proof). A run that stops on a cycle beyond the tolerance reports the means of
     /// the last block as CN, CA (zero incidence) or `x_cp`.
     pub drift_period_aware: bool,
+    /// Fail-fast (DESIGN3D item 71): a run whose CFL controller has answered this many failures and fails again ends [`crate::engine::result::StopReason::GaveUp`] (`0`: off, the
+    /// controller keeps answering down to its floor). [`Numerics3::viscous`] sets [`crate::engine::run3::GIVEUP_ROLLBACKS`] (`BOWSHOCK_NO_FAILFAST` takes it back for A/B runs), the Euler numerics 0.
+    pub giveup_rollbacks: usize,
 }
 
 impl Numerics3 {
@@ -129,6 +132,7 @@ impl Numerics3 {
             drift_block: 0.0,
             drift_tol: 5e-3,
             drift_period_aware: false,
+            giveup_rollbacks: 0,
         }
     }
 
@@ -189,6 +193,7 @@ impl Numerics3 {
             drift_block: 10_000.0,
             drift_tol: 5e-3,
             drift_period_aware: std::env::var_os("BOWSHOCK_DRIFT_PERIODS").is_some(),
+            giveup_rollbacks: if std::env::var_os("BOWSHOCK_NO_FAILFAST").is_some() { 0 } else { crate::engine::run3::GIVEUP_ROLLBACKS },
         }
     }
 
