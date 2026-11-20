@@ -723,7 +723,9 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         // a round edge of radius `t / 2` stands in the grid as a polygon of a few cells: with the first cell as wide as the radius its corners turn the flow by 60 degrees and the
         // swept thick fin of the Rabia fixture (radius 0.03 d, cell 0.031 d) grew a vacuum (p 1e-5, Mach 900) at its leading edge that no CFL cured; a first cell of a fourth of
         // the radius (not below a tenth of the chord's cell: that and below diverged on the example rocket) settles at Mach 0.8 in 770 iterations (Draft)
-        edge = edge.min((0.5 * f.thickness / LE_RADIUS_CELLS).max(0.1 * f.root_chord / nf as f64));
+        let k = std::env::var("TMP_LE_K").ok().and_then(|v| v.parse().ok()).unwrap_or(LE_RADIUS_CELLS);
+        let fl = std::env::var("TMP_LE_FLOOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.1);
+        edge = edge.min((0.5 * f.thickness / k).max(fl * f.root_chord / nf as f64));
     }
     let mut fin_offs = two_sided_nodes(f.root_chord, nf, edge);
     fin_offs[nf] = x_te_root - x_le_root;
