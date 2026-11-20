@@ -31,6 +31,7 @@ use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
 use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
+use crate::engine::warm3::{rescale, warm_plan, Order, Rescale};
 use bowshock_cfd::gas3::{cons_to_prim3, prim_to_cons3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
 use bowshock_cfd::sst::WallThermal;
@@ -76,6 +77,9 @@ pub struct FacadeTiming {
     /// Wall seconds and iterations of the seed wedge solved for this point (zero when the wedge of its Mach number and tier was solved for an earlier point of the sweep).
     pub seed_s: f64,
     pub seed_iters: usize,
+    /// The start from the converged field of a neighbouring Mach number ([`Analysis::warm_start`]): `""` none, `"warm"` the run started from it and settled, `"rerun"` it ended
+    /// `Failed` or `Stalled` and the point was run again from its seed or the free stream.
+    pub neighbour: &'static str,
 }
 
 static FACADE_TIMINGS: std::sync::Mutex<Vec<FacadeTiming>> = std::sync::Mutex::new(Vec::new());
@@ -166,12 +170,7 @@ impl Seed {
     /// The seed of a finished wedge run: `None` unless it ended without failing (a run capped at [`SEED_MAX_ITERATIONS`] is a seed) and every fluid cell holds a finite
     /// state of positive density and pressure.
     fn of(r: &PointResult3, grid: Grid3, u: Vec<Cons3>, turb: Option<Vec<[f64; 2]>>) -> Option<Seed> {
-        let sound = |c: usize| {
-            let w = cons_to_prim3(&u[c]);
-            w.iter().all(|x| x.is_finite()) && w[0] > 0.0 && w[4] > 0.0
-        };
-        let fine =
-            (0..u.len()).filter(|&c| grid.part[c] == PART_FLUID).all(sound) && turb.as_ref().is_none_or(|t| t.iter().all(|x| x.iter().all(|v| v.is_finite())));
+        let fine = field_is_sound(&grid.part, &u, turb.as_deref());
         (lift_quality(r) != Quality::Failed && fine).then_some(Seed { grid, u, turb, iterations: r.iterations })
     }
 
@@ -193,19 +192,145 @@ impl Seed {
     }
 }
 
+/// Whether every fluid cell of `u` holds a finite state of positive density and pressure and `turb` (when given) is finite.
+fn field_is_sound(part: &[u8], u: &[Cons3], turb: Option<&[[f64; 2]]>) -> bool {
+    let sound = |c: usize| {
+        let w = cons_to_prim3(&u[c]);
+        w.iter().all(|x| x.is_finite()) && w[0] > 0.0 && w[4] > 0.0
+    };
+    (0..u.len()).filter(|&c| part[c] == PART_FLUID).all(sound) && turb.is_none_or(|t| t.iter().all(|x| x.iter().all(|v| v.is_finite())))
+}
+
+/// How the sweep of [`Analysis::warm_start`] is run: the order of its points and how a field is carried from one to the next. Fixed by measurement on the finned example
+/// (`DESIGN3D.md` item 59); the `BOWSHOCK_WARM_*` variables override them for the measurements only.
+#[derive(Clone, Copy, Debug)]
+struct WarmTuning {
+    order: Order,
+    rescale: Rescale,
+    /// Factor on [`crate::engine::case3::Numerics3::drift_tol`] of a run started from a neighbour: it starts close to the answer, like a seeded run.
+    drift_factor: f64,
+    /// A warm run goes on at the CFL the neighbour's run ended at (its `cfl_max` after the controller's answers) instead of restarting the ramp at `cfl0`.
+    keep_cfl: bool,
+}
+
+/// The runs of a warm sweep over the Mach numbers `machs` of the sector (`incidence` false, `finned` for a body with fins) or the half domain ([`crate::engine::warm3::warm_runs`]
+/// with the sweep's settings): the indices of the points that start from one another, ascending, each run solved in one `run` call on one machine; the app makes a work item of each.
+#[doc(hidden)]
+pub fn warm_runs(machs: &[f64], incidence: bool, finned: bool) -> Vec<Vec<usize>> {
+    let kind = match (incidence, finned) {
+        (true, _) => Kind::Half,
+        (false, true) => Kind::Sector,
+        (false, false) => Kind::Wedge,
+    };
+    crate::engine::warm3::warm_runs(machs, &WarmTuning::of(kind).order)
+}
+
+impl WarmTuning {
+    /// The settings for the domain `kind`. Measured on the finned example (item 59): the sector's supersonic points start from their axisymmetric seed in about 800 iterations
+    /// (the floor of the stop rule), which no neighbour beats, so only the subsonic points (up to Mach 0.9, from the lowest upward, a factor of 2 in Mach number at most from
+    /// the neighbour) start from one; the half domain has no seed, and its supersonic points (from Mach 3 down to 1.1) start from the neighbour while its subsonic and
+    /// transonic ones settle slower from one than from the free stream; the finless wedge is cheap and was not measured: no neighbours.
+    fn of(kind: Kind) -> WarmTuning {
+        let var = |name: &str| std::env::var(name).ok();
+        let num = |name: &str, default: f64| var(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+        let base = match kind {
+            Kind::Sector => Order { split: 0.9, sub_up: true, max_ratio: 2.0, min_mach: 0.0, max_mach: 0.9 },
+            Kind::Half => Order { split: 0.9, sub_up: true, max_ratio: 2.0, min_mach: 1.05, max_mach: 10.0 },
+            Kind::Wedge => Order::NONE,
+        };
+        WarmTuning {
+            order: Order {
+                split: num("BOWSHOCK_WARM_SPLIT", base.split),
+                sub_up: var("BOWSHOCK_WARM_SUB").map_or(base.sub_up, |v| v != "down"),
+                max_ratio: num("BOWSHOCK_WARM_RATIO", base.max_ratio),
+                min_mach: num("BOWSHOCK_WARM_MINMACH", base.min_mach),
+                max_mach: num("BOWSHOCK_WARM_MAXMACH", base.max_mach),
+            },
+            rescale: match var("BOWSHOCK_WARM_RESCALE").as_deref() {
+                Some("none") => Rescale::None,
+                Some("velocity") => Rescale::Velocity,
+                _ => Rescale::Perturbation,
+            },
+            drift_factor: num("BOWSHOCK_WARM_DRIFT", SEED_DRIFT_TOL_FACTOR),
+            keep_cfl: var("BOWSHOCK_WARM_RAMP").is_none_or(|v| v != "restart"),
+        }
+    }
+}
+
+/// The converged field of a point of a warm sweep, host side: what its neighbours of the sweep start from.
+struct Carried {
+    u: Vec<Cons3>,
+    /// `[k, omega]` of every cell (`None`: Euler).
+    turb: Option<Vec<[f64; 2]>>,
+    mach: f64,
+    alpha: f64,
+    /// The `cfl_max` its run ended with (the controller's answers included).
+    cfl: f64,
+    /// The grid it is on: a field only starts a point on the same grid.
+    grid: crate::engine::cache3::GridKey,
+}
+
+impl Carried {
+    /// The field of a finished point (`None` unless it holds a sound state everywhere).
+    fn of(case: &Case3, grid: &Grid3, u: Vec<Cons3>, turb: Option<Vec<[f64; 2]>>, cfl: f64) -> Option<Carried> {
+        field_is_sound(&grid.part, &u, turb.as_deref()).then(|| Carried {
+            u,
+            turb,
+            mach: case.mach,
+            alpha: case.alpha,
+            cfl,
+            grid: crate::engine::cache3::GridKey::of(&case.grid),
+        })
+    }
+
+    /// Whether this field can start `case`: the same grid and incidence.
+    fn fits(&self, case: &Case3) -> bool {
+        self.grid == crate::engine::cache3::GridKey::of(&case.grid) && self.alpha == case.alpha
+    }
+}
+
+/// What a run that does not start from the free stream starts from.
+enum Start<'a> {
+    /// The axisymmetric wedge solution of the same Mach number.
+    Seed(&'a Seed),
+    /// The field of a neighbouring Mach number, carried to that of the case by `Rescale`.
+    Neighbour {
+        from: &'a Carried,
+        rescale: Rescale,
+        /// The CFL the run goes on at (`None`: the ramp restarts at `cfl0`).
+        cfl: Option<f64>,
+    },
+}
+
+impl Start<'_> {
+    /// The state and the `[k, omega]` (`None` for Euler) of every cell of `dst`, the grid `case` was built on.
+    fn on(&self, case: &Case3, dst: &Grid3) -> (Vec<Cons3>, Option<Vec<[f64; 2]>>) {
+        match self {
+            Start::Seed(seed) => {
+                let m = seed.on(case, dst);
+                (m.u, seed.turb.is_some().then_some(m.turb))
+            }
+            Start::Neighbour { from, rescale: mode, .. } => (rescale(&from.u, &dst.part, from.mach, case.mach, case.alpha, *mode), from.turb.clone()),
+        }
+    }
+}
+
 /// One backend of the sweep: a cold run that builds the solver state, a warm run on it, and what is read from a state afterwards.
 trait Runner3 {
     type State;
     fn cold(&self, case: &Case3) -> Result<(PointResult3, Self::State), Error>;
-    /// A cold run that starts from the axisymmetric `seed` instead of the free stream: the field carried to the grid of `case` and a warm run on it (the first-order start-up
-    /// skipped, the CFL ramp restarted).
-    fn cold_from(&self, case: &Case3, seed: &Seed) -> Result<(PointResult3, Self::State), Error>;
-    fn warm(&self, state: &mut Self::State, case: &Case3) -> Result<PointResult3, Error>;
+    /// A cold run that starts from `start` instead of the free stream (the axisymmetric seed, or the field of a neighbouring Mach number): the field carried to the grid of
+    /// `case` and a warm run on it (the first-order start-up skipped, the CFL ramp restarted).
+    fn cold_from(&self, case: &Case3, start: &Start) -> Result<(PointResult3, Self::State), Error>;
+    /// A warm run on `state`; `cfl` is the CFL it goes on at (`None`: the ramp restarts; the CPU runner always restarts it).
+    fn warm(&self, state: &mut Self::State, case: &Case3, cfl: Option<f64>) -> Result<PointResult3, Error>;
     /// Solves the wedge `case` to its stop rule and returns its field; `None` when it failed.
     fn seed(&self, wedge: &Case3) -> Result<Option<Seed>, Error>;
     fn grid<'a>(&self, state: &'a Self::State) -> &'a Grid3;
     /// The class forces and the state of `state` (the one download of a point).
     fn post(&self, state: &Self::State, case: &Case3) -> Result<Post3, Error>;
+    /// The finished state of `state` as the field a neighbouring point starts from (`None` when it is not sound).
+    fn carry(&self, state: &Self::State, case: &Case3, cfl: f64) -> Result<Option<Carried>, Error>;
     /// Whether `state` was built for an earlier point and kept (see [`Runner3::recycle`]).
     fn reused(&self, _state: &Self::State) -> bool {
         false
@@ -227,15 +352,15 @@ impl Runner3 for Cpu3 {
         Ok((r, s))
     }
 
-    fn cold_from(&self, case: &Case3, seed: &Seed) -> Result<(PointResult3, Solver3), Error> {
+    fn cold_from(&self, case: &Case3, start: &Start) -> Result<(PointResult3, Solver3), Error> {
         let mut s = case.build_solver_cached()?;
-        let m = seed.on(case, &s.grid);
-        s.set_state_turb(&m.u, seed.turb.is_some().then_some(m.turb.as_slice()));
+        let (u, turb) = start.on(case, &s.grid);
+        s.set_state_turb(&u, turb.as_deref());
         let r = run3_on(case, &mut s, true);
         Ok((r, s))
     }
 
-    fn warm(&self, s: &mut Solver3, case: &Case3) -> Result<PointResult3, Error> {
+    fn warm(&self, s: &mut Solver3, case: &Case3, _cfl: Option<f64>) -> Result<PointResult3, Error> {
         Ok(run3_on(case, s, true))
     }
 
@@ -256,6 +381,11 @@ impl Runner3 for Cpu3 {
     fn post(&self, s: &Solver3, case: &Case3) -> Result<Post3, Error> {
         let (eddy, cf) = viscous_extras(case, s);
         Ok(Post3 { drag: drag_parts_on(case, s), u: s.u.clone(), eddy, cf })
+    }
+
+    fn carry(&self, s: &Solver3, case: &Case3, cfl: f64) -> Result<Option<Carried>, Error> {
+        let turb = s.rans().map(|r| r.turb.clone()).filter(|t| !t.is_empty());
+        Ok(Carried::of(case, &s.grid, s.u.clone(), turb, cfl))
     }
 }
 
@@ -288,11 +418,12 @@ impl Runner3 for Gpu3 {
         self.cold_in(case, matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. }), None)
     }
 
-    fn cold_from(&self, case: &Case3, seed: &Seed) -> Result<(PointResult3, GpuState), Error> {
-        self.cold_in(case, false, Some(seed))
+    fn cold_from(&self, case: &Case3, start: &Start) -> Result<(PointResult3, GpuState), Error> {
+        self.cold_in(case, matches!(case.grid.domain, crate::engine::grid3::Domain3::Wedge { .. }), Some(start))
     }
 
-    fn warm(&self, r: &mut GpuState, case: &Case3) -> Result<PointResult3, Error> {
+    fn warm(&self, r: &mut GpuState, case: &Case3, cfl: Option<f64>) -> Result<PointResult3, Error> {
+        r.runner.start_cfl = cfl;
         r.runner.run_on(case, true)
     }
 
@@ -333,6 +464,11 @@ impl Runner3 for Gpu3 {
         Ok(Post3 { drag: r.runner.drag_parts(case)?, u, eddy, cf })
     }
 
+    fn carry(&self, r: &GpuState, case: &Case3, cfl: f64) -> Result<Option<Carried>, Error> {
+        let (u, turb) = (r.runner.gpu.state_f64()?, r.runner.gpu.turb_state()?.map(|(t, _)| t));
+        Ok(Carried::of(case, &r.runner.host.grid, u, turb, cfl))
+    }
+
     fn reused(&self, r: &GpuState) -> bool {
         r.reused
     }
@@ -349,8 +485,8 @@ impl Runner3 for Gpu3 {
 #[cfg(feature = "gpu")]
 impl Gpu3 {
     /// A cold run in extended (`extended`) or single precision, on the pooled solver of this thread when it was built for the same grid and precision; from the free stream, or
-    /// (`seed`) from the field of an axisymmetric wedge.
-    fn cold_in(&self, case: &Case3, extended: bool, seed: Option<&Seed>) -> Result<(PointResult3, GpuState), Error> {
+    /// (`start`) from the field of an axisymmetric wedge or of a neighbouring Mach number.
+    fn cold_in(&self, case: &Case3, extended: bool, start: Option<&Start>) -> Result<(PointResult3, GpuState), Error> {
         let key = (crate::engine::cache3::GridKey::of(&case.grid), extended);
         let kept = POOL.with(|p| p.borrow_mut().take()).filter(|s| s.key == key);
         let mut state = match kept {
@@ -360,10 +496,13 @@ impl Gpu3 {
                 GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key, reused: false }
             }
         };
-        let p = match seed {
-            Some(seed) => {
-                let m = seed.on(case, &state.runner.host.grid);
-                state.runner.gpu.set_state_turb(&m.u, seed.turb.is_some().then_some(m.turb.as_slice()))?;
+        let p = match start {
+            Some(start) => {
+                let (u, turb) = start.on(case, &state.runner.host.grid);
+                state.runner.gpu.set_state_turb(&u, turb.as_deref())?;
+                if let Start::Neighbour { cfl, .. } = start {
+                    state.runner.start_cfl = *cfl;
+                }
                 state.runner.run_on(case, true)?
             }
             None => state.runner.run_on(case, false)?,
@@ -581,9 +720,10 @@ impl Analysis {
         self.seed_axisymmetric && self.fins.is_some() && kind == Kind::Sector && std::env::var_os("BOWSHOCK_NO_SEED").is_none()
     }
 
-    /// The cold run of `case` (condition `c` on `kind`): from the free stream, or from the wedge seed of its Mach number and tier ([`Analysis::seeded`]; `seeds` keeps the
-    /// wedges of the sweep, `None` for one that failed). A seeded run that ends `Failed` or `Stalled` is run again from the free stream, and a wedge that fails gives a plain
-    /// cold start.
+    /// The first run of `case` (condition `c` on `kind`) of a point that has no live solver: from the converged field of a neighbouring Mach number (`neighbour`, a sweep with
+    /// [`Analysis::warm_start`]), or from the free stream, or from the wedge seed of its Mach number and tier ([`Analysis::seeded`]; `seeds` keeps the wedges of the sweep, `None`
+    /// for one that failed). A run from a neighbour or a seed that ends `Failed` or `Stalled` is run again from the next start (the seed, the free stream), and a wedge that fails
+    /// gives a plain cold start.
     #[allow(clippy::too_many_arguments)]
     fn cold_point<R: Runner3>(
         &self,
@@ -593,8 +733,22 @@ impl Analysis {
         kind: Kind,
         level: u32,
         seeds: &mut std::collections::HashMap<String, Option<Seed>>,
+        neighbour: Option<(&Carried, &WarmTuning)>,
         tm: &mut FacadeTiming,
     ) -> Result<(PointResult3, R::State), Error> {
+        if let Some((from, tune)) = neighbour.filter(|(from, _)| from.fits(case)) {
+            // judged as tightly as a seeded run: it starts close to the answer, and the first geometric tail of the slow base-wake adjustment must not stop it
+            let mut warm = case.clone();
+            warm.numerics.drift_tol *= tune.drift_factor;
+            let start = Start::Neighbour { from, rescale: tune.rescale, cfl: tune.keep_cfl.then_some(from.cfl) };
+            let (r, s) = runner.cold_from(&warm, &start)?;
+            if r.stop_reason == StopReason::Cancelled || matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
+                tm.neighbour = "warm";
+                return Ok((r, s));
+            }
+            tm.neighbour = "rerun";
+            runner.recycle(s);
+        }
         if !self.seeded(kind) {
             return runner.cold(case);
         }
@@ -614,7 +768,7 @@ impl Analysis {
         // slow base-wake adjustment (Draft example sector, Mach 0.8-1.1: 0.5-1.1 % high with the tolerance of the cold runs, which reach their stop 900-1000 iterations later)
         let mut seeded = case.clone();
         seeded.numerics.drift_tol *= SEED_DRIFT_TOL_FACTOR;
-        let (r, s) = runner.cold_from(&seeded, seed)?;
+        let (r, s) = runner.cold_from(&seeded, &Start::Seed(seed))?;
         if r.stop_reason == StopReason::Cancelled || matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
             tm.seed = "seeded";
             return Ok((r, s));
@@ -684,70 +838,119 @@ impl Analysis {
         Err(Error::Unsupported("the `gpu` feature is not enabled".into()))
     }
 
-    /// The sweep loop shared by the backends over `sorted`: a cold first point per domain and Mach number, warm later angles (and, with
-    /// [`Analysis::warm_start`], warm later Mach numbers). A warm point that ends `Failed` or `Stalled` is re-run cold; a cold run that
-    /// diverged is repeated once with the implicit CFL limit halved. The cold run of a finned sector starts from the axisymmetric wedge of its Mach number
-    /// and tier ([`Analysis::seed_axisymmetric`], [`Analysis::cold_point`]).
+    /// The sweep loop shared by the backends over `sorted`: the points of one domain and Mach number (the angles of attack) are a group, solved one after the other on one
+    /// solver, the first from the free stream or its axisymmetric seed ([`Analysis::seed_axisymmetric`], [`Analysis::cold_point`]) and the later ones warm from the one before.
+    /// A warm point that ends `Failed` or `Stalled` is re-run cold. With [`Analysis::warm_start`] the groups of a domain are solved in the order of
+    /// [`warm_plan`] and the first point of a group starts from the converged field of its neighbour in the plan, carried to its Mach number ([`Carried`]); a group
+    /// that has no neighbour (the first of a run of the plan, or the neighbour failed or did not settle) starts as it does without the flag. The points come back in the
+    /// order of `sorted`.
     fn sweep3<R: Runner3>(&self, runner: &R, sorted: &[Condition], level: u32, flow: Option<WallFlow>, keep: bool) -> Result<Vec<PolarPoint>, Error> {
+        use std::collections::HashMap;
         use std::time::Instant;
-        let mut points = Vec::with_capacity(sorted.len());
-        let mut state: Option<R::State> = None;
-        let mut at: Option<(Kind, f64)> = None;
-        let mut last = Condition::from(0.1);
-        // the axisymmetric seeds of the sweep by Mach number and tier
-        let mut seeds = std::collections::HashMap::new();
-        for &c in sorted {
+        // the groups: consecutive conditions of one domain and Mach number (the order of `sorted` keeps them together)
+        let mut groups: Vec<(Kind, Vec<usize>)> = Vec::new();
+        for (i, &c) in sorted.iter().enumerate() {
             let kind = self.kind_of(c);
-            let same = at.is_some_and(|(k, m)| k == kind && (m == c.mach || self.warm_start));
-            if !same {
-                drop_timed(runner, state.take(), last);
+            match groups.last_mut() {
+                Some((k, members)) if *k == kind && sorted[members[0]].mach == c.mach => members.push(i),
+                _ => groups.push((kind, vec![i])),
             }
-            (at, last) = (Some((kind, c.mach)), c);
-            let t_case = Instant::now();
-            let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), keep);
-            let mut tm = FacadeTiming {
-                what: "point",
-                mach: c.mach,
-                alpha_deg: c.alpha_deg,
-                kind: match kind {
-                    Kind::Wedge => "wedge",
-                    Kind::Sector => "sector",
-                    Kind::Half => "half",
-                },
-                case_s: t_case.elapsed().as_secs_f64(),
-                ..Default::default()
-            };
-            if let Some(s) = &mut state {
+        }
+        // the steps in the order they are solved in: (group, the group whose field it starts from)
+        let mut steps: Vec<(usize, Option<usize>)> = Vec::with_capacity(groups.len());
+        let mut from = 0;
+        while from < groups.len() {
+            let to = (from..groups.len()).find(|&g| groups[g].0 != groups[from].0).unwrap_or(groups.len());
+            if self.warm_start {
+                let machs: Vec<f64> = (from..to).map(|g| sorted[groups[g].1[0]].mach).collect();
+                let order = WarmTuning::of(groups[from].0).order;
+                steps.extend(warm_plan(&machs, &order).into_iter().map(|s| (from + s.point, s.parent.map(|p| from + p))));
+            } else {
+                steps.extend((from..to).map(|g| (g, None)));
+            }
+            from = to;
+        }
+        // the fields still wanted by a group that is not solved yet, and how many groups want each
+        let mut wanted: Vec<usize> = vec![0; groups.len()];
+        for &(_, parent) in &steps {
+            if let Some(p) = parent {
+                wanted[p] += 1;
+            }
+        }
+        let mut carried: HashMap<usize, Carried> = HashMap::new();
+        let mut points: Vec<Option<PolarPoint>> = (0..sorted.len()).map(|_| None).collect();
+        // the axisymmetric seeds of the sweep by Mach number and tier
+        let mut seeds = HashMap::new();
+        for (g, parent) in steps {
+            let (kind, members) = (groups[g].0, &groups[g].1);
+            let tune = WarmTuning::of(kind);
+            let mut state: Option<R::State> = None;
+            let mut last = sorted[members[0]];
+            // the `cfl_max` the last run of the group ended with
+            let mut cap: Option<f64> = None;
+            for (j, &i) in members.iter().enumerate() {
+                let c = sorted[i];
+                last = c;
+                let t_case = Instant::now();
+                let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), keep);
+                let mut tm = FacadeTiming {
+                    what: "point",
+                    mach: c.mach,
+                    alpha_deg: c.alpha_deg,
+                    kind: match kind {
+                        Kind::Wedge => "wedge",
+                        Kind::Sector => "sector",
+                        Kind::Half => "half",
+                    },
+                    case_s: t_case.elapsed().as_secs_f64(),
+                    ..Default::default()
+                };
+                if let Some(s) = &mut state {
+                    let t = Instant::now();
+                    let r = runner.warm(s, &case, if self.warm_start && tune.keep_cfl { cap } else { None })?;
+                    cap = Some(r.final_cfl_cap().unwrap_or(case.numerics.implicit.cfl_max));
+                    tm.run_s = t.elapsed().as_secs_f64();
+                    if r.stop_reason == StopReason::Cancelled {
+                        return Err(Error::Cancelled);
+                    }
+                    if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
+                        points[i] = Some(self.point3(runner, s, &case, c, &r, keep, &mut tm)?);
+                        record_facade(tm);
+                        continue;
+                    }
+                }
                 let t = Instant::now();
-                let r = runner.warm(s, &case)?;
-                tm.run_s = t.elapsed().as_secs_f64();
+                let neighbour = parent.filter(|_| j == 0).and_then(|p| carried.get(&p)).map(|f| (f, &tune));
+                let (r, s) = self.cold_point(runner, &case, c, kind, level, &mut seeds, neighbour, &mut tm)?;
+                cap = Some(r.final_cfl_cap().unwrap_or(case.numerics.implicit.cfl_max));
+                let mut next_warm = true;
+                tm.run_s += t.elapsed().as_secs_f64();
                 if r.stop_reason == StopReason::Cancelled {
                     return Err(Error::Cancelled);
                 }
-                if matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
-                    points.push(self.point3(runner, s, &case, c, &r, keep, &mut tm)?);
-                    record_facade(tm);
-                    continue;
+                if lift_quality(&r) == Quality::Failed {
+                    next_warm = false;
+                }
+                tm.reused = runner.reused(&s);
+                points[i] = Some(self.point3(runner, &s, &case, c, &r, keep, &mut tm)?);
+                record_facade(tm);
+                if j == 0 && wanted[g] > 0 && matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
+                    if let Some(field) = runner.carry(&s, &case, cap.unwrap_or(case.numerics.implicit.cfl_max))? {
+                        carried.insert(g, field);
+                    }
+                }
+                drop_timed(runner, state.take(), c);
+                state = next_warm.then_some(s);
+            }
+            drop_timed(runner, state, last);
+            if let Some(p) = parent {
+                wanted[p] -= 1;
+                if wanted[p] == 0 {
+                    carried.remove(&p);
                 }
             }
-            let t = Instant::now();
-            let (r, s) = self.cold_point(runner, &case, c, kind, level, &mut seeds, &mut tm)?;
-            let mut next_warm = true;
-            tm.run_s += t.elapsed().as_secs_f64();
-            if r.stop_reason == StopReason::Cancelled {
-                return Err(Error::Cancelled);
-            }
-            if lift_quality(&r) == Quality::Failed {
-                next_warm = false;
-            }
-            tm.reused = runner.reused(&s);
-            points.push(self.point3(runner, &s, &case, c, &r, keep, &mut tm)?);
-            record_facade(tm);
-            drop_timed(runner, state.take(), c);
-            state = next_warm.then_some(s);
         }
-        drop_timed(runner, state, last);
-        Ok(points)
+        Ok(points.into_iter().map(|p| p.expect("every condition has a point")).collect())
     }
 
     /// The point of the run `r` of `c` on `case`, left in `state`: [`Drag`] and [`PointDetail`] from the class forces and the wall samples, [`Forces`] at
@@ -1036,12 +1239,37 @@ mod tests {
         let wedge = wedge.on_wedge();
         let seed = Cpu3.seed(&wedge).unwrap().expect("the wedge converges");
         let (cold, _) = Cpu3.cold(&sector).unwrap();
-        let (seeded, _) = Cpu3.cold_from(&sector, &seed).unwrap();
+        let (seeded, _) = Cpu3.cold_from(&sector, &Start::Seed(&seed)).unwrap();
         println!(
             "wedge {} iterations; sector cold {} ({:?}) CA {:.5}, seeded {} ({:?}) CA {:.5}",
             seed.iterations, cold.iterations, cold.stop_reason, cold.ca, seeded.iterations, seeded.stop_reason, seeded.ca
         );
         assert!(matches!(lift_quality(&seeded), Quality::Converged | Quality::Stationary));
         assert!((seeded.ca / cold.ca - 1.0).abs() < 0.01, "CA {} vs {}", seeded.ca, cold.ca);
+    }
+
+    /// A sector started from the converged field of a neighbouring Mach number (`Start::Neighbour`, either rescale) reaches the axial force of its own cold run, and a carried
+    /// field only fits a case on the same grid and incidence.
+    #[test]
+    fn a_sector_started_from_a_neighbouring_mach_number_reaches_the_axial_force_of_the_cold_run() {
+        let sector = |mach: f64| {
+            let mut c = Case3::tiny_anf(mach, 0.0);
+            c.grid.domain = crate::engine::grid3::Domain3::Sector;
+            c
+        };
+        let (near, far) = (sector(2.0), sector(1.6));
+        let (r_near, s_near) = Cpu3.cold(&near).unwrap();
+        let carried = Cpu3.carry(&s_near, &near, near.numerics.implicit.cfl_max).unwrap().expect("a sound field");
+        assert!(carried.fits(&far) && !carried.fits(&Case3::tiny_anf(1.6, 0.1)));
+        let (cold, _) = Cpu3.cold(&far).unwrap();
+        for mode in [Rescale::Perturbation, Rescale::Velocity] {
+            let (warm, _) = Cpu3.cold_from(&far, &Start::Neighbour { from: &carried, rescale: mode, cfl: None }).unwrap();
+            println!(
+                "M 2.0 cold {} its CA {:.5}; M 1.6 cold {} its CA {:.5}, from M 2.0 ({mode:?}) {} its ({:?}) CA {:.5}",
+                r_near.iterations, r_near.ca, cold.iterations, cold.ca, warm.iterations, warm.stop_reason, warm.ca
+            );
+            assert!(matches!(lift_quality(&warm), Quality::Converged | Quality::Stationary), "{:?}", warm.stop_reason);
+            assert!((warm.ca / cold.ca - 1.0).abs() < 0.01, "CA {} vs {}", warm.ca, cold.ca);
+        }
     }
 }

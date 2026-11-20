@@ -158,6 +158,7 @@ fn perf_2d_table_grid_ab() {
             }
         },
         shared,
+        false,
     )
     .expect("the example solves");
     let wall = t0.elapsed().as_secs_f64();
@@ -370,7 +371,7 @@ fn product_default_engine_end_to_end() {
         stability: lift_nodes((0.1, 3.0)).unwrap(),
     };
     let t0 = Instant::now();
-    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), true).expect("the example solves");
+    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), true, warm_start()).expect("the example solves");
     println!(
         "{} points + {} angle points on {}; {:.1} s wall; notes {:?}",
         table.points.len(),
@@ -434,7 +435,7 @@ fn engine3d_finned_timing() {
     let _ = solver::engine::timing::take_timings();
     let _ = solver::take_facade_timings();
     let t0 = Instant::now();
-    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), shared).expect("the example solves");
+    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), shared, warm_start()).expect("the example solves");
     let wall = t0.elapsed().as_secs_f64();
     let runs = solver::engine::timing::take_timings();
     let facade = solver::take_facade_timings();
@@ -447,6 +448,12 @@ fn engine3d_finned_timing() {
         table.solve_seconds,
         table.notes
     );
+    for t in facade.iter().filter(|t| t.what == "point") {
+        println!(
+            "START {} M {:.2} alpha {:.0}: seed {:?} neighbour {:?} wedge {} its {:.1} s, run {:.1} s",
+            t.kind, t.mach, t.alpha_deg, t.seed, t.neighbour, t.seed_iters, t.seed_s, t.run_s
+        );
+    }
     for p in &table.points {
         println!(
             "DRAG M {:.2} cd {:.5} friction {:.5} pressure {:.5} base {:.5} fins {:.5} other {:.5} {:?}",
@@ -536,7 +543,7 @@ fn engine3d_draft_first() {
     let solve = |grid: CfdGrid| {
         let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
-        let table = solve_sized(&job(grid), &Arc::new(AtomicBool::new(false)), |_| (), shared_grid_setting()).expect("the example solves");
+        let table = solve_sized(&job(grid), &Arc::new(AtomicBool::new(false)), |_| (), shared_grid_setting(), warm_start()).expect("the example solves");
         let wall = t.elapsed().as_secs_f64();
         for r in solver::engine::timing::take_timings() {
             let per_iter = if r.chunks_rest > 0 { 1000.0 * r.rest_chunks_s / (r.chunks_rest * 50) as f64 } else { f64::NAN };
@@ -625,6 +632,108 @@ fn engine3d_memory_budget() {
                 }
             }
             Err(e) => println!("MEMBUDGET {what}: refused: {e}"),
+        }
+    }
+}
+
+/// The work items of a solve: one per node without the warm start; with it two runs per kind (the points at or below the split from the lowest up, the others from the highest
+/// down), each ascending, covering every node once.
+#[test]
+fn the_warm_start_makes_two_runs_per_kind_and_the_cold_start_one_item_per_node() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
+    };
+    let cold = work_list(&job, false);
+    assert_eq!(cold.len(), job.nodes.len() + job.stability.len());
+    assert!(cold.iter().all(|i| i.nodes.len() == 1));
+    let warm = work_list(&job, true);
+    // the subsonic sector points chain (0.5 to 0.9: 0.1 is a factor 5 away), the supersonic ones start from their seed; the half domain chains from Mach 1.1 up
+    assert_eq!(
+        warm.iter().map(|i| (i.lift, i.nodes.len())).collect::<Vec<_>>(),
+        vec![(false, 1), (false, 3), (false, 1), (false, 1), (false, 1), (false, 1), (false, 1), (false, 1), (true, 1), (true, 1), (true, 1), (true, 5)]
+    );
+    // every node once, each run ascending
+    for lift in [false, true] {
+        let mut seen: Vec<usize> = warm.iter().filter(|i| i.lift == lift).flat_map(|i| i.nodes.clone()).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..if lift { job.stability.len() } else { job.nodes.len() }).collect::<Vec<_>>());
+    }
+    for item in &warm {
+        let machs: Vec<f64> = item.nodes.iter().map(|&k| if item.lift { job.stability[k] } else { job.nodes[k] }).collect();
+        assert!(machs.windows(2).all(|w| w[0] < w[1]), "ascending: {machs:?}");
+    }
+}
+
+/// Variants of the warm start on the finned example through the app's analysis (`node_analysis`, shared grid, one `run` over the Mach numbers): `cold` (the seeded sectors), `default`
+/// (the engine's settings) and `KEY=VALUE+KEY=VALUE` variants that set `BOWSHOCK_WARM_<KEY>` (`RESCALE` none / velocity / perturbation, `DRIFT` the factor on the drift tolerance,
+/// `RAMP` cap / restart, `SPLIT`, `SUB` up / down, `RATIO`, `MINMACH`, `MAXMACH`: see `WarmTuning`). `BOWSHOCK_VARIANTS` lists them separated by spaces, `BOWSHOCK_WARM_HALF=1` takes
+/// the stability nodes at 2 degrees (CN) instead of the drag nodes (CD), `BOWSHOCK_MACHS=1.1,1.3` a subset of the Mach numbers, `BOWSHOCK_GRID=draft` the quick grid. Prints the
+/// iterations, the value and its change against the first variant per point, and the totals.
+#[test]
+#[ignore = "GPU: solves the finned example's table once per variant"]
+fn engine3d_warm_variants() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let half = std::env::var_os("BOWSHOCK_WARM_HALF").is_some();
+    let grid = if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse };
+    let machs: Vec<f64> = match std::env::var("BOWSHOCK_MACHS") {
+        Ok(v) => v.split(',').map(|m| m.trim().parse().unwrap()).collect(),
+        Err(_) if half => lift_nodes((0.1, 3.0)).unwrap(),
+        Err(_) => nodes((0.1, 3.0)).unwrap(),
+    };
+    let grid_mach = nodes((0.1, 3.0)).unwrap().iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let job = Job { plan, altitude: 120.0, nodes: machs.clone(), stage: 1, grid, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+    let session = Session::Local { backend: solver::Backend::Gpu };
+    let conditions: Vec<solver::Condition> = machs.iter().map(|&m| solver::Condition::new(m, if half { LIFT_ALPHAS[0] } else { 0.0 })).collect();
+    let variants = std::env::var("BOWSHOCK_VARIANTS").unwrap_or_else(|_| "cold default".to_string());
+    let mut reference: Option<Vec<f64>> = None;
+    for name in variants.split_whitespace() {
+        for k in ["RESCALE", "DRIFT", "RAMP", "SPLIT", "SUB", "RATIO", "MINMACH", "MAXMACH"] {
+            std::env::remove_var(format!("BOWSHOCK_WARM_{k}"));
+        }
+        let warm = name != "cold";
+        if warm && name != "default" {
+            for kv in name.split('+') {
+                let (k, v) = kv.split_once('=').unwrap_or_else(|| panic!("variant {name}: KEY=VALUE+KEY=VALUE"));
+                std::env::set_var(format!("BOWSHOCK_WARM_{k}"), v);
+            }
+        }
+        let kind = if half { NodeKind::Lift } else { NodeKind::Drag };
+        let analysis = node_analysis(&job, kind, &session, 120.0, grid_mach, true, grid_mach, warm).unwrap_or_else(|_| panic!("the node analysis"));
+        let _ = solver::take_facade_timings();
+        let t = Instant::now();
+        let polar = analysis.run(&conditions).expect("the table solves");
+        let wall = t.elapsed().as_secs_f64();
+        let starts = solver::take_facade_timings();
+        let value = |p: &solver::PolarPoint| p.forces.map_or(p.drag.total, |f| f.cn);
+        let values: Vec<f64> = polar.points.iter().map(value).collect();
+        let (mut its, mut worst) = (0usize, 0.0f64);
+        for (k, p) in polar.points.iter().enumerate() {
+            let how = starts.iter().find(|s| s.what == "point" && s.mach == p.mach).map_or("", |s| if s.neighbour.is_empty() { s.seed } else { s.neighbour });
+            let change = reference.as_ref().map_or(0.0, |r| 100.0 * (values[k] / r[k] - 1.0));
+            worst = worst.max(change.abs());
+            its += p.detail.iterations;
+            println!(
+                "VARIANT {name} M {:.2}: {} its, {} {:.5} ({change:+.2} % against cold), {:?}, start {how:?}",
+                p.mach,
+                p.detail.iterations,
+                if half { "CN" } else { "CD" },
+                values[k],
+                p.detail.stop_reason
+            );
+        }
+        println!("VSUM {name}: {its} iterations, {wall:.1} s wall, worst change {worst:.2} %");
+        if reference.is_none() {
+            reference = Some(values);
         }
     }
 }
@@ -933,7 +1042,7 @@ fn finned_drag_split() {
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let t_all = Instant::now();
     for &mach in &machs {
-        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d(), mach).unwrap_or_else(|_| panic!("the node analysis"));
+        let analysis = node_analysis(&job, NodeKind::Drag, &session, 120.0, grid_mach, solves_3d(), mach, false).unwrap_or_else(|_| panic!("the node analysis"));
         let _ = solver::engine::timing::take_timings();
         let t = Instant::now();
         let polar = analysis.run(&[mach]).expect("the point solves");
@@ -972,8 +1081,13 @@ fn finned_subsonic_failure_path() {
         Job { plan, altitude: 120.0, nodes: vec![mach], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
     let _ = solver::engine::timing::take_timings();
     let t = Instant::now();
-    let table =
-        solve_sized(&job, &Arc::new(AtomicBool::new(false)), |e| println!("EVENT {}", format!("{e:?}").chars().take(160).collect::<String>()), solves_3d());
+    let table = solve_sized(
+        &job,
+        &Arc::new(AtomicBool::new(false)),
+        |e| println!("EVENT {}", format!("{e:?}").chars().take(160).collect::<String>()),
+        solves_3d(),
+        false,
+    );
     println!("APP RESULT after {:.1} s: {:?}", t.elapsed().as_secs_f64(), table.as_ref().map(|t| (t.points.len(), t.notes.clone())));
     for r in solver::engine::timing::take_timings() {
         println!("RUN M {:.2}: {} cells, {} its (stop {}), {:.1} s, {}", r.mach, r.cells, r.iters_exec, r.iters_stop, r.run_s, r.stop);

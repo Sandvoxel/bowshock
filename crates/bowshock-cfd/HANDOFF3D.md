@@ -67,6 +67,7 @@ to about 4" and items 43-44.
   `PolarPoint::{cd_band, x_cp_band}` (and `cd_uncertainty` = the larger half) are filled by `Engine::Solver3` for every point, `estimate_uncertainty` is the legacy engine's only.
   `CfdTable::bands` / `CfdLiftTable::bands` mark a table as the 3D engine's; Analyze shows `Cd band`, `Margin lower bound` and `Not meshed: lugs, buttons` (one lug changed an
   apogee by +16 % at model scale; the lugs' build-up drag is in the table but is not in the band).
+  - **Warm start across Mach numbers (branch `warmsweep`, item 59):** `Analysis::warm_start` / `BOWSHOCK_WARM_START`, opt-in, default off. Neighbour field rescaled to the new Mach number (`engine/warm3.rs`), CFL kept, per-domain order and limits (`WarmTuning::of`). Final settings on 3 sector points (0.5/0.8/0.9) -18 % it, -22 % wall, CD within 0.11 %; half domain 1.1-3.0 -31 % it, -28 % wall, CN within 0.18 %. First-design subsonic sector 0.1-0.9 saved 13 % of its iterations and 12 % wall (CD -0.07 % at 0.8/0.9, -1.3 % at 0.5 from 0.1, hence the factor-2 neighbour limit); the supersonic points and the transonic half domain are not faster than the seeded/cold start (the first design was +2 100 it). Not recommended as default (item 59); no full run on the final settings.
 - **Still open:**
   - subsonic CN_alpha: +13.4 % against the tunnel at Mach 0.79 in-plane (G-L1 FAIL, 13 % band), +11 % against free flight (±14-17 % in the data); at the steady-RANS /
     data limit (items 46, 51);
