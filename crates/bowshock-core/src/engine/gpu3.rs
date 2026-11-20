@@ -23,16 +23,23 @@ pub const SYNC: usize = SAMPLE_EVERY;
 /// The grid shape and precision of the last solver built in this process: the idle buffers Luma pools are sized for it (see [`make_room`]).
 static LAST_SHAPE: std::sync::Mutex<Option<([usize; 3], Precision)>> = std::sync::Mutex::new(None);
 
+/// Grids below this many cells (the seed wedges) do not count as a change of shape in [`make_room`].
+const SMALL_GRID_CELLS: usize = 200_000;
+
 /// Before a 3D solver is built on `ctx`: gives the idle buffers of the other grid shapes back to the device (`Context::trim`; a solver of the same shape as the last one finds its
 /// buffers in the pool and keeps them: a table rebuilds its solver for every node) and refuses a grid that the device cannot hold ([`bowshock_cfd::gpu::device_bytes3`]
 /// against the context's budget less what the solvers still alive hold), with the error "grid of N cells needs ~X GiB, device budget Y GiB" instead of a failed allocation.
 fn make_room(ctx: &luma::Context, host: &Solver3, prec: Precision) -> Result<(), Error> {
     let shape = ([host.grid.ni, host.grid.nj, host.grid.nk], prec);
-    let changed = LAST_SHAPE.lock().map_err(|_| Error::Internal("the shape of the last GPU solver is poisoned".into()))?.replace(shape) != Some(shape);
-    if changed {
-        ctx.trim()?;
-    }
     let cells = host.grid.ni * host.grid.nj * host.grid.nk;
+    // a seed wedge (a few ten thousand cells) between two finned solvers is no change of shape: its buffers are of other size classes, and trimming the pool for it and again for the
+    // next finned solver would give back and allocate again the gigabytes the finned ones share
+    if cells >= SMALL_GRID_CELLS || no_fixedcost() {
+        let changed = LAST_SHAPE.lock().map_err(|_| Error::Internal("the shape of the last GPU solver is poisoned".into()))?.replace(shape) != Some(shape);
+        if changed {
+            ctx.trim()?;
+        }
+    }
     let sub_iters = match host.cfg.scheme {
         Scheme3::Implicit(p) => p.sub_iters,
         Scheme3::Explicit => 0,
@@ -152,6 +159,21 @@ impl GpuRunner3 {
         bowshock_cfd::timing::timed("wall_faces", || runner.upload_wall_faces(case))?;
         runner.setup_parts = bowshock_cfd::timing::take();
         Ok(runner)
+    }
+
+    /// Whether the device has room for a second solver of about this size while this one iterates (the next run's, built ahead: [`crate::analysis`] `fire_next_hint`): the memory
+    /// estimate of this solver's peak plus a solver a third bigger (the angle grids are bigger than the sectors) within the guard of [`make_room`]. No budget (a CPU device) always fits.
+    pub(crate) fn room_for_next(&self) -> bool {
+        let g = &self.host.grid;
+        let cells = g.ni * g.nj * g.nk;
+        let sub_iters = match self.host.cfg.scheme {
+            Scheme3::Implicit(p) => p.sub_iters,
+            Scheme3::Explicit => 0,
+        };
+        let prec = self.gpu.precision();
+        let need = bowshock_cfd::gpu::device_bytes3(cells, prec, sub_iters, self.host.rans().is_some());
+        let next = bowshock_cfd::gpu::device_bytes3(cells + cells / 3, prec, sub_iters, self.host.rans().is_some());
+        fits(cells, need.saturating_add(next), 0, self.gpu.context().memory_stats().budget_bytes).is_ok()
     }
 
     /// This runner was built ahead, on a background thread, and waited `wait` seconds for: its set-up time is not the point's (timing only: the seconds of the build and the upload

@@ -169,9 +169,9 @@ fn runner_ahead() -> bool {
 /// Starts the build of the hinted case, once (the hint is taken): its GPU solver (host solver, the geometry arrays and the state on the device) on a background thread, or only its
 /// host solver. Luma's context is shared between threads, each with its own recordings: the uploads of the next run overlap with the iterations of this one.
 #[cfg(feature = "gpu")]
-fn fire_next_hint() {
+fn fire_next_hint(now: &crate::engine::gpu3::GpuRunner3) {
     let Some(case) = NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else { return };
-    if !runner_ahead() {
+    if !runner_ahead() || !now.room_for_next() {
         case.prefetch_solver();
         return;
     }
@@ -568,7 +568,7 @@ impl Gpu3 {
         };
         // the iterations of a finned point are the time the next run's host set-up is built in (a wedge's are too short to hide a build in)
         if !extended {
-            fire_next_hint();
+            fire_next_hint(&state.runner);
         }
         let p = match start {
             Some(start) => {
