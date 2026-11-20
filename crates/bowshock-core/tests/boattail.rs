@@ -61,6 +61,7 @@ fn body_of(parts: &[&str]) -> BaseBody {
 
 fn case_of(m: f64, variant: &str) -> Case3 {
     let parts: Vec<&str> = variant.split('+').collect();
+    bowshock_cfd::limiter::set_diag_sensor(0.0, 0.0);
     let level = parts.iter().find_map(|p| p.strip_prefix("lvl")).map_or(0, |v| v.parse::<u32>().expect("lvlN"));
     let mut c = if parts.contains(&"closed") { bowshock_cases::wedge::sting_case(m, body_of(&parts), level) } else { Case3::wedge(m, body_of(&parts), level) };
     for p in &parts {
@@ -123,6 +124,9 @@ fn case_of(m: f64, variant: &str) -> Case3 {
         }
         if let Some(v) = p.strip_prefix("cfl0_") {
             c.numerics.implicit.cfl0 = v.parse().expect("cfl0_X");
+        }
+        if let Some(v) = p.strip_prefix("epsfix") {
+            c.numerics.implicit.eps_fix = v.parse().expect("epsfixX");
         }
         if let Some(v) = p.strip_prefix("sub") {
             c.numerics.implicit.sub_iters = v.parse().expect("subN");
@@ -190,6 +194,23 @@ fn bt1_fox_boattail() {
                 .map(|w| (w.face.c[0], (w.pw - p_inf) / q, (w.p0 - p_inf) / q))
                 .collect();
             cps.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // the pressure drag of every body segment from the extrapolated wall pressure and from the first-cell pressure (the wall faces' `area * n_x`, as `drag_parts_from`)
+            {
+                let norm = (2.0 * std::f64::consts::PI / g.theta_span) / (q * std::f64::consts::FRAC_PI_4);
+                let mut acc: Vec<(u16, f64, f64)> = Vec::new();
+                for w in wall_samples(g, &h.u) {
+                    if let Wall::Body(n) = w.class {
+                        let idx = acc.iter().position(|a| a.0 == n).unwrap_or_else(|| {
+                            acc.push((n, 0.0, 0.0));
+                            acc.len() - 1
+                        });
+                        acc[idx].1 += (w.pw - p_inf) * w.face.area * w.sign * w.face.n[0] * norm;
+                        acc[idx].2 += (w.p0 - p_inf) * w.face.area * w.sign * w.face.n[0] * norm;
+                    }
+                }
+                acc.sort_by_key(|a| a.0);
+                println!("{tag} segment drag (wall extrapolation / first cell): {}", acc.iter().map(|(n, a, b)| format!("seg{n} {a:+.4} / {b:+.4}")).collect::<Vec<_>>().join(", "));
+            }
             // Cp at the data orifices (linear interpolation of the wall samples)
             let at = |x: f64| -> f64 {
                 let i = cps.partition_point(|c| c.0 < x).clamp(1, cps.len() - 1);
@@ -414,7 +435,7 @@ fn quad(k: usize, nose: bool, cp: Option<&[f64]>) -> f64 {
     }
     xq.push(b);
     cq.push(pts.last().unwrap().1);
-    (0..xq.len() - 1).map(|i| -0.5 * (cq[i] + cq[i + 1]) * (area(xq[i + 1]) - area(xq[i]))).sum()
+    (0..xq.len() - 1).map(|i| 0.5 * (cq[i] + cq[i + 1]) * (area(xq[i + 1]) - area(xq[i]))).sum()
 }
 
 /// The amplification of a perturbation of the y-momentum of the first fluid row above the sting (and, for comparison, above the cylinder) in one implicit iteration, CPU against GPU, at fixed CFL
@@ -435,7 +456,8 @@ fn bt4_perturbation() {
         case.numerics.implicit.cfl0 = cfl;
         case.numerics.implicit.cfl_max = cfl;
         case.numerics.first_order_iters = 0;
-        let mut r = bowshock_core::engine::gpu3::GpuRunner3::new(&case, Precision::F32).expect("gpu runner");
+        let cpu_only = std::env::var("BT_CPU_ONLY").is_ok();
+        let mut r = (!cpu_only).then(|| bowshock_core::engine::gpu3::GpuRunner3::new(&case, Precision::F32).expect("gpu runner"));
         let mut cpu = case.build_solver_cached().expect("cpu solver");
         let g = cpu.grid.clone();
         let first_fluid = |i: usize| (0..g.nj).find(|&j| !g.is_solid(i, j, 0)).unwrap();
@@ -450,10 +472,15 @@ fn bt4_perturbation() {
             cpu.u.clone_from(&u0);
             cpu.restart_ramp();
             cpu.step();
-            r.gpu.set_state(&u0).expect("set state");
-            r.gpu.restart_ramp().expect("ramp");
-            r.gpu.run(1).expect("gpu step");
-            let ug = r.gpu.state_f64().expect("state");
+            let ug = match r.as_mut() {
+                Some(r) => {
+                    r.gpu.set_state(&u0).expect("set state");
+                    r.gpu.restart_ramp().expect("ramp");
+                    r.gpu.run(1).expect("gpu step");
+                    r.gpu.state_f64().expect("state")
+                }
+                None => cpu.u.clone(),
+            };
             let amp = |u: &[[f64; 5]]| -> [f64; 5] {
                 let mut a = [0.0f64; 5];
                 for &i in &cols {
