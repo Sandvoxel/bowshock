@@ -74,11 +74,6 @@ const RAMP_SLOPE: f64 = 0.5;
 /// example rocket's rows are 0.77 and 1.29 moves high and keep their four).
 const FADE_TRIGGER: f64 = 0.6;
 
-/// EXPERIMENT (removed before the commit of the fix): smallest first chord cell of a row, as a fraction of the root's.
-fn le_floor() -> f64 {
-    std::env::var("BOWSHOCK_LE_FLOOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0)
-}
-
 /// A zone is widened when the move of an edge is more than this fraction of the room the segment has for it.
 const ZONE_TRIGGER: f64 = 0.5;
 
@@ -181,6 +176,9 @@ pub struct Grid3Params {
     pub fin_stack: Option<FinStack>,
     /// Roughness of the body and the fins, carried on the grid for the wall treatment ([`Grid3::wall_ks`]).
     pub roughness: PartRoughness,
+    /// Rounded fins keep the first chord cell of the root row down the span (`FinPlan::row_offsets`, DESIGN3D item 66); off by default: it makes the supersonic Rabia points
+    /// of the Coarse tier solve (Mach 1.3 / 2.3 in 1 200 iterations) and its Mach 0.8 point fail.
+    pub fin_le_rows: bool,
 }
 
 impl Grid3Params {
@@ -203,6 +201,7 @@ impl Grid3Params {
             fin_stack: None,
             fin_cells_across: 1,
             roughness: PartRoughness::default(),
+            fin_le_rows: false,
         }
     }
 }
@@ -352,7 +351,7 @@ impl FinPlan {
         if !self.round_rows || chord <= 1e-12 || (chord - c_root).abs() <= 1e-12 * c_root {
             return self.fin_offs.iter().map(|o| o * chord / c_root).collect();
         }
-        let edge = (0.3 * chord / nf as f64).min(self.edge).max(le_floor() * self.edge);
+        let edge = (0.3 * chord / nf as f64).min(self.edge);
         let fresh = two_sided_nodes(chord, nf, edge);
         // the nodes of the root row that sit on a body station stay where they were, scaled
         let root = two_sided_nodes(c_root, nf, self.edge);
@@ -759,8 +758,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         // a round edge of radius `t / 2` stands in the grid as a polygon of a few cells: with the first cell as wide as the radius its corners turn the flow by 60 degrees and the
         // swept thick fin of the Rabia fixture (radius 0.03 d, cell 0.031 d) grew a vacuum (p 1e-5, Mach 900) at its leading edge that no CFL cured; a first cell of a fourth of
         // the radius (not below a tenth of the chord's cell: that and below diverged on the example rocket) settles at Mach 0.8 in 770 iterations (Draft)
-        let cells = std::env::var("BOWSHOCK_LE_CELLS").ok().and_then(|v| v.parse().ok()).unwrap_or(LE_RADIUS_CELLS);
-        edge = edge.min((0.5 * f.thickness / cells).max(0.1 * f.root_chord / nf as f64));
+        edge = edge.min((0.5 * f.thickness / LE_RADIUS_CELLS).max(0.1 * f.root_chord / nf as f64));
     }
     let mut fin_offs = two_sided_nodes(f.root_chord, nf, edge);
     fin_offs[nf] = x_te_root - x_le_root;
@@ -936,7 +934,7 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         sj,
         fin_offs,
         edge,
-        round_rows: matches!(f.profile, FinProfile::Rounded) && std::env::var_os("BOWSHOCK_LE_ROWS").is_none_or(|v| v != "0"),
+        round_rows: matches!(f.profile, FinProfile::Rounded) && p.fin_le_rows,
     })
 }
 
@@ -1100,7 +1098,7 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         // higher is a shear of 45 degrees; a fin with room ahead of its edge, Byrum's, sheared its rows above the tip within four cells, 10 degrees between the cell edges), and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
         // did at 75 degrees)
         let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
-        let nfade = if widened || (height((pl.j_tip + 4).min(nj - j_off)) < FADE_TRIGGER * up && std::env::var_os("BOWSHOCK_NFADE_OLD").is_none()) {
+        let nfade = if widened || (height((pl.j_tip + 4).min(nj - j_off)) < FADE_TRIGGER * up) {
             (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip)
         } else {
             4
@@ -1128,18 +1126,7 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
         };
         let x_le_eff = |jj: usize| pl.x_le_root + vj_of(jj) * (row(jj).1 - pl.x_le_root);
         let x_te_eff = |jj: usize| pl.x_te_root + vj_of(jj) * (row(jj).1 + row(jj).2 - pl.x_te_root);
-        let off = std::env::var_os("BOWSHOCK_RAMP_OFF").is_some();
-        let (need_le, need_te) = if off { (0.0, 0.0) } else { (ramp_need(pl.i_le, &x_le_eff), ramp_need(pl.i_te, &x_te_eff)) };
-        if std::env::var_os("BOWSHOCK_RAMP_DEBUG").is_some() {
-            let dx = |n: usize| xs[pl.i_le] - xs[pl.i_le.saturating_sub(n)];
-            let ex = |n: usize| xs[(pl.i_te + n).min(ni)] - xs[pl.i_te];
-            println!(
-                "RAMP need le {need_le:.4} (columns give {:.4}, widened {widened}) te {need_te:.4} (columns give {:.4}) nfade {nfade} height(tip+4)/up {:.3}",
-                dx(8) - dx(4),
-                ex(8) - ex(4),
-                height((pl.j_tip + 4).min(nj - j_off)) / up
-            );
-        }
+        let (need_le, need_te) = (ramp_need(pl.i_le, &x_le_eff), ramp_need(pl.i_te, &x_te_eff));
         // columns beside the edges: the rows follow the tip's cylinder at full weight over the 4 columns next to the edge and fade away over the next 4; when the sweep zone is
         // widened ([`ZONE_REACH`]) the sweep shears the rows of those columns by up to the move of the edge, and a fade over cells that short bends them (a slope of 0.44 against
         // the shear's 0.42 at Mach 2.3 of the Rabia grid) into a fold: the fade is `RAMP_REACH` times the move longer. Where those columns do not give the length `ramp_need`
@@ -1326,34 +1313,7 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
             }
         }
     }
-    let dbg = std::env::var_os("BOWSHOCK_FOLD_DUMP").map(|_| (x.clone(), y.clone(), z.clone()));
-    let mut g = match Grid3::try_from_nodes(ni, nj, nk, x, y, z) {
-        Ok(g) => g,
-        Err(e) => {
-            if let Some((x, y, z)) = dbg {
-                let n: Vec<usize> = e.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).take(3).map(|s| s.parse().unwrap()).collect();
-                let (ci, cj, ck) = (n[0], n[1], n[2]);
-                for j in cj.saturating_sub(2)..=(cj + 3).min(nj) {
-                    for k in [ck, ck + 1] {
-                        let row: Vec<String> = (ci.saturating_sub(3)..=(ci + 4).min(ni))
-                            .map(|i| {
-                                let id = (k * (nj + 1) + j) * (ni + 1) + i;
-                                format!("{:.4}/{:.4}", x[id], y[id].hypot(z[id]))
-                            })
-                            .collect();
-                        println!("FOLD j {j} k {k} i {}..: {}", ci.saturating_sub(3), row.join(" "));
-                    }
-                }
-                if let Some((pl, _)) = &plan {
-                    println!(
-                        "FOLD plan i_le {} i_te {} i_seg0 {} i_seg1 {} i_floor {} j_tip {} j_off {j_off}",
-                        pl.i_le, pl.i_te, pl.i_seg0, pl.i_seg1, pl.i_floor, pl.j_tip
-                    );
-                }
-            }
-            return Err(Error::Grid(e));
-        }
-    };
+    let mut g = Grid3::try_from_nodes(ni, nj, nk, x, y, z).map_err(Error::Grid)?;
     g.sym = sym;
     g.theta_span = span;
     g.roughness = p.roughness;
@@ -1919,6 +1879,7 @@ mod tests {
             let nose = Nose::Cone { half_angle: 10f64.to_radians() };
             p.sting.body = BaseBody { body: Body { nose }, segments: vec![Segment { length: 14.0, slope: 0.0 }], sting_radius: 0.0 };
             p.sting.n_seg = vec![56 << level];
+            p.fin_le_rows = true;
             let g = body_grid3(&p).expect("the grid builds without a negative volume");
             let (le_root, j0, j_tip) = (g.solid[0].i.start, g.solid[0].j.start, g.solid[0].j.len());
             let k_side = if g.solid[0].k.start > 0 { g.solid[0].k.start - 1 } else { g.solid[0].k.end };

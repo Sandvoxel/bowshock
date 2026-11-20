@@ -28,6 +28,9 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     if let Some(x) = env_f("DIAG_FIRST") {
         c.numerics.first_order_iters = x as usize;
     }
+    if std::env::var_os("DIAG_LE_ROWS").is_some() {
+        c.grid.fin_le_rows = true;
+    }
     if let Some(x) = env_f("DIAG_ACROSS") {
         c.grid.fin_cells_across = x as usize;
     }
