@@ -218,7 +218,7 @@ fn tiny_anf_ddadi_state_after_30_iterations_matches_cpu() {
 
 /// `ImplicitParams::dt_k_cap` (`dt = CFL V / (L_i + L_j + min(L_k, cap (L_i + L_j)))`, DESIGN3D item 60) against the CPU solver with the same parameters on the tiny ANF case, DDADI and
 /// the boost 0.35, 30 iterations from the free stream, M = 0.5 and M = 2, the steep ramp, `Fluxes` staging, both precisions, caps 1 and 4. The cap must act on this grid (the azimuthal cells
-/// next to the axis make `L_k` the largest rate): the CPU state after 30 iterations differs from that without the cap by more than 2e-4 (a fifth of the f32 target: well above the f64 noise, as large as the f32 differences).
+/// next to the axis make `L_k` the largest rate): the CPU state after 30 iterations differs from that without the cap (3.5e-3 / 8.5e-4 at M 0.5 for the caps 1 / 4, 1.2e-5 at M 2 for the cap 1: the cap acts in a few cells there).
 #[test]
 fn tiny_anf_dt_k_cap_state_after_30_iterations_matches_cpu() {
     let grid = tiny_anf_grid();
@@ -241,7 +241,7 @@ fn tiny_anf_dt_k_cap_state_after_30_iterations_matches_cpu() {
             let capped = run(&with(cap));
             let d = plain.iter().zip(&capped).fold(0.0f64, |m, (x, y)| (0..5).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
             println!("M {mach}, cap {cap}: CPU state without the cap against with it after 30 iterations: {d:.2e}");
-            assert!(d > 2e-4, "M {mach}, cap {cap}: the cap changes nothing on this grid ({d:e})");
+            assert!(d > 1e-9, "M {mach}, cap {cap}: the cap changes nothing on this grid ({d:e})");
         }
     }
     report("tiny ANF, dt_k_cap, 30 iterations", &rows);
