@@ -283,7 +283,8 @@ fn table_path(f: &Fixture, engine: &str) -> PathBuf {
 
 /// Where a solved table is written: `$FLIGHTVAL_OUT` (a GPU queue job writes `out/`, which `gpuq` copies back) or the fixture directory.
 fn write_table(name: &str, table: &CfdTable) {
-    let dir = std::env::var("FLIGHTVAL_OUT").map_or_else(|_| dir().join("tables"), PathBuf::from);
+    // a relative `$FLIGHTVAL_OUT` is relative to the repository root (`cargo test` runs in the package directory, where `gpuq` does not look for `out/`)
+    let dir = std::env::var("FLIGHTVAL_OUT").map_or_else(|_| dir().join("tables"), |o| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(o));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), serde_json::to_vec_pretty(table).unwrap()).unwrap();
 }
