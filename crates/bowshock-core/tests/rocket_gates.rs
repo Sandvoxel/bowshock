@@ -284,8 +284,7 @@ fn print_axial(lines: &mut Lines, id: &str, case: &str, (gated, viscous, known):
 
 /// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, Mach 0.6 / 0.8 gated (fins on
 /// 15 %, fins off 12 % or 0.03, the increment 30 % or 0.03) and Mach 0.7-1.2 INFO (reading uncertainty 0.02 at Mach 0.9-1.0), as G-F4 for the short model. `FAIL KNOWN` (DESIGN3D item 55):
-/// the fins-off lines at Mach 0.6 / 0.8: +16.8 / +16.0 % (the body friction of the fully turbulent solve, 0.235 of 0.29, is where the 0.04 sits; the short model's +8 % scales with the
-/// wetted length).
+/// the fins-off lines at Mach 0.6 / 0.8: +16.8 / +16.0 % ([INFERENCE] the body friction of the fully turbulent solve, 0.235 of the 0.29, is where the 0.04 sits; not tested against a laminar-run or a lower-friction solve).
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
 fn gate_x4_arcas_long_axial_force() {
@@ -301,7 +300,7 @@ fn gate_x4_arcas_long_axial_force() {
         match (a, b) {
             (Ok((so, vo, go)), Ok((sn, vn, gn))) => {
                 let (gated, viscous) = ([0.6, 0.8].contains(&m), go && gn);
-                // fins off at Mach 0.6 / 0.8: the long body's friction (0.235 of 0.29, fully turbulent) is where the solver is 16 % above the data (DESIGN3D item 55)
+                // fins off at Mach 0.6 / 0.8: +16 % [INFERENCE: the friction of the fully turbulent solve, 0.235 of 0.29] (DESIGN3D item 55)
                 print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_off"), (gated, viscous, true), vo, off, Band::RelAbs(0.12, 0.03), &so);
                 print_axial(&mut lines, "G-X4", &format!("arcas-long-M{m:.2}:ca_fins_on"), (gated, viscous, false), vn, on, Band::Rel(0.15), &sn);
                 compare(&mut lines, gated, viscous, false, "G-X4", &format!("arcas-long-M{m:.2}:increment"), vn - vo, on - off, Band::RelAbs(0.30, 0.03));
@@ -317,7 +316,7 @@ fn gate_x4_arcas_long_axial_force() {
 
 /// G-X5: the Lewis sounding-rocket stage's axial force at zero incidence without the base (`yuska` Fig. 5, "adjusted to free-stream static pressure at the base"), the four-fin sector of the
 /// Coarse tier, models A, B and C at the 10 x 10 ft Mach numbers (the 8 x 6 ft ones of model A INFO, and three of the four do not converge: DESIGN3D item 55): 12 %, every line
-/// `FAIL KNOWN` (+19 to +34 %): the fin is the planform the mesher takes in place of the drawing's (area as drawn, leading-edge sweep 28 instead of 45 degrees), and the report's base
+/// `FAIL KNOWN` (+19 to +34 %; [INFERENCE] causes, not separated by a run): the fin is the planform the mesher takes in place of the drawing's (area as drawn, leading-edge sweep 28 instead of 45 degrees), and the report's base
 /// correction does not say whether it covers the fins' trailing-edge faces (0.9 of the body area, flush with the base): the `ca0-without-fin-te` lines take them out too.
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
@@ -356,7 +355,7 @@ fn gate_x5_yuska_axial_force() {
 
 /// G-X6: the generalized research model B4 + F13's forebody axial force at zero incidence (`grm::FINS_ON` `CAF`: the total with the base pressure force removed; `CA - CAB`), the sector of
 /// the Coarse tier, Mach 0.80-1.30. 12 % (the report's `dCA` is 0.014, the repeats of the transonic points scatter by 0.02-0.05): Mach 0.92 / 0.94 INFO (scatter), Mach 0.80 / 0.85
-/// `FAIL KNOWN` (+13.6 / +20.4 %: the friction of a fully turbulent solve against a tunnel run whose transition the report does not give, DESIGN3D item 55).
+/// `FAIL KNOWN` (+13.6 / +20.4 %; [INFERENCE] the friction of a fully turbulent solve against a tunnel run whose transition the report does not give, DESIGN3D item 55).
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
 fn gate_x6_grm_axial_force() {
