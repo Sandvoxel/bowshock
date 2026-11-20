@@ -1,0 +1,4 @@
+#!/bin/bash
+R=rabia-short-fin-can
+tools/sweptle.sh coarse 0.8 $R BOWSHOCK_LE_FLOOR=0.5 DIAG_SNAP=100 DIAG_SNAP_EVERY=50 DIAG_MAXIT=1000
+tools/sweptle.sh coarse 1.3 $R BOWSHOCK_LE_FLOOR=0.5 DIAG_SNAP=100 DIAG_SNAP_EVERY=100 DIAG_MAXIT=1200
