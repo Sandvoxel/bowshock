@@ -50,8 +50,22 @@ pub fn is_gate(kind: TierKind, case: &Case3) -> bool {
     kind != TierKind::Euler && engine_is_viscous(case)
 }
 
+/// Whether the gates run on the GPU (`BOWSHOCK_WEDGE_BACKEND=gpu`).
+///
+/// A job of `tools/gpuq` has `GPUQ_JOB` (its id) in its environment, and a gate under it that would take the CPU backend is a lost job, not a slow one: it runs for hours
+/// without a GPU process and is killed by the queue's watchdog, or worse, finishes with CPU numbers under a GPU label. So it panics at the first use, with the fix. Without
+/// `GPUQ_JOB` (a plain `cargo test`) the CPU backend is the default, as before.
 pub fn gpu_backend() -> bool {
-    std::env::var("BOWSHOCK_WEDGE_BACKEND").as_deref() == Ok("gpu")
+    let gpu = std::env::var("BOWSHOCK_WEDGE_BACKEND").as_deref() == Ok("gpu");
+    if !gpu {
+        if let Some(job) = std::env::var_os("GPUQ_JOB") {
+            panic!(
+                "gpuq job {job:?} runs a gate on the CPU backend: BOWSHOCK_WEDGE_BACKEND is {:?}, not \"gpu\". Use tools/release_gates.sh, or submit with `env BOWSHOCK_WEDGE_BACKEND=gpu ...`",
+                std::env::var("BOWSHOCK_WEDGE_BACKEND").unwrap_or_default()
+            );
+        }
+    }
+    gpu
 }
 
 /// A Mach list from `BOWSHOCK_GATE_MACHS` (comma list) restricted to the members of `all`; every member when unset.

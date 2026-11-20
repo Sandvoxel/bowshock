@@ -31,7 +31,8 @@ case "${1:-}" in
   gpucases)
     cargo test --release -p bowshock-gpu-cases 2>&1 | grep -E "test result|FAILED|panicked|^test .* FAILED" ;;
   cpu)
-    unset BOWSHOCK_WEDGE_BACKEND
+    # an explicit CPU group (run it with `gpuq submit --cpu-ok`): the gate harness refuses the CPU backend under a gpuq job (`GPUQ_JOB`)
+    unset BOWSHOCK_WEDGE_BACKEND GPUQ_JOB
     t wedge_gates -- --ignored --nocapture --test-threads=1 gate_w1 gate_w4
     t wedge_gates -- --ignored --nocapture --test-threads=1 gate_j ;;
   *) echo "usage: $0 wedge|fins|lift|xlift|xsector|gpucases|cpu"; exit 2 ;;

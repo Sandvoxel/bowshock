@@ -214,9 +214,23 @@ pub trait WedgeRunner {
     }
 }
 
+/// Under `tools/gpuq` (`GPUQ_JOB` is set in the job's environment) the wedge gates must run on the GPU: `BOWSHOCK_WEDGE_BACKEND=gpu`, or `facade` with the facade's GPU backend (not
+/// `BOWSHOCK_FACADE_BACKEND=cpu`). A CPU run is a job the queue's watchdog kills after hours without a GPU process, or one that reports CPU numbers under a GPU label: panic at once.
+fn refuse_cpu_under_gpuq() {
+    let Some(job) = std::env::var_os("GPUQ_JOB") else { return };
+    let backend = std::env::var("BOWSHOCK_WEDGE_BACKEND").unwrap_or_default();
+    let facade_cpu = std::env::var("BOWSHOCK_FACADE_BACKEND").as_deref() == Ok("cpu");
+    if !(backend == "gpu" || (backend == "facade" && !facade_cpu)) {
+        panic!(
+            "gpuq job {job:?} runs the wedge gates on the CPU backend (BOWSHOCK_WEDGE_BACKEND {backend:?}, BOWSHOCK_FACADE_BACKEND cpu: {facade_cpu}). Use tools/release_gates.sh, or submit with `env BOWSHOCK_WEDGE_BACKEND=gpu ...`"
+        );
+    }
+}
+
 /// The wedge runner. `solver3d` / `gpu3d`: return `Some(Box::new(..))` here once a wedge exists (see [`WedgeRunner`]). The CPU runner (Euler: G-W1 and the
 /// cone and ogive of G-W4) is `cpu_wedge::CpuWedge` at the end of the file.
 fn wedge_runner() -> Option<Box<dyn WedgeRunner>> {
+    refuse_cpu_under_gpuq();
     // --- GPU runner (gpu3d, stage S2): `BOWSHOCK_WEDGE_BACKEND=gpu`, through `tools/gpuq` (see `wedge_gates/gpu.rs`) ---
     #[cfg(feature = "gpu")]
     if std::env::var("BOWSHOCK_WEDGE_BACKEND").as_deref() == Ok("gpu") {
