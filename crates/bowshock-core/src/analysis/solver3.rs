@@ -790,7 +790,11 @@ impl Analysis {
     fn seed_case(&self, case: &Case3, c: Condition, level: u32) -> Result<Case3, Error> {
         let mut wedge = self.case_of(Kind::Wedge, c, level, case.tier, false)?;
         wedge.progress = None;
-        wedge.numerics.max_iter = wedge.numerics.max_iter.min(SEED_MAX_ITERATIONS);
+        // `BOWSHOCK_SEED_MAX_IT` / `BOWSHOCK_SEED_DRIFT` (a factor on the wedge's `drift_tol`): the measurement knobs of the seed's iterations (DESIGN3D item 69)
+        let num = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok());
+        let cap = num("BOWSHOCK_SEED_MAX_IT").map_or(SEED_MAX_ITERATIONS, |n| n as usize);
+        wedge.numerics.max_iter = wedge.numerics.max_iter.min(cap);
+        wedge.numerics.drift_tol *= num("BOWSHOCK_SEED_DRIFT").unwrap_or(1.0);
         Ok(wedge)
     }
 
