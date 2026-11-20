@@ -55,9 +55,15 @@ pub struct Fins3 {
     pub planform: Option<Planform>,
 }
 
-/// The width of the zone that absorbs the move of the leading and trailing edge along the rows of a swept or tapered fin, in units of the largest move: the cells in it are
+/// The width of the zone that absorbs the move of the leading edge along the rows of a swept or tapered fin, in units of the largest move: the cells in it are
 /// stretched (or shrunk) by at most `1 + 1 / ZONE_REACH`.
 const ZONE_REACH: f64 = 3.0;
+
+/// Cells over the radius of a round fin edge: the first chord cell is at most this fraction of it.
+const LE_RADIUS_CELLS: f64 = 4.0;
+
+/// A zone is widened when the move of an edge is more than this fraction of the room the segment has for it.
+const ZONE_TRIGGER: f64 = 0.5;
 
 /// The height over the tip row, in units of the largest move of the edges, over which the move fades away above the fin (at least four rows).
 const FADE_REACH: f64 = 1.5;
@@ -143,8 +149,6 @@ pub struct Grid3Params {
     pub level: u32,
     /// Cells over the fin root chord (`None`: `32 << level`; the ANF study found 16 too coarse for the fin loading at M >= 2).
     pub fin_chord_cells: Option<usize>,
-    /// Cells over the radius of a round leading edge (`FinProfile::Rounded`: half the thickness): the first cell of the chord clustering is at most that fraction of it (`0`: off).
-    pub le_radius_cells: f64,
     /// Cells across the thickness of a fin (>= 1; 1 is the one-cell layer of the first grids, bit for bit). They are in `k`, for the solid fin and for the fluid columns
     /// ahead of the leading edge and behind the trailing edge (the base region of a blunt trailing edge has that many cells across); a half fin on a symmetry plane
     /// (a sector, an in-plane fin of a half domain) owns half of them, rounded down, at least one. With a `fin_stack` they are added to the stack's cells; without, they
@@ -177,7 +181,6 @@ impl Grid3Params {
             nk,
             level,
             fin_chord_cells: None,
-            le_radius_cells: 0.0,
             span_cells: None,
             domain: Domain3::Half { phase: FinPhase::Between },
             fin_stack: None,
@@ -713,8 +716,11 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     // minimum chord spacing 0.3 c / nf at the edges: 0.2 resolves the blunt leading edge like 48 cells (ANF face Cp 0.78 -> 1.02) at +1 % cells, 0.1 and below diverge on the
     // example rocket (DESIGN3D item 44)
     let mut edge = 0.3 * f.root_chord / nf as f64;
-    if p.le_radius_cells > 0.0 && matches!(f.profile, FinProfile::Rounded) {
-        edge = edge.min(0.5 * f.thickness / p.le_radius_cells);
+    if matches!(f.profile, FinProfile::Rounded) {
+        // a round edge of radius `t / 2` stands in the grid as a polygon of a few cells: with the first cell as wide as the radius its corners turn the flow by 60 degrees and the
+        // swept thick fin of the Rabia fixture (radius 0.03 d, cell 0.031 d) grew a vacuum (p 1e-5, Mach 900) at its leading edge that no CFL cured; a first cell of a fourth of
+        // the radius (not below a tenth of the chord's cell: that and below diverged on the example rocket) settles at Mach 0.8 in 770 iterations (Draft)
+        edge = edge.min((0.5 * f.thickness / LE_RADIUS_CELLS).max(0.1 * f.root_chord / nf as f64));
     }
     let mut fin_offs = two_sided_nodes(f.root_chord, nf, edge);
     fin_offs[nf] = x_te_root - x_le_root;
@@ -1062,24 +1068,27 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 None => (frac, pl.x_le_root + f.sweep * frac, f.root_chord + (f.tip_chord - f.root_chord) * frac),
             }
         };
-        // sweep and taper: piecewise-linear remap of the segment nodes. The nodes ahead of the leading edge and behind the trailing edge absorb what the edges move by
-        // (the leading edge of the tip row is `sweep` aft of the root's): over a zone [`ZONE_REACH`] times the largest move wide, so that no cell takes it alone. The zone
-        // starts at the segment's end nodes (the cells of the fan and of the segment) and goes on past them, upstream to the end of the nose and downstream into the wake, when
-        // the segment has less room than that: a fin that starts at the start of its segment (a fin can) stretched the one cell ahead of it by the whole sweep (2.6 d for 3.1 d
-        // of sweep, 2 400 times the volume of the cell behind it)
+        // sweep and taper: piecewise-linear remap of the segment nodes. The nodes ahead of the leading edge absorb what the edge moves by (the leading edge of the tip row is
+        // `sweep` aft of the root's): over a zone [`ZONE_REACH`] times the largest move wide, so that no cell takes it alone. The zone starts at the segment's start node and,
+        // when the segment has less room than that, goes on past it to the end of the nose: a fin that starts at the start of its segment (a fin can) stretched the one cell
+        // ahead of it by the whole sweep (2.6 d for 3.1 d of sweep, 2 400 times the volume of the cell behind it)
         let nodes0: Vec<f64> = xs.clone();
-        let (mut up, mut down) = (0.0f64, 0.0f64);
+        let mut up = 0.0f64;
         for jj in 0..=pl.j_tip {
-            let (_, x_le, chord) = row(jj);
-            up = up.max((x_le - pl.x_le_root).abs());
-            down = down.max((x_le + chord - pl.x_te_root).abs());
+            up = up.max((row(jj).1 - pl.x_le_root).abs());
         }
-        let i_up = (pl.i_floor..=pl.i_seg0).rev().find(|&i| pl.x_le_root - nodes0[i] >= ZONE_REACH * up).unwrap_or(pl.i_floor);
-        let i_down = (pl.i_seg1..=ni).find(|&i| nodes0[i] - pl.x_te_root >= ZONE_REACH * down).unwrap_or(ni);
-        // the move fades away over the rows above the tip: four, or as many as lift the row `FADE_REACH` times the move above the tip (a row a move higher is a shear of 45
-        // degrees, and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid did at 75 degrees)
+        // the zone is only widened where the segment's own would stretch its cells by more than `ZONE_TRIGGER` (the move over the room it has, or over the width of the one cell
+        // that absorbs it when it has none): a fin with room keeps the grid it always had. Only the leading edge's: behind the trailing edge the one cell takes the move of the
+        // taper as it always did (the example rocket's trailing edge moves 0.13 d over a 0.015 d cell, and its table is as it was)
+        let room_up = if pl.i_seg0 < pl.i_le { pl.x_le_root - nodes0[pl.i_seg0] } else { nodes0[pl.i_le] - nodes0[pl.i_le.saturating_sub(1)] };
+        let widened = up > ZONE_TRIGGER * room_up;
+        let i_up =
+            if widened { (pl.i_floor..=pl.i_seg0).rev().find(|&i| pl.x_le_root - nodes0[i] >= ZONE_REACH * up).unwrap_or(pl.i_floor) } else { pl.i_seg0 };
+        // the move fades away over the rows above the tip: four, or when the zone was widened as many as lift the row `FADE_REACH` times the move above the tip (a row a move
+        // higher is a shear of 45 degrees, and the rows of the columns next to the fin, bent to meet its tip, fold under a steeper one: the cells at x = 30.2 d of the Rabia grid
+        // did at 75 degrees)
         let height = |jj: usize| (pl.sj[jj] - pl.sj[pl.j_tip]) * (r_far - pl.r_t);
-        let nfade = (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up.max(down)).unwrap_or(nj - j_off - pl.j_tip);
+        let nfade = if widened { (4..=nj - j_off - pl.j_tip).find(|&n| height(pl.j_tip + n) >= FADE_REACH * up).unwrap_or(nj - j_off - pl.j_tip) } else { 4 };
         for jj in 0..(pl.j_tip + nfade).min(nj - j_off + 1) {
             let j = j_off + jj;
             let vj = if jj <= pl.j_tip { 1.0 } else { 1.0 - (jj - pl.j_tip) as f64 / nfade as f64 };
@@ -1090,8 +1099,8 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
             }
             knots.push((pl.i_le, pl.x_le_root, x_le));
             knots.push((pl.i_te, pl.x_te_root, x_le + chord));
-            if i_down > pl.i_te {
-                knots.push((i_down, nodes0[i_down], nodes0[i_down]));
+            if pl.i_te != pl.i_seg1 {
+                knots.push((pl.i_seg1, nodes0[pl.i_seg1], nodes0[pl.i_seg1]));
             }
             for w in knots.windows(2) {
                 for i in w[0].0..=w[1].0 {
@@ -1681,8 +1690,7 @@ mod tests {
         }
     }
 
-    /// A fin that starts where its segment starts (the fin can of a rocket) and is swept: the sweep is spread over the cells ahead of the leading edge (and the move of the
-    /// trailing edge over those behind it) instead of stretching the one cell next to the edge, which was 2 400 times the volume of the fin cell behind it for the delta fin of the
+    /// A fin that starts where its segment starts (the fin can of a rocket) and is swept: the sweep is spread over the cells ahead of the leading edge instead of stretching the one cell next to the edge, which was 2 400 times the volume of the fin cell behind it for the delta fin of the
     /// Rabia fixture (DESIGN3D item 57).
     #[test]
     fn the_sweep_of_a_fin_at_the_start_of_its_segment_is_spread_over_many_cells() {
@@ -1711,13 +1719,15 @@ mod tests {
         // the rows up to half the span: near a pointed tip the fin piece itself shrinks to nothing
         for j in 1..j_tip / 2 {
             let xs: Vec<f64> = (0..=g.ni).map(|i| g.x[j * (g.ni + 1) + i]).collect();
-            let (q, i) = max_ratio(&xs, first);
+            // up to the trailing edge: behind it the one cell takes the move of the taper, as it always did
+            let (q, i) = max_ratio(&xs[..=g.solid[0].i.end], first);
             if q > worst.0 {
                 worst = (q, i, j);
             }
         }
         eprintln!("sweep at a segment start: widest neighbour ratio {:.2} at i {} row {}", worst.0, worst.1, worst.2);
-        assert!(worst.0 < 2.0, "neighbouring cell widths differ by {:.1} at i {} of row {}", worst.0, worst.1, worst.2);
+        // the cell ahead of the edge is the segment's own, 3 times the finer edge cell of the round section (more in the rows of a tapering chord): it was 2 400
+        assert!(worst.0 < 6.0, "neighbouring cell widths differ by {:.1} at i {} of row {}", worst.0, worst.1, worst.2);
     }
 
     /// Axial node positions along the wall row of a 3D grid.

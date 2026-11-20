@@ -34,9 +34,6 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     if let Some(x) = env_f("DIAG_CHORD") {
         c.grid.fin_chord_cells = Some(x as usize);
     }
-    if let Some(x) = env_f("DIAG_LERC") {
-        c.grid.le_radius_cells = x;
-    }
     if env_f("DIAG_LOWMACH") == Some(0.0) {
         c.numerics.low_mach = false;
     }
