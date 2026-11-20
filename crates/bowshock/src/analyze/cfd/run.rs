@@ -558,7 +558,7 @@ pub(super) fn work_list(job: &Job, warm: bool) -> Vec<Item> {
         if !warm {
             return (0..machs.len()).map(|k| Item { lift, nodes: vec![k] }).collect();
         }
-        solver::warm_runs(machs).into_iter().map(|nodes| Item { lift, nodes }).collect()
+        solver::warm_runs(machs, lift, job.plan.fins.is_some()).into_iter().map(|nodes| Item { lift, nodes }).collect()
     };
     let mut all = items(&job.nodes, false);
     all.extend(items(&job.stability, true));

@@ -60,28 +60,47 @@ pub struct WarmStep {
     pub parent: Option<usize>,
 }
 
+/// The order and the limits of a warm sweep ([`warm_plan`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Order {
+    /// The points above this Mach number are solved from the highest one downward, the others from the lowest upward (`sub_up`) or from the highest of them downward.
+    pub split: f64,
+    pub sub_up: bool,
+    /// A point whose Mach number differs from its neighbour's by more than this factor (`M_new / M_old` or its inverse) starts from nothing.
+    pub max_ratio: f64,
+    /// A point below `min_mach` or above `max_mach`, or whose neighbour is, starts from nothing: a point that starts as fast from its axisymmetric seed (a finned sector at
+    /// supersonic speed), or that settles slower from a neighbour (the transonic half domain), does not need one.
+    pub min_mach: f64,
+    pub max_mach: f64,
+}
+
+impl Order {
+    /// No point has a neighbour.
+    pub const NONE: Order = Order { split: 0.0, sub_up: true, max_ratio: 1.0, min_mach: f64::INFINITY, max_mach: 0.0 };
+
+    /// Whether a point at Mach number `a` may start from one at `b`.
+    fn near(&self, a: f64, b: f64) -> bool {
+        let r = a / b;
+        r.max(1.0 / r) <= self.max_ratio && a.min(b) >= self.min_mach && a.max(b) <= self.max_mach
+    }
+}
+
 /// The order of a warm sweep over the points at the Mach numbers `machs` (distinct, any order): the points above `split` from the highest one downward, the others from the lowest
-/// one upward (`sub_up`) or from the highest of them downward, every point starting from the previous one of its run of the order and each run's first point from nothing. A
-/// point whose Mach number differs from its parent's by more than the factor `max_ratio` (`M_new / M_old` or its inverse) starts from nothing too, and so does one with a Mach number
-/// above `max_mach` or whose parent is (a point that starts as fast from its axisymmetric seed does not need a neighbour). The steps come in the order
-/// they are solved in, a parent before its children.
-pub fn warm_plan(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64, max_mach: f64) -> Vec<WarmStep> {
+/// one upward or downward ([`Order`]), every point starting from the previous one of its run of the order and each run's first point from nothing, and from nothing too where
+/// the limits of the order say so. The steps come in the order they are solved in, a parent before its children.
+pub fn warm_plan(machs: &[f64], o: &Order) -> Vec<WarmStep> {
     let mut idx: Vec<usize> = (0..machs.len()).collect();
     idx.sort_by(|&a, &b| machs[a].total_cmp(&machs[b]));
-    let (sub, sup): (Vec<usize>, Vec<usize>) = idx.into_iter().partition(|&i| machs[i] <= split);
+    let (sub, sup): (Vec<usize>, Vec<usize>) = idx.into_iter().partition(|&i| machs[i] <= o.split);
     let mut order: Vec<Vec<usize>> = Vec::new();
     // the points of the sub-split run: ascending from the lowest Mach number, or descending from the highest of them
-    order.push(if sub_up { sub } else { sub.into_iter().rev().collect() });
+    order.push(if o.sub_up { sub } else { sub.into_iter().rev().collect() });
     order.push(sup.into_iter().rev().collect());
     let mut steps = Vec::with_capacity(machs.len());
     for run in order {
         let mut parent: Option<usize> = None;
         for p in run {
-            let near = |q: usize| {
-                let r = machs[p] / machs[q];
-                r.max(1.0 / r) <= max_ratio && machs[p].max(machs[q]) <= max_mach
-            };
-            steps.push(WarmStep { point: p, parent: parent.filter(|&q| near(q)) });
+            steps.push(WarmStep { point: p, parent: parent.filter(|&q| o.near(machs[p], machs[q])) });
             parent = Some(p);
         }
     }
@@ -90,9 +109,9 @@ pub fn warm_plan(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64, max_ma
 
 /// The runs of [`warm_plan`] (the same arguments): the points that start from one another, each run's indices ascending in Mach number, the runs by their lowest Mach number. A
 /// point that starts from nothing and that no point starts from is a run of one. A machine takes a whole run, since its points are solved one after the other.
-pub fn warm_runs(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64, max_mach: f64) -> Vec<Vec<usize>> {
+pub fn warm_runs(machs: &[f64], o: &Order) -> Vec<Vec<usize>> {
     let mut runs: Vec<Vec<usize>> = Vec::new();
-    for step in warm_plan(machs, split, sub_up, max_ratio, max_mach) {
+    for step in warm_plan(machs, o) {
         match step.parent {
             Some(_) => runs.last_mut().expect("a point with a parent follows its run").push(step.point),
             None => runs.push(vec![step.point]),
@@ -109,6 +128,9 @@ pub fn warm_runs(machs: &[f64], split: f64, sub_up: bool, max_ratio: f64, max_ma
 mod tests {
     use super::*;
     use bowshock_cfd::gas3::GAMMA;
+
+    /// Every point may start from its neighbour, the supersonic run from the top and the rest from the bottom.
+    const LOOSE: Order = Order { split: 0.9, sub_up: true, max_ratio: 10.0, min_mach: 0.0, max_mach: 10.0 };
 
     fn field(mach: f64) -> Vec<Cons3> {
         // a free stream with a stagnation-like cell and a wake-like cell
@@ -171,7 +193,7 @@ mod tests {
     #[test]
     fn the_plan_runs_down_from_the_highest_supersonic_point_and_up_from_the_lowest_subsonic_one() {
         let machs = [0.1, 0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3, 3.0];
-        let plan = warm_plan(&machs, 0.9, true, 10.0, 10.0);
+        let plan = warm_plan(&machs, &LOOSE);
         assert_eq!(plan.len(), machs.len());
         let order: Vec<f64> = plan.iter().map(|s| machs[s.point]).collect();
         assert_eq!(order, vec![0.1, 0.5, 0.8, 0.9, 3.0, 2.3, 1.7, 1.3, 1.1, 1.0]);
@@ -184,30 +206,42 @@ mod tests {
             }
         }
         // the sub-split run downward, and the ratio limit
-        let down = warm_plan(&machs, 0.9, false, 4.0, 10.0);
+        let down = warm_plan(&machs, &Order { sub_up: false, max_ratio: 4.0, ..LOOSE });
         let order: Vec<f64> = down.iter().map(|s| machs[s.point]).collect();
         assert_eq!(&order[..4], &[0.9, 0.8, 0.5, 0.1]);
         assert_eq!(down[3].parent, None, "0.5 to 0.1 is a factor 5");
         assert_eq!(down[2].parent.map(|p| machs[p]), Some(0.8));
         // one run from the top, and one point
-        let all = warm_plan(&machs, 0.0, true, 10.0, 10.0);
+        let all = warm_plan(&machs, &Order { split: 0.0, ..LOOSE });
         assert_eq!(all[0].point, 9);
         assert_eq!(all.iter().filter(|s| s.parent.is_none()).count(), 1);
-        assert_eq!(warm_plan(&[2.0], 0.9, true, 4.0, 10.0), vec![WarmStep { point: 0, parent: None }]);
+        assert_eq!(warm_plan(&[2.0], &Order { max_ratio: 4.0, ..LOOSE }), vec![WarmStep { point: 0, parent: None }]);
     }
 
     #[test]
     fn the_runs_are_the_chains_of_the_plan_ascending_and_a_point_without_a_neighbour_is_a_run() {
         let machs = [0.1, 0.5, 0.8, 0.9, 1.0, 1.1, 1.3, 1.7, 2.3, 3.0];
-        assert_eq!(warm_runs(&machs, 0.9, true, 10.0, 10.0), vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7, 8, 9]]);
+        assert_eq!(warm_runs(&machs, &LOOSE), vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7, 8, 9]]);
         // only the points up to Mach 0.9 start from a neighbour
-        let sub = warm_runs(&machs, 0.9, true, 10.0, 0.9);
+        let sub = warm_runs(&machs, &Order { max_mach: 0.9, ..LOOSE });
         assert_eq!(sub[0], vec![0, 1, 2, 3]);
         assert_eq!(sub.len(), 1 + 6);
         assert!(sub[1..].iter().all(|r| r.len() == 1));
         // the same set in a shuffled order gives the same runs
         let shuffled = [3.0, 0.5, 1.7, 0.1, 0.9, 1.1, 2.3, 0.8, 1.0, 1.3];
-        let runs: Vec<Vec<f64>> = warm_runs(&shuffled, 0.9, true, 10.0, 10.0).into_iter().map(|r| r.into_iter().map(|i| shuffled[i]).collect()).collect();
+        let runs: Vec<Vec<f64>> = warm_runs(&shuffled, &LOOSE).into_iter().map(|r| r.into_iter().map(|i| shuffled[i]).collect()).collect();
         assert_eq!(runs, vec![vec![0.1, 0.5, 0.8, 0.9], vec![1.0, 1.1, 1.3, 1.7, 2.3, 3.0]]);
+    }
+
+    #[test]
+    fn a_window_of_mach_numbers_keeps_the_points_outside_it_out_of_the_chains() {
+        // the half domain's window: the supersonic run only
+        let machs = [0.5, 0.8, 0.95, 1.1, 1.3, 1.7, 2.3, 3.0];
+        let runs = warm_runs(&machs, &Order { min_mach: 1.05, ..LOOSE });
+        assert_eq!(runs, vec![vec![0], vec![1], vec![2], vec![3, 4, 5, 6, 7]]);
+        assert!(warm_runs(&machs, &Order::NONE).iter().all(|r| r.len() == 1));
+        // a ratio limit of 2 keeps 0.5 from starting from 0.1 and lets 0.8 start from 0.5
+        let sub = [0.1, 0.5, 0.8, 0.9];
+        assert_eq!(warm_runs(&sub, &Order { max_ratio: 2.0, ..LOOSE }), vec![vec![0], vec![1, 2, 3]]);
     }
 }

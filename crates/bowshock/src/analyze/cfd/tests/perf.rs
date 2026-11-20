@@ -467,7 +467,11 @@ fn the_warm_start_makes_two_runs_per_kind_and_the_cold_start_one_item_per_node()
     assert_eq!(cold.len(), job.nodes.len() + job.stability.len());
     assert!(cold.iter().all(|i| i.nodes.len() == 1));
     let warm = work_list(&job, true);
-    assert_eq!(warm.iter().map(|i| (i.lift, i.nodes.len())).collect::<Vec<_>>(), vec![(false, 4), (false, 6), (true, 2), (true, 6)]);
+    // the subsonic sector points chain (0.5 to 0.9: 0.1 is a factor 5 away), the supersonic ones start from their seed; the half domain chains from Mach 1.1 up
+    assert_eq!(
+        warm.iter().map(|i| (i.lift, i.nodes.len())).collect::<Vec<_>>(),
+        vec![(false, 1), (false, 3), (false, 1), (false, 1), (false, 1), (false, 1), (false, 1), (false, 1), (true, 1), (true, 1), (true, 1), (true, 5)]
+    );
     // every node once, each run ascending
     for lift in [false, true] {
         let mut seen: Vec<usize> = warm.iter().filter(|i| i.lift == lift).flat_map(|i| i.nodes.clone()).collect();
@@ -480,11 +484,11 @@ fn the_warm_start_makes_two_runs_per_kind_and_the_cold_start_one_item_per_node()
     }
 }
 
-/// Variants of the warm start on the finned example through the app's analysis (`node_analysis`, shared grid, one `run` over the table's Mach numbers): the cold run (`cold`, the
-/// seeded sectors) and `rescale/drift factor/ramp/split/sub[/max Mach]` variants, e.g. `perturbation/0.5/cap/0.9/up` (the `BOWSHOCK_WARM_*` settings of the engine: rescale `none`,
-/// `velocity` or `perturbation`; the factor on the drift tolerance; `cap` or `restart` of the CFL ramp; the split Mach number; `up` or `down` below it; the Mach number above which a point has no neighbour). `BOWSHOCK_VARIANTS` lists
-/// them separated by spaces, `BOWSHOCK_WARM_HALF=1` takes the stability nodes at 2 degrees (CN) instead of the drag nodes (CD), `BOWSHOCK_GRID=draft` the quick grid. Prints the
-/// iterations, the value and its change against the cold run per point, and the totals.
+/// Variants of the warm start on the finned example through the app's analysis (`node_analysis`, shared grid, one `run` over the Mach numbers): `cold` (the seeded sectors), `default`
+/// (the engine's settings) and `KEY=VALUE+KEY=VALUE` variants that set `BOWSHOCK_WARM_<KEY>` (`RESCALE` none / velocity / perturbation, `DRIFT` the factor on the drift tolerance,
+/// `RAMP` cap / restart, `SPLIT`, `SUB` up / down, `RATIO`, `MINMACH`, `MAXMACH`: see `WarmTuning`). `BOWSHOCK_VARIANTS` lists them separated by spaces, `BOWSHOCK_WARM_HALF=1` takes
+/// the stability nodes at 2 degrees (CN) instead of the drag nodes (CD), `BOWSHOCK_MACHS=1.1,1.3` a subset of the Mach numbers, `BOWSHOCK_GRID=draft` the quick grid. Prints the
+/// iterations, the value and its change against the first variant per point, and the totals.
 #[test]
 #[ignore = "GPU: solves the finned example's table once per variant"]
 fn engine3d_warm_variants() {
@@ -492,25 +496,25 @@ fn engine3d_warm_variants() {
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     let half = std::env::var_os("BOWSHOCK_WARM_HALF").is_some();
     let grid = if std::env::var("BOWSHOCK_GRID").is_ok_and(|g| g == "draft") { CfdGrid::Draft } else { CfdGrid::Coarse };
-    let machs = if half { lift_nodes((0.1, 3.0)).unwrap() } else { nodes((0.1, 3.0)).unwrap() };
+    let machs: Vec<f64> = match std::env::var("BOWSHOCK_MACHS") {
+        Ok(v) => v.split(',').map(|m| m.trim().parse().unwrap()).collect(),
+        Err(_) if half => lift_nodes((0.1, 3.0)).unwrap(),
+        Err(_) => nodes((0.1, 3.0)).unwrap(),
+    };
     let grid_mach = nodes((0.1, 3.0)).unwrap().iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let job = Job { plan, altitude: 120.0, nodes: machs.clone(), stage: 1, grid, compute: Default::default(), cpu_only: false, stability: Vec::new() };
     let session = Session::Local { backend: solver::Backend::Gpu };
     let conditions: Vec<solver::Condition> = machs.iter().map(|&m| solver::Condition::new(m, if half { LIFT_ALPHAS[0] } else { 0.0 })).collect();
-    let variants = std::env::var("BOWSHOCK_VARIANTS").unwrap_or_else(|_| {
-        "cold perturbation/0.5/cap/0.9/up perturbation/0.25/cap/0.9/up velocity/0.5/cap/0.9/up perturbation/0.5/cap/0.9/down perturbation/0.5/cap/10/up"
-            .to_string()
-    });
+    let variants = std::env::var("BOWSHOCK_VARIANTS").unwrap_or_else(|_| "cold default".to_string());
     let mut reference: Option<Vec<f64>> = None;
     for name in variants.split_whitespace() {
-        for k in ["RESCALE", "DRIFT", "RAMP", "SPLIT", "SUB", "MAXMACH"] {
+        for k in ["RESCALE", "DRIFT", "RAMP", "SPLIT", "SUB", "RATIO", "MINMACH", "MAXMACH"] {
             std::env::remove_var(format!("BOWSHOCK_WARM_{k}"));
         }
         let warm = name != "cold";
-        if warm {
-            let f: Vec<&str> = name.split('/').collect();
-            assert!(f.len() == 5 || f.len() == 6, "variant {name}: rescale/drift/ramp/split/sub[/max Mach]");
-            for (k, v) in ["RESCALE", "DRIFT", "RAMP", "SPLIT", "SUB", "MAXMACH"].into_iter().zip(&f) {
+        if warm && name != "default" {
+            for kv in name.split('+') {
+                let (k, v) = kv.split_once('=').unwrap_or_else(|| panic!("variant {name}: KEY=VALUE+KEY=VALUE"));
                 std::env::set_var(format!("BOWSHOCK_WARM_{k}"), v);
             }
         }

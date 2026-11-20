@@ -31,7 +31,7 @@ use crate::engine::field3::field3_of;
 use crate::engine::grid3::Fins3;
 use crate::engine::planform::Planform;
 use crate::engine::run3::{drag_parts_on, wall_faces, wall_samples, DragParts, Wall};
-use crate::engine::warm3::{rescale, warm_plan, Rescale};
+use crate::engine::warm3::{rescale, warm_plan, Order, Rescale};
 use bowshock_cfd::gas3::{cons_to_prim3, prim_to_cons3, Cons3};
 use bowshock_cfd::grid3::{Grid3, PART_FLUID};
 use bowshock_cfd::sst::WallThermal;
@@ -202,13 +202,7 @@ fn field_is_sound(part: &[u8], u: &[Cons3], turb: Option<&[[f64; 2]]>) -> bool {
 /// (`DESIGN3D.md` item 59); the `BOWSHOCK_WARM_*` variables override them for the measurements only.
 #[derive(Clone, Copy, Debug)]
 struct WarmTuning {
-    /// The points above this Mach number are solved from the highest one downward, the others from the lowest upward (`sub_up`) or downward.
-    split: f64,
-    sub_up: bool,
-    /// A neighbour further than this factor in Mach number is not a start (see [`warm_plan`]).
-    max_ratio: f64,
-    /// The points above this Mach number start as they do without the flag (see [`warm_plan`]).
-    max_mach: f64,
+    order: Order,
     rescale: Rescale,
     /// Factor on [`crate::engine::case3::Numerics3::drift_tol`] of a run started from a neighbour: it starts close to the answer, like a seeded run.
     drift_factor: f64,
@@ -216,23 +210,39 @@ struct WarmTuning {
     keep_cfl: bool,
 }
 
-/// The runs of a warm sweep over the Mach numbers `machs` ([`crate::engine::warm3::warm_runs`] with the sweep's settings): the indices of the points that start from one
-/// another, ascending, each run solved in one `run` call on one machine; the app makes a work item of each.
+/// The runs of a warm sweep over the Mach numbers `machs` of the sector (`incidence` false, `finned` for a body with fins) or the half domain ([`crate::engine::warm3::warm_runs`]
+/// with the sweep's settings): the indices of the points that start from one another, ascending, each run solved in one `run` call on one machine; the app makes a work item of each.
 #[doc(hidden)]
-pub fn warm_runs(machs: &[f64]) -> Vec<Vec<usize>> {
-    let t = WarmTuning::current();
-    crate::engine::warm3::warm_runs(machs, t.split, t.sub_up, t.max_ratio, t.max_mach)
+pub fn warm_runs(machs: &[f64], incidence: bool, finned: bool) -> Vec<Vec<usize>> {
+    let kind = match (incidence, finned) {
+        (true, _) => Kind::Half,
+        (false, true) => Kind::Sector,
+        (false, false) => Kind::Wedge,
+    };
+    crate::engine::warm3::warm_runs(machs, &WarmTuning::of(kind).order)
 }
 
 impl WarmTuning {
-    fn current() -> WarmTuning {
+    /// The settings for the domain `kind`. Measured on the finned example (item 59): the sector's supersonic points start from their axisymmetric seed in about 800 iterations
+    /// (the floor of the stop rule), which no neighbour beats, so only the subsonic points (up to Mach 0.9, from the lowest upward, a factor of 2 in Mach number at most from
+    /// the neighbour) start from one; the half domain has no seed, and its supersonic points (from Mach 3 down to 1.1) start from the neighbour while its subsonic and
+    /// transonic ones settle slower from one than from the free stream; the finless wedge is cheap and was not measured: no neighbours.
+    fn of(kind: Kind) -> WarmTuning {
         let var = |name: &str| std::env::var(name).ok();
         let num = |name: &str, default: f64| var(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+        let base = match kind {
+            Kind::Sector => Order { split: 0.9, sub_up: true, max_ratio: 2.0, min_mach: 0.0, max_mach: 0.9 },
+            Kind::Half => Order { split: 0.9, sub_up: true, max_ratio: 2.0, min_mach: 1.05, max_mach: 10.0 },
+            Kind::Wedge => Order::NONE,
+        };
         WarmTuning {
-            split: num("BOWSHOCK_WARM_SPLIT", 0.9),
-            sub_up: var("BOWSHOCK_WARM_SUB").is_none_or(|v| v != "down"),
-            max_ratio: num("BOWSHOCK_WARM_RATIO", 10.0),
-            max_mach: num("BOWSHOCK_WARM_MAXMACH", 10.0),
+            order: Order {
+                split: num("BOWSHOCK_WARM_SPLIT", base.split),
+                sub_up: var("BOWSHOCK_WARM_SUB").map_or(base.sub_up, |v| v != "down"),
+                max_ratio: num("BOWSHOCK_WARM_RATIO", base.max_ratio),
+                min_mach: num("BOWSHOCK_WARM_MINMACH", base.min_mach),
+                max_mach: num("BOWSHOCK_WARM_MAXMACH", base.max_mach),
+            },
             rescale: match var("BOWSHOCK_WARM_RESCALE").as_deref() {
                 Some("none") => Rescale::None,
                 Some("velocity") => Rescale::Velocity,
@@ -854,16 +864,14 @@ impl Analysis {
             }
         }
         // the steps in the order they are solved in: (group, the group whose field it starts from)
-        let tune = WarmTuning::current();
         let mut steps: Vec<(usize, Option<usize>)> = Vec::with_capacity(groups.len());
         let mut from = 0;
         while from < groups.len() {
             let to = (from..groups.len()).find(|&g| groups[g].0 != groups[from].0).unwrap_or(groups.len());
             if self.warm_start {
                 let machs: Vec<f64> = (from..to).map(|g| sorted[groups[g].1[0]].mach).collect();
-                steps.extend(
-                    warm_plan(&machs, tune.split, tune.sub_up, tune.max_ratio, tune.max_mach).into_iter().map(|s| (from + s.point, s.parent.map(|p| from + p))),
-                );
+                let order = WarmTuning::of(groups[from].0).order;
+                steps.extend(warm_plan(&machs, &order).into_iter().map(|s| (from + s.point, s.parent.map(|p| from + p))));
             } else {
                 steps.extend((from..to).map(|g| (g, None)));
             }
@@ -882,6 +890,7 @@ impl Analysis {
         let mut seeds = HashMap::new();
         for (g, parent) in steps {
             let (kind, members) = (groups[g].0, &groups[g].1);
+            let tune = WarmTuning::of(kind);
             let mut state: Option<R::State> = None;
             let mut last = sorted[members[0]];
             // the `cfl_max` the last run of the group ended with
