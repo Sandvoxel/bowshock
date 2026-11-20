@@ -9,7 +9,7 @@
 //! - `xtr<N>`: laminar to N calibres from the tip (a trip that does not work: natural transition), turbulent behind;
 //! - `short`: the short model (data `arcas::TRANSONIC`); `euler`: the Euler tier (pressure only);
 //! - `lip`: the base as drawn in D-4014 Fig. 1(a) detail A: a 15 degree tail cone to a 1.308 in diameter (1.757 in long) and the reflexed lip, a 0.053 in step back out to the 1.470 in base
-//!   (the gate's boattail is the straight 12.2 degree cone to the 1.470 in base);
+//!   (the gate's boattail is the straight 12.2 degree cone to the 1.470 in base), the lip a one-cell `BaseBody::with_step`;
 //! - tokens combine with `+` (`ref15+trip+sting`).
 //!
 //! Prints `SD <variant> M<mach> ...` lines (`parts`, `y+`, `cfx` / `cpx` binned along the body) for `tools/subdrag_post.py`. Needs `BOWSHOCK_WEDGE_BACKEND=gpu`, `BOWSHOCK_FIN_TIER=coarse`.
@@ -46,10 +46,13 @@ fn case_of(r: &Rocket, mach: f64, variant: &str) -> Case3 {
         spec.aft = vec![
             AftSpec::Tube { length: tube },
             AftSpec::Transition { length: 1.757 * IN, aft_diameter: 1.308 * IN },
-            AftSpec::Transition { length: 0.053 * IN, aft_diameter: arcas::BASE_DIAMETER },
         ];
     }
     let (mut body, _) = spec.to_internal().expect("body");
+    if parts.contains(&"lip") {
+        // the lip: a step of 0.081 in over 0.053 in (the spec refuses a cone steeper than 30 degrees)
+        body = body.with_step(0.5 * (arcas::BASE_DIAMETER - 1.308 * IN) / r.d, 0.053 * IN / r.d);
+    }
     if parts.contains(&"sting") {
         body = body.with_sting(STING_RADIUS);
     }
@@ -205,5 +208,16 @@ fn sd1_arcas_long_finless() {
             }
             let _ = TierKind::Coarse;
         }
+    }
+}
+
+/// Every variant builds a grid (CPU, no solve).
+#[test]
+fn variants_build() {
+    for v in ["base", "lip", "lip+sting+trip", "short+lip", "euler", "xtr4"] {
+        let r = model(v.contains("short"));
+        let case = case_of(&r, 0.6, v);
+        let s = case.build_solver_cached().unwrap_or_else(|e| panic!("{v}: {e}"));
+        println!("{v}: {}x{}", s.grid.ni, s.grid.nj);
     }
 }
