@@ -1154,7 +1154,8 @@ impl LazySolver3 {
             Pc3 { p: self.p_cells3(&wk, &lm), lm }
         });
         let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
-        let cfl = lhs(&s[6]);
+        // the capped phase starts at its own `cfl_max` at once (`ImplicitParams::at_iter`; the CPU step takes the ramp's value capped by it)
+        let cfl = if p.dt_k_cap.is_some() { lhs(&s[6]).minimum(cf(p.cfl_max)) } else { lhs(&s[6]) };
         // a viscous run: the diffusive rates of the directions in the time step and the diffusive spectral radius of every face in the dissipation
         let (diff, lam): (Option<[F; 3]>, Option<[F; 3]>) = match (&self.visc, &rs.vis) {
             (Some(vg), Some(vis)) => {
@@ -1164,7 +1165,7 @@ impl LazySolver3 {
             }
             _ => (None, None),
         };
-        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, p.dt_k_cap, diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
+        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, p.dt_k_cap.map_or(f64::INFINITY, |k| k.cap), diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
         let b: V5 = v5(|k| &lhs(&r0[k]) * &dt);
         let lam = lam.as_ref();
         let du = match p.line_solve {

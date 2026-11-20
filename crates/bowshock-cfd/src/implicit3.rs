@@ -619,12 +619,13 @@ pub(crate) fn apply_p(pm: &[M5], x: &mut [Cons3]) {
 /// `ImplicitParams::sub_iters > 1` repeats the factorised solve as a defect correction against the unfactored operator
 /// `I - dt J_i - dt J_j - dt J_k`; `ImplicitParams::line_solve` selects block lines or the diagonalised factors ([`diag3`]).
 pub(crate) fn step(s: &mut Solver3, p: &ImplicitParams) -> f64 {
+    let p = &p.at_iter(s.iter);
     let cfl = (p.cfl0 * p.growth.powi(s.ramp_k.min(10_000) as i32)).min(p.cfl_max);
     s.ramp_k += 1;
     s.eval_residual();
     let rn = s.density_residual();
     s.precond = LowMach::of(p, &s.cfg.freestream);
-    s.compute_dt(cfl, p.dt_mode, p.dt_k_cap);
+    s.compute_dt(cfl, p.dt_mode, p.dt_k_cap.map_or(f64::INFINITY, |k| k.cap));
     s.face_lambdas();
 
     let b: Vec<Cons3> = s.res.iter().zip(s.dt.iter()).map(|(r, d)| [r[0] * d, r[1] * d, r[2] * d, r[3] * d, r[4] * d]).collect();

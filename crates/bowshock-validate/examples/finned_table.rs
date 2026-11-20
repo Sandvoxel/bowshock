@@ -266,9 +266,12 @@ fn main() -> Result<(), String> {
         Some("min") => case.numerics.implicit.dt_mode = DtMode::MinDirection,
         Some(other) => return Err(format!("--dt-mode sum|min, not {other}")),
     }
-    // `--dt-k-cap X`: the `k` rate of the `Sum` step counts at most X (L_i + L_j) (`ImplicitParams::dt_k_cap`, DESIGN3D item 60; default none)
-    if let Some(x) = value("--dt-k-cap") {
-        case.numerics.implicit.dt_k_cap = x.parse().map_err(|e| format!("--dt-k-cap: {e}"))?;
+    // `--dt-k-cap X [--dt-k-from N] [--dt-k-cfl C]`: the `k` rate of the `Sum` step counts at most X (L_i + L_j) from iteration N (default 0) on, with `cfl_max` at most C from then on
+    // (`ImplicitParams::dt_k_cap`, `KCap`, DESIGN3D item 60; `inf` or no flag: the plain sum)
+    if let Some(x) = value("--dt-k-cap").map(|x| x.parse::<f64>().map_err(|e| format!("--dt-k-cap: {e}"))).transpose()?.filter(|x| x.is_finite()) {
+        let num = |name: &str, default: f64| value(name).map_or(Ok(default), |v| v.parse::<f64>().map_err(|e| format!("{name}: {e}")));
+        case.numerics.implicit.dt_k_cap =
+            Some(bowshock_cfd::implicit_params::KCap { cap: x, from_iter: num("--dt-k-from", 0.0)? as usize, cfl_max: num("--dt-k-cfl", f64::INFINITY)? });
     }
     // `--growth G`: the CFL ramp factor per iteration (`ImplicitParams::growth`, default 1.02)
     if let Some(g) = value("--growth") {
