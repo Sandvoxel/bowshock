@@ -217,13 +217,14 @@ fn tiny_anf_ddadi_state_after_30_iterations_matches_cpu() {
 }
 
 /// `ImplicitParams::dt_k_cap` (`dt = CFL V / (L_i + L_j + min(L_k, cap (L_i + L_j)))`, DESIGN3D item 60) against the CPU solver with the same parameters on the tiny ANF case, DDADI and
-/// the boost 0.35, 30 iterations from the free stream, M = 0.5 and M = 2, the steep ramp, `Fluxes` staging, both precisions, caps 1 and 4. The cap must act on this grid (the azimuthal cells
+/// the boost 0.35, 30 iterations from the free stream, M = 0.5 and M = 2, the steep ramp, `Fluxes` staging, both precisions, caps 1 and 4 (M 2: 1 only, the cap 4 does not act there). The cap must act on this grid (the azimuthal cells
 /// next to the axis make `L_k` the largest rate): the CPU state after 30 iterations differs from that without the cap (3.5e-3 / 8.5e-4 at M 0.5 for the caps 1 / 4, 1.2e-5 at M 2 for the cap 1: the cap acts in a few cells there).
 #[test]
 fn tiny_anf_dt_k_cap_state_after_30_iterations_matches_cpu() {
     let grid = tiny_anf_grid();
     let mut rows = Vec::new();
-    for (mach, limiter, low_mach) in [(0.5, Limiter::VanAlbada, true), (2.0, Limiter::Minmod, false)] {
+    let mut inert = Vec::new();
+    for (mach, limiter, low_mach, caps) in [(0.5, Limiter::VanAlbada, true, [1.0, 4.0].as_slice()), (2.0, Limiter::Minmod, false, [1.0].as_slice())] {
         let with = |dt_k_cap| {
             let params = ImplicitParams { dt_k_cap, ddadi: Some(1.0), lhs_dis_boost: 0.35, ..implicit_params(true) };
             Config3 { scheme: Scheme3::Implicit(params), ..config(mach, 2.0, limiter, low_mach) }
@@ -236,15 +237,18 @@ fn tiny_anf_dt_k_cap_state_after_30_iterations_matches_cpu() {
             cpu.u
         };
         let plain = run(&with(f64::INFINITY));
-        for cap in [1.0, 4.0] {
+        for &cap in caps {
             compare(&format!("M {mach} dt_k_cap {cap}"), &grid, &with(cap), 0, 30, &[Staging::Fluxes], IMPLICIT, &mut rows);
             let capped = run(&with(cap));
             let d = plain.iter().zip(&capped).fold(0.0f64, |m, (x, y)| (0..5).fold(m, |m, k| m.max((x[k] - y[k]).abs() / (1.0 + y[k].abs()))));
             println!("M {mach}, cap {cap}: CPU state without the cap against with it after 30 iterations: {d:.2e}");
-            assert!(d > 1e-9, "M {mach}, cap {cap}: the cap changes nothing on this grid ({d:e})");
+            if d <= 1e-9 {
+                inert.push(format!("M {mach}, cap {cap}: {d:e}"));
+            }
         }
     }
     report("tiny ANF, dt_k_cap, 30 iterations", &rows);
+    assert!(inert.is_empty(), "the cap changes nothing on this grid: {inert:?}");
 }
 
 /// The implicit scheme on every solid-face pattern of `solid_box_patterns_match_cpu` (lines cut by the solid cells in all three directions, the first
