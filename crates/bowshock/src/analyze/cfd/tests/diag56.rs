@@ -34,6 +34,9 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     if let Some(x) = env_f("DIAG_CHORD") {
         c.grid.fin_chord_cells = Some(x as usize);
     }
+    if let Some(x) = env_f("DIAG_LERC") {
+        c.grid.le_radius_cells = x;
+    }
     if env_f("DIAG_LOWMACH") == Some(0.0) {
         c.numerics.low_mach = false;
     }
@@ -54,7 +57,16 @@ fn hook(c: &mut solver::engine::case3::Case3) {
                 let d = node(i, j + 1, k);
                 format!(
                     "({i},{j},{k}) x {:.4}..{:.4} (top row {:.4}..{:.4}) r {:.4}..{:.4} th {:.3}..{:.3} solid {} vol {:.3e}",
-                    a.0, c.0, d.0, node(i + 1, j + 1, k).0, a.1, d.1, a.2, b.2, g.part[g.cell(i, j, k)], g.vol[g.cell(i, j, k)]
+                    a.0,
+                    c.0,
+                    d.0,
+                    node(i + 1, j + 1, k).0,
+                    a.1,
+                    d.1,
+                    a.2,
+                    b.2,
+                    g.part[g.cell(i, j, k)],
+                    g.vol[g.cell(i, j, k)]
                 )
             };
             for i in ci.saturating_sub(span)..=(ci + span).min(g.ni - 1) {

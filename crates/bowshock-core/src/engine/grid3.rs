@@ -143,6 +143,8 @@ pub struct Grid3Params {
     pub level: u32,
     /// Cells over the fin root chord (`None`: `32 << level`; the ANF study found 16 too coarse for the fin loading at M >= 2).
     pub fin_chord_cells: Option<usize>,
+    /// Cells over the radius of a round leading edge (`FinProfile::Rounded`: half the thickness): the first cell of the chord clustering is at most that fraction of it (`0`: off).
+    pub le_radius_cells: f64,
     /// Cells across the thickness of a fin (>= 1; 1 is the one-cell layer of the first grids, bit for bit). They are in `k`, for the solid fin and for the fluid columns
     /// ahead of the leading edge and behind the trailing edge (the base region of a blunt trailing edge has that many cells across); a half fin on a symmetry plane
     /// (a sector, an in-plane fin of a half domain) owns half of them, rounded down, at least one. With a `fin_stack` they are added to the stack's cells; without, they
@@ -175,6 +177,7 @@ impl Grid3Params {
             nk,
             level,
             fin_chord_cells: None,
+            le_radius_cells: 0.0,
             span_cells: None,
             domain: Domain3::Half { phase: FinPhase::Between },
             fin_stack: None,
@@ -709,7 +712,11 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
     }
     // minimum chord spacing 0.3 c / nf at the edges: 0.2 resolves the blunt leading edge like 48 cells (ANF face Cp 0.78 -> 1.02) at +1 % cells, 0.1 and below diverge on the
     // example rocket (DESIGN3D item 44)
-    let mut fin_offs = two_sided_nodes(f.root_chord, nf, 0.3 * f.root_chord / nf as f64);
+    let mut edge = 0.3 * f.root_chord / nf as f64;
+    if p.le_radius_cells > 0.0 && matches!(f.profile, FinProfile::Rounded) {
+        edge = edge.min(0.5 * f.thickness / p.le_radius_cells);
+    }
+    let mut fin_offs = two_sided_nodes(f.root_chord, nf, edge);
     fin_offs[nf] = x_te_root - x_le_root;
     // the stations between the segments under the root stay nodes (the body parts are split there): the nearest chord node moves onto each
     for k in k0 + 1..=k1 {
