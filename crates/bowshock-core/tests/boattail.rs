@@ -87,6 +87,20 @@ fn case_of(m: f64, variant: &str) -> Case3 {
     if parts.contains(&"lm") {
         c.numerics.low_mach = true;
     }
+    for p in &parts {
+        if let Some(v) = p.strip_prefix("cfl") {
+            c.numerics.implicit.cfl_max = v.parse().expect("cflN");
+        }
+        if let Some(v) = p.strip_prefix("sub") {
+            c.numerics.implicit.sub_iters = v.parse().expect("subN");
+        }
+    }
+    if parts.contains(&"nobc") {
+        c.numerics.implicit.implicit_bc = false;
+    }
+    if parts.contains(&"nolines") {
+        c.numerics.implicit.lines = false;
+    }
     if parts.contains(&"pc") {
         c.numerics.implicit.low_mach_precond = true;
     }
@@ -203,12 +217,19 @@ fn sol_nseg(case: &Case3) -> usize {
 #[test]
 #[ignore = "diagnosis: GPU against CPU on the Euler wedge"]
 fn bt2_gpu_vs_cpu() {
-    use bowshock_cfd::gpu::Precision;
     let m: f64 = std::env::var("BT_MACHS").ok().and_then(|v| v.split(',').next().map(|x| x.parse().unwrap())).unwrap_or(0.608);
-    let variant = std::env::var("BT_VARIANTS").ok().and_then(|v| v.split(',').next().map(|s| s.to_string())).unwrap_or_else(|| "base".into());
+    let variants: Vec<String> = std::env::var("BT_VARIANTS").unwrap_or_else(|_| "base".into()).split(',').map(|s| s.trim().to_string()).collect();
+    for variant in variants {
+        bt2_one(m, &variant);
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn bt2_one(m: f64, variant: &str) {
+    use bowshock_cfd::gpu::Precision;
     let steps: usize = std::env::var("BT_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(140);
     let every: usize = std::env::var("BT_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    let case = case_of(m, &variant);
+    let case = case_of(m, variant);
     let mut r = bowshock_core::engine::gpu3::GpuRunner3::new(&case, Precision::F32).expect("gpu runner");
     let mut cpu = case.build_solver_cached().expect("cpu solver");
     let tag = format!("BT2 {variant} M{m:.3}");
@@ -254,7 +275,12 @@ fn bt2_gpu_vs_cpu() {
             dmax,
             place(dloc)
         );
-        if bad > 0 {
+        // the outflow corner: the last column, the first fluid row above the sting (or the axis)
+        let jf = (0..g.nj).find(|&j| !g.is_solid(g.ni - 1, j, 0)).unwrap_or(0);
+        let cc = g.cell(g.ni - 1, jf, 0);
+        let f = |u: &[f64; 5]| format!("[{:.4} {:.4} {:.4} {:.4}]", u[0], u[1], u[2], u[4]);
+        println!("{tag}   corner (i {}, j {jf}) gpu {} cpu {}", g.ni - 1, f(&ug[cc]), f(&cpu.u[cc]));
+        if bad > 0 || dmax > 1e3 {
             break;
         }
     }
