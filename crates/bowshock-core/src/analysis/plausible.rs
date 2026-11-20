@@ -4,16 +4,24 @@
 //! what a rocket base does.
 //!
 //! The reference is the point's own base pressure, not a second engine: the 3D table is solved without the legacy engine, and the base C_p separates the two states of every case
-//! measured. The area-mean base C_p of every point the engine has solved correctly is above -0.25 (Mach 0.1 to 3; Ion Drive -0.12 at most, Byrum -0.18, the example -0.20, Rabia
+//! measured. The area-mean base C_p of every point the engine has solved correctly is above -0.25 (Mach 0.1 to 3, viscous; Ion Drive -0.12 at most, Byrum -0.18, the example -0.20, Rabia
 //! -0.24 on a `Stalled` point, Cancer Descending with its tip trailing edge flush -0.106 to -0.239); the wrong Cancer Descending states are at -0.37 (Mach 0.8) and -1.02 to -1.16
-//! (Mach 0.5). A point below [`BASE_SUCTION_SUSPECT`] is solved once more from its seed at `cfl_max` [`RETRY_CFL_MAX`] (the scan of item 73 is reliable there and above 20 it is not),
+//! (Mach 0.5). A point below [`base_suction_floor`] is solved once more from its seed at `cfl_max` [`RETRY_CFL_MAX`] (the scan of item 73 is reliable there and above 20 it is not),
 //! and [`decide`] keeps the answer: the second run when it is not suspect itself or when it reproduces the first within [`AGREE`] (a base that really sucks that hard), otherwise
 //! the point is `Failed` and the table interpolates it. The cost is one more run of the suspect points only; a point above the floor is not touched.
 
 use super::{PolarPoint, Quality, Warning};
 
-/// Area-mean base C_p below which a settled point is solved again.
-pub(super) const BASE_SUCTION_SUSPECT: f64 = -0.30;
+/// The area-mean base C_p below which a settled viscous point is solved again, by Mach number: -0.30 below Mach 0.85 and from Mach 1.8 (the subsonic rockets measured sit at -0.10 to
+/// -0.12 and the wrong Cancer Descending states at -0.37 and below; at Mach 2 the vacuum limit `-2 / (gamma M^2)` is -0.36 anyway), -0.60 from Mach 0.95 to 1.5 where a blunt
+/// cylindrical base has its classic suction peak (-0.3 to -0.45 in the literature; the RANS wedge of the table body gives -0.14 / -0.20 / -0.20 / -0.19 at Mach 0.9 / 1.0 / 1.1 / 1.3,
+/// the Euler one -0.18 / -0.26 / -0.27 / -0.27, which is why an inviscid point is never suspect), blended linearly in between.
+pub(super) fn base_suction_floor(mach: f64) -> f64 {
+    let ramp = |from: f64, to: f64| ((mach - from) / (to - from)).clamp(0.0, 1.0);
+    // 0 below Mach 0.85, 1 from 0.95 to 1.5, 0 again from 1.8
+    let wide = ramp(0.85, 0.95) * (1.0 - ramp(1.5, 1.8));
+    -0.30 - 0.30 * wide
+}
 
 /// The `cfl_max` of the second run.
 pub(super) const RETRY_CFL_MAX: f64 = 10.0;
@@ -21,10 +29,10 @@ pub(super) const RETRY_CFL_MAX: f64 = 10.0;
 /// Relative difference of the two total drags below which the second run confirms the first.
 pub(super) const AGREE: f64 = 0.05;
 
-/// Whether `p` ended as a result (converged or stationary) with a base suction under the floor: the point to solve again.
+/// Whether `p` ended as a result (converged or stationary) with a base suction under the floor of its Mach number: the point to solve again. Viscous points only (`drag.friction`).
 pub(super) fn suspect(p: &PolarPoint) -> bool {
-    matches!(p.quality, Quality::Converged | Quality::Stationary) && p.detail.cp_base < BASE_SUCTION_SUSPECT
-    // false for NaN
+    // the comparison is false for a NaN base C_p
+    matches!(p.quality, Quality::Converged | Quality::Stationary) && p.drag.friction.is_some() && p.detail.cp_base < base_suction_floor(p.mach)
 }
 
 /// The point to keep of a suspect `first` and its second run: `(point, second_kept)`.
@@ -51,7 +59,7 @@ mod tests {
         PolarPoint {
             mach: 0.5,
             alpha_deg: 0.0,
-            drag: Drag { forebody_pressure: 0.0, friction: None, base: 0.0, base_modelled: false, fins: None, total: cd },
+            drag: Drag { forebody_pressure: 0.0, friction: Some(0.1), base: 0.0, base_modelled: false, fins: None, total: cd },
             forces: None,
             detail: PointDetail {
                 iterations: 100,
@@ -87,6 +95,22 @@ mod tests {
             assert!(!suspect(&point(0.55, cp, Quality::Stationary)), "{cp}");
         }
         assert!(!suspect(&point(1.47, -1.02, Quality::Failed)));
+    }
+
+    /// The floor is stricter subsonic and supersonic than at the transonic suction peak, and an inviscid point is never suspect.
+    #[test]
+    fn the_floor_follows_the_mach_number() {
+        assert_eq!(base_suction_floor(0.5), -0.30);
+        assert_eq!(base_suction_floor(2.3), -0.30);
+        assert_eq!(base_suction_floor(1.0), -0.60);
+        assert_eq!(base_suction_floor(1.3), -0.60);
+        let mut p = point(0.6, -0.45, Quality::Stationary);
+        p.mach = 1.1;
+        assert!(!suspect(&p));
+        p.mach = 0.5;
+        assert!(suspect(&p));
+        p.drag.friction = None;
+        assert!(!suspect(&p));
     }
 
     /// The second run replaces a wrong first; confirms a first that is real (still suspect, but reproduced); and a point neither run of which is usable is `Failed`.
