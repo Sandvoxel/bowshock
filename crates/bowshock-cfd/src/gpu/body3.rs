@@ -794,8 +794,27 @@ impl LazySolver3 {
     /// A copy of the loop state to return to ([`LazySolver3::restore`]), downloaded to host memory (the raw `S` elements: a restore gives back the state bit for bit): the CFL
     /// controller of the runner keeps up to seven of them, 49 B per cell each of an SST run, which as device arrays would be 340 B per cell of the pool (DESIGN3D item 49).
     pub fn snapshot(&self) -> Result<Snapshot3> {
+        self.snapshot_into(None)
+    }
+
+    /// [`LazySolver3::snapshot`] into the host buffers of `spare` (a snapshot of the same grid that is no longer needed): a read-back into memory the host already owns costs about half
+    /// of one into fresh pages (`Array::read_into`), and a snapshot is taken every chunk of a run.
+    pub fn snapshot_into(&self, spare: Option<Snapshot3>) -> Result<Snapshot3> {
         let state = self.state.as_ref().ok_or_else(no_state)?;
-        Ok(Snapshot3 { state: state.iter().map(|a| Ok((a.to_vec()?, a.shape()))).collect::<Result<_>>()?, iter: self.iter })
+        let mut spare = spare.map_or_else(Vec::new, |s| s.state).into_iter();
+        let arrays = state
+            .iter()
+            .map(|a| {
+                let mut v = spare.next().map_or_else(Vec::new, |(v, _)| v);
+                if v.len() == a.len() {
+                    a.read_into(&mut v)?;
+                } else {
+                    v = a.to_vec()?;
+                }
+                Ok((v, a.shape()))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Snapshot3 { state: arrays, iter: self.iter })
     }
 
     /// Returns to `snap` (the state, the CFL of its ramp and the iteration count); with `cfl_cap` the CFL of the state is at most that (a controller that lowers `cfl_max`

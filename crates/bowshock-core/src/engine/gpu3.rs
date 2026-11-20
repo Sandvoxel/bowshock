@@ -10,7 +10,7 @@ use crate::engine::run3::{
     breakdown_from, coefficients, collapsed, drag_parts_from, forces_from, wall_class, wall_faces, zero_incidence, CflControl, CflEvent, DragParts,
     LiftBreakdown, LiftForces, PointResult3, StopRule3, Wall, WallForces, MEAN_EVERY, ROLLBACK_RESIDUAL, SAMPLE_EVERY,
 };
-use crate::engine::timing::{record_timing, PointTiming};
+use crate::engine::timing::{no_fixedcost, record_timing, PointTiming};
 use crate::error::Error;
 use bowshock_cfd::gpu::{GpuSolver3, Precision, TractionFace3, WallFace3};
 use bowshock_cfd::grid3::Face3;
@@ -352,6 +352,8 @@ impl GpuRunner3 {
         // restore), `cfl_max` is multiplied by `CFL_BACKOFF` and the chunk is run again. The cap only goes down; the converged state does not depend on it. The CFL in force is
         // tracked on the host (the device's ramp, `cfl0 growth^k` up to the cap) and told to the stop rule, whose windows lengthen as the CFL falls below `Numerics3::cfl_ref`.
         let Scheme3::Implicit(ip) = self.host.cfg.scheme else { return Err(Error::Gpu("the GPU 3D runner needs the implicit scheme".into())) };
+        // a snapshot the controller no longer keeps: its host buffers take the next one
+        let mut spare: Option<bowshock_cfd::gpu::Snapshot3> = None;
         let mut cfl_host = start.unwrap_or(ip.cfl0).min(ip.cfl_max);
         let mut ctl = CflControl::new(self.gpu.snapshot()?, ip.cfl_max, cfl_host).with_enabled(n.cfl_control);
         rule.set_cfl(cfl_host);
@@ -412,11 +414,11 @@ impl GpuRunner3 {
             if stop.is_none() {
                 // the controller's snapshot is a download to host memory: counted with the state downloads of the point's timing
                 let t_snap = Instant::now();
-                let snapshot = self.gpu.snapshot()?;
+                let snapshot = self.gpu.snapshot_into(if no_fixedcost() { None } else { spare.take() })?;
                 tm.downloads += 1;
                 tm.download_s += t_snap.elapsed().as_secs_f64();
                 tm.add("snapshot", t_snap.elapsed().as_secs_f64());
-                ctl.accept(snapshot, done, cfl_host);
+                spare = ctl.accept(snapshot, done, cfl_host).pop();
             }
             // the state leaves the device only at a chunk where a snapshot is due
             let on_grid = done.is_multiple_of(SYNC);

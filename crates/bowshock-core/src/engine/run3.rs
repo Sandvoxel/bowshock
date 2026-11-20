@@ -131,14 +131,21 @@ impl<S: Clone> CflControl<S> {
         self
     }
 
-    /// The state after a good stretch ending at `iteration` with the CFL `cfl` in force. Kept: the last two, and those taken below the cap (the ramp's).
-    pub fn accept(&mut self, snapshot: S, iteration: usize, cfl: f64) {
+    /// The state after a good stretch ending at `iteration` with the CFL `cfl` in force. Kept: the last two, and those taken below the cap (the ramp's); the states no longer kept are
+    /// given back (a runner reuses their memory).
+    pub fn accept(&mut self, snapshot: S, iteration: usize, cfl: f64) -> Vec<S> {
         self.snaps.push((snapshot, iteration, cfl));
-        let (n, cap, mut i) = (self.snaps.len(), self.cap, 0);
-        self.snaps.retain(|s| {
-            i += 1;
-            i + 2 > n || s.2 < cap
-        });
+        let (n, cap) = (self.snaps.len(), self.cap);
+        let (mut kept, mut dropped) = (Vec::with_capacity(n), Vec::new());
+        for (i, s) in std::mem::take(&mut self.snaps).into_iter().enumerate() {
+            if i + 3 > n || s.2 < cap {
+                kept.push(s);
+            } else {
+                dropped.push(s.0);
+            }
+        }
+        self.snaps = kept;
+        dropped
     }
 
     /// A failure at `iteration` with the CFL `cfl_reached` in force: where to go back to, or `None` when the controller has given up.
