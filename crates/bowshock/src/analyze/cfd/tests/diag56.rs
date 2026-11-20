@@ -1,6 +1,6 @@
 //! Diagnostic of the slow points of the flight-validation rockets (DESIGN3D item 56): one drag point through the facade path the app uses, with the grid's quality
 //! numbers and the state at every snapshot. `DIAG_ROCKET=rabia-short-fin-can` (a flight fixture; `example` the app's finned example), `DIAG_MACHS=0.8`,
-//! `DIAG_RES=draft|coarse`, `DIAG_CPU=1`, `DIAG_GRID=1` (grid statistics before the run), `DIAG_MAXIT`, `DIAG_SNAP=<from>` (state every 50 iterations from there);
+//! `DIAG_RES=draft|coarse`, `DIAG_COLLAPSE=1` (the cells of the final state under the positivity guard, with the part they touch), `DIAG_OWNGRID=1`, `DIAG_CPU=1`, `DIAG_GRID=1` (grid statistics before the run), `DIAG_MAXIT`, `DIAG_SNAP=<from>` (state every 50 iterations from there);
 //! the fixture probes of `flights.rs` (`FLIGHTVAL_BLUNT_IN`, `FLIGHTVAL_TIP_IN`, ...) apply.
 
 use std::sync::{Arc, Mutex};
@@ -8,6 +8,9 @@ use std::time::Instant;
 
 use super::*;
 use crate::units::UnitSystem;
+
+/// The grid of the last case built by the hook under `DIAG_GRID`/`DIAG_COLLAPSE`: its part table, to name what a collapsed cell sits against.
+static GRID_PARTS: Mutex<Option<(usize, usize, usize, Vec<String>)>> = Mutex::new(None);
 
 fn env_f(name: &str) -> Option<f64> {
     std::env::var(name).ok().map(|v| v.parse().unwrap())
@@ -39,6 +42,20 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     }
     if env_f("DIAG_LOWMACH") == Some(0.0) {
         c.numerics.low_mach = false;
+    }
+    if std::env::var_os("DIAG_GRID").is_some() || std::env::var_os("DIAG_COLLAPSE").is_some() {
+        let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
+        let mut parts = Vec::with_capacity(g.ni * g.nj * g.nk);
+        for k in 0..g.nk {
+            for j in 0..g.nj {
+                for i in 0..g.ni {
+                    parts.push(
+                        g.part_of(i, j, k).map_or_else(|| if g.part[g.cell(i, j, k)] == 0 { "fluid".into() } else { "dead".into() }, |p| format!("{p:?}")),
+                    );
+                }
+            }
+        }
+        *GRID_PARTS.lock().unwrap() = Some((g.ni, g.nj, g.nk, parts));
     }
     if std::env::var_os("DIAG_GRID").is_some() {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
@@ -182,6 +199,10 @@ fn diag56_point() {
             .roughness(plan.body_roughness)
             .drag_tolerance(DRAG_TOLERANCE)
             .case3_hook(hook);
+        // the app's shared grid: a drag node's grid is sized for max(its Mach, 1) (`DIAG_OWNGRID=1`: for its own Mach number)
+        if std::env::var_os("DIAG_OWNGRID").is_none() {
+            a = a.grid_mach(mach.clamp(1.0, 3.0));
+        }
         if let Some(f) = plan.fins.as_ref().filter(|_| std::env::var_os("DIAG_NOFINS").is_none()) {
             a = a.fins(f.clone()).fin_outline(plan.outline.clone());
         }
@@ -203,8 +224,57 @@ fn diag56_point() {
         for r in &d.rollbacks {
             println!("ROLLBACK {r:?}");
         }
+        if let Some(f) = &p.field3 {
+            report_collapsed(&rocket, mach, f);
+        }
         for (it, drop, mon) in hist.lock().unwrap().iter().filter(|h| h.0 % 250 == 0) {
             println!("HIST it {it} drop {drop:.2} CA {mon:.6}");
         }
+    }
+}
+
+/// The cells of the final state whose density or pressure is under 1.5e-2 of the free stream's (the `clipped_state` guard of the facade): their count, the lowest few
+/// with the cell index, position (x, r, theta in degrees), the ratios, and the solid parts they touch (`DIAG_GRID` or `DIAG_COLLAPSE` names the parts).
+fn report_collapsed(label: &str, mach: f64, f: &solver::Field3) {
+    let fs = f.freestream;
+    let mut bad: Vec<(f64, usize)> = (0..f.cells())
+        .filter(|&c| !f.solid[c])
+        .map(|c| (((f.prim[c][0] as f64) / fs[0]).min((f.prim[c][4] as f64) / fs[4]), c))
+        .filter(|(m, _)| *m < 1.5e-2)
+        .collect();
+    bad.sort_by(|a, b| a.0.total_cmp(&b.0));
+    println!(
+        "COLLAPSED {label} M {mach}: {} cells under 1.5e-2 of the free stream (grid {}x{}x{}, fins at theta {:?})",
+        bad.len(),
+        f.ni,
+        f.nj,
+        f.nk,
+        f.fin_theta
+    );
+    let parts = GRID_PARTS.lock().unwrap();
+    for (m, c) in bad.iter().take(12) {
+        let (i, j, k) = (c % f.ni, (c / f.ni) % f.nj, c / (f.ni * f.nj));
+        let x = f.centre(i, j, k);
+        let mut touching = Vec::new();
+        for (di, dj, dk) in [(-1i64, 0i64, 0i64), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)] {
+            let (a, b, d) = (i as i64 + di, j as i64 + dj, k as i64 + dk);
+            if a < 0 || b < 0 || d < 0 || a >= f.ni as i64 || b >= f.nj as i64 || d >= f.nk as i64 {
+                continue;
+            }
+            let n = f.cell_index(a as usize, b as usize, d as usize);
+            if f.solid[n] {
+                let name = parts.as_ref().map_or("solid".to_string(), |(_, _, _, p)| p[n].clone());
+                touching.push(format!("{name}@{di:+},{dj:+},{dk:+}"));
+            }
+        }
+        println!(
+            "COLLAPSED cell ({i},{j},{k}) x {:.4} r {:.4} th {:.2} rho/rho_inf {:.4} p/p_inf {:.4} touches {touching:?}",
+            x[0],
+            x[1].hypot(x[2]),
+            x[2].atan2(x[1]).to_degrees(),
+            f.prim[*c][0] as f64 / fs[0],
+            f.prim[*c][4] as f64 / fs[4]
+        );
+        let _ = m;
     }
 }
