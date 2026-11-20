@@ -27,6 +27,8 @@ Sections 1-9 below are the 2026-11-17 hand-off and stay as written; where this s
 
 **Flight-data validation** (item 56): 3D tables exist for 2 of 6 rockets (Don't Debate This +7.7 %, Rabia +7.0 %), legacy for all six (mean +12.7 %), build-up +11.9 %, RASAero II +3.1 %; the 3D tables of Byrum, Torrent, Cancer Descending and Ion Drive were not produced (subsonic points that do not settle, no table stored).
 
+**Positivity floor reverted (ArcasLL, 2026-11-20, DESIGN3D 57c amended / item 67):** the Yuska G-X5 collapse (A / B Mach 2.38 `C_A0` -220 / -1105) was the `damping3` floor of item 57c (it freezes a cell that would fall under 1e-2 of the free stream; floor off gives the pre-integration 0.4848 / 0.4794 / 0.4476 bit for bit; the mesher is innocent), not the sweep zone / round-edge refinement. `damping3` is the plain positivity rule again, the guard of `quality3` is `unphysical_cell` (not positive, or below 1e-3 of the free stream at local Mach above 20). Consequence: supersonic Rabia (Draft Mach 2.3: 7 700 it, 8 rollbacks, Failed) collapses again and falls back until the swept-leading-edge mesh fix; no variant of the damping (relative limit, floor with fallback, other floors) keeps both Yuska and Rabia.
+
 **Open:** Yuska G-X5 collapsed states after the integration (above); subsonic CN_alpha +11..+21 % high; fully turbulent CD0 +3-7 %; Arcas supersonic fin increment and Yuska C_A0 (KNOWN); boattail pressure drag subsonic reads high and the GPU Euler + sting divergence is localised, not fixed (item 64); Coarse supersonic Rabia and the subsonic Byrum / Torrent points (57b, 57c); full solve on 6 GB cards (the guard refuses the shared angle nodes); solved jet unvalidated (TP-2005).
 
 ## 1. State on one screen
