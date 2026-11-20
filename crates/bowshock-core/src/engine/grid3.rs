@@ -939,7 +939,9 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         sj,
         fin_offs,
         edge,
-        round_rows: matches!(f.profile, FinProfile::Rounded) && p.fin_le_rows,
+        // a round edge keeps the root's first chord cell down the span when asked for, and always on a fin whose tip trailing edge is behind the root's (DESIGN3D item 73: Cancer
+        // Descending, Coarse Mach 0.5, C_D 0.52 in 770 iterations with, vacuum cells at the tip leading edge after 1 300 to 2 700 iterations without)
+        round_rows: matches!(f.profile, FinProfile::Rounded) && (p.fin_le_rows || x_le_root + x_back > x_te_root + 1e-9),
     })
 }
 
