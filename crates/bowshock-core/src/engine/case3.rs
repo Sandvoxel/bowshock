@@ -5,7 +5,7 @@ use crate::engine::body_grid::{BaseBody, Body, Nose};
 use crate::engine::case::Case;
 use crate::engine::field3::Snapshots3;
 use crate::engine::grid3::{body_grid3, Domain3, FinStack, Fins3, Grid3Params, WEDGE_ANGLE};
-use crate::engine::meshing::{base_grid, draft_coarsen, motor_rows, resolve_walls, sting_grid, wall_spacing, Jet};
+use crate::engine::meshing::{base_grid, draft_coarsen, motor_rows, refine_boattail, resolve_walls, sting_grid, wall_spacing, Jet};
 use crate::error::Error;
 use crate::progress::ProgressSink;
 use crate::spec::FinProfile;
@@ -550,6 +550,9 @@ impl Case3 {
             draft_coarsen(&mut base, &mut self.grid.sting, &self.body);
         }
         resolve_walls(&mut base, &mut self.grid.sting, &self.body, y1);
+        if matches!(tier, Tier::Coarse(..) | Tier::Fine(..)) {
+            refine_boattail(&mut base, &self.body);
+        }
         if self.grid.base.is_some() {
             self.grid.base = Some(base);
         }

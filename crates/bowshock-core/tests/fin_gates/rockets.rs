@@ -31,13 +31,25 @@ impl Rocket {
 
     /// The four-fin sector at zero incidence (the product's table path), on the tier of `kind`.
     pub fn sector(&self, mach: f64, mach_max: f64, kind: TierKind) -> Case3 {
+        self.sector_on_sting(mach, mach_max, kind, 0.0)
+    }
+
+    /// [`Rocket::sector`] on a sting of radius `sting` nose diameters behind the base (`0`: free wake): the support of a tunnel model.
+    pub fn sector_on_sting(&self, mach: f64, mach_max: f64, kind: TierKind, sting: f64) -> Case3 {
         let (body, _) = self.body.to_internal().expect("body");
+        let body = if sting > 0.0 { body.with_sting(sting) } else { body };
         Case3::sector(mach, body, self.fins.clone(), tier(kind, self.flow(mach, mach_max)), 0)
     }
 
     /// The same body without fins on the axisymmetric wedge.
     pub fn finless(&self, mach: f64, mach_max: f64, kind: TierKind) -> Case3 {
+        self.finless_on_sting(mach, mach_max, kind, 0.0)
+    }
+
+    /// [`Rocket::finless`] on a sting of radius `sting` nose diameters behind the base (`0`: free wake).
+    pub fn finless_on_sting(&self, mach: f64, mach_max: f64, kind: TierKind, sting: f64) -> Case3 {
         let (body, _) = self.body.to_internal().expect("body");
+        let body = if sting > 0.0 { body.with_sting(sting) } else { body };
         Case3::wedge(mach, body, 0).with_tier(tier(kind, self.flow(mach, mach_max)))
     }
 

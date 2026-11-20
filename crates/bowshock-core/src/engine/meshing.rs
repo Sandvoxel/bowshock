@@ -54,15 +54,37 @@ pub(crate) fn wall_spacing(body: &BaseBody, re_c: f64, mach_max: f64, y_plus: f6
 }
 
 /// Wall-resolve both meridian grids of a case for the first cell height `y1`: radial cell counts for a growth ratio of 1.2, the gap behind the base clustered at
-/// the base corner only.
+/// the base corner only; a body on a sting has two walls bounding the gap (the base corner above, the sting below, a wall on the whole length behind the base), so its rows are
+/// clustered at both ends (`2 layer_count(half the gap)` rows; with the one-sided rows the sting wall cells were as large as the gap's growth made them, `y+` 155-340 on the sting of the
+/// Fox and Arcas tunnel models, DESIGN3D item 65).
 pub(crate) fn resolve_walls(grid_base: &mut BaseGridParams, grid_sting: &mut LargeGridParams, body: &BaseBody, y1: f64) {
     let (re, rs) = (body.base_radius(), body.sting_radius);
     grid_base.dr_wall = y1;
     grid_base.nj_out = layer_count(grid_base.r_far - re, y1);
-    grid_base.n_gap = layer_count(re - rs, grid_base.dr_gap.unwrap_or(y1));
-    grid_base.gap_one_sided = true;
+    let dr_gap = grid_base.dr_gap.unwrap_or(y1);
+    if rs > 0.0 {
+        grid_base.n_gap = 2 * layer_count(0.5 * (re - rs), dr_gap);
+        grid_base.gap_one_sided = false;
+    } else {
+        grid_base.n_gap = layer_count(re - rs, dr_gap);
+        grid_base.gap_one_sided = true;
+    }
     grid_sting.dr_wall = y1;
     grid_sting.nj = layer_count(grid_sting.r_far, y1);
+}
+
+/// Factor of the end-cell size `dx_tip` of the wall-resolved base-wake grid of a boattailed body (Coarse and Fine tiers, [`refine_boattail`]). The shoulder suction peak behind the
+/// cylinder and the pressure recovery on the cone are set by the axial cell size at the segment ends, which every segment shares (`dx_tip`, 0.03 d): Fox TM X-2439 (10 degree boattail,
+/// RANS, Mach 0.608) boattail pressure drag 0.0488 / 0.0462 / 0.0455 / 0.0450 at `dx_tip` x 1 / 1/2 / 1/3 / 1/4 (a uniform refinement x2 of every count: 0.0460), the long Arcas
+/// finless 0.0510 / 0.0482 at x 1 / 1/2 (uniform x2 0.0486). No cell is added (the counts are the grid's, the cells only cluster closer to the ends), the radial rows, the cells behind the
+/// base, the gap rows and the far field do not move it (DESIGN3D item 65).
+pub const BOATTAIL_DX_FACTOR: f64 = 0.25;
+
+/// The base-wake grid of a body with a boattail ([`BaseBody::has_boattail`]) with the end cells of every segment [`BOATTAIL_DX_FACTOR`] times as long; other bodies are unchanged.
+pub(crate) fn refine_boattail(base: &mut BaseGridParams, body: &BaseBody) {
+    if body.has_boattail() {
+        base.dx_tip *= BOATTAIL_DX_FACTOR;
+    }
 }
 
 /// Longest mean axial cell of an aft segment (tube or cone) of the grids of [`Case::new`] at level 0, in nose diameters; level `l`
@@ -141,6 +163,7 @@ pub(crate) fn base_grid(body: &BaseBody, level: u32) -> BaseGridParams {
         n_nose: 48 * f,
         n_seg,
         n_wake: 40 * f,
+        wake_near: None,
         n_sting,
         n_gap: 12 * f,
         nj_out: 64 * f,
@@ -209,5 +232,39 @@ mod tests {
         assert_eq!(segment_cells(40, 25.7, 1, 0.03), 40);
         assert_eq!(segment_cells(40, 59.7, 1, 0.03), 60);
         assert_eq!(segment_cells(80, 59.7, 2, 0.015), 120);
+    }
+
+    /// Only a body with a boattail has its end cells refined (Coarse and Fine tiers); a flat-based body, a diameter step, the Draft and Lift tiers keep the plain grid.
+    #[test]
+    fn only_a_boattail_refines_the_end_cells() {
+        use crate::engine::body_grid::{Body, Nose};
+        use crate::engine::case3::{Case3, Tier, WallFlow};
+        let flow = WallFlow { re_c: 1.0e7, mach_max: 1.2, ks_body: 0.0, ks_fin: 0.0, sutherland: 0.38 };
+        let nose = Body { nose: Nose::TangentOgive { fineness: 3.0 } };
+        let dx = |b: BaseBody, t: Tier| Case3::wedge(0.8, b, 0).with_tier(t).grid.base.expect("base grid").dx_tip;
+        let plain = base_grid(&BaseBody::cylinder(nose, 6.0), 0).dx_tip;
+        assert_eq!(dx(BaseBody::cylinder(nose, 6.0), Tier::Coarse(flow)), plain);
+        assert_eq!(dx(BaseBody::cylinder(nose, 6.0).with_step(-0.05, 0.05), Tier::Coarse(flow)), plain);
+        let boat = BaseBody::cylinder(nose, 6.0).with_boattail(1.0, 10f64.to_radians());
+        assert_eq!(dx(boat.clone(), Tier::Coarse(flow)), plain * BOATTAIL_DX_FACTOR);
+        assert_eq!(dx(boat.clone(), Tier::Fine(flow)), plain * BOATTAIL_DX_FACTOR);
+        assert_eq!(dx(boat.clone(), Tier::Euler), plain);
+        assert_eq!(dx(boat.clone(), Tier::Lift(flow)), plain);
+        assert_eq!(dx(boat, Tier::draft(flow)), DRAFT_DX_TIP);
+    }
+
+    /// A body on a sting has its gap rows clustered at both walls (the sting wall resolved), a free-wake body keeps the one-sided rows.
+    #[test]
+    fn a_sting_gets_two_sided_gap_rows() {
+        use crate::engine::body_grid::{Body, Nose};
+        let nose = Body { nose: Nose::TangentOgive { fineness: 3.0 } };
+        let body = BaseBody::cylinder(nose, 6.0).with_boattail(1.0, 10f64.to_radians());
+        let (mut a, mut sa) = (base_grid(&body, 0), sting_grid(&body, 0));
+        resolve_walls(&mut a, &mut sa, &body, 1e-5);
+        assert!(a.gap_one_sided);
+        let stung = body.clone().with_sting(0.13);
+        let (mut b, mut sb) = (base_grid(&stung, 0), sting_grid(&stung, 0));
+        resolve_walls(&mut b, &mut sb, &stung, 1e-5);
+        assert!(!b.gap_one_sided && b.n_gap % 2 == 0 && b.n_gap >= 2);
     }
 }

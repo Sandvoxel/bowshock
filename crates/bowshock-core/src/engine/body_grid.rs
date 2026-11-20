@@ -367,6 +367,11 @@ impl BaseBody {
     pub fn base_radius(&self) -> f64 {
         self.station(self.segments.len()).1
     }
+    /// Whether an aft segment narrows the body towards the base (a conical boattail; a diameter step is not one): the afterbody whose pressure recovery the base-wake grids resolve
+    /// with a smaller end-cell size ([`crate::engine::meshing::refine_boattail`]).
+    pub fn has_boattail(&self) -> bool {
+        self.segments.iter().any(|s| !s.is_step() && s.slope < 0.0)
+    }
     /// Diameter of the largest cross-section of the body (the nose base, a tube or the end of a flare), in nose diameters.
     pub fn largest_diameter(&self) -> f64 {
         2.0 * (0..=self.segments.len()).map(|k| self.station(k).1).fold(self.body.radius(), f64::max)
@@ -430,6 +435,9 @@ pub struct BaseGridParams {
     pub n_nose: usize,
     pub n_seg: Vec<usize>,
     pub n_wake: usize,
+    /// The first `n` of the `n_wake` cells behind the base cover `length` (nose diameters, geometric from the last cell of the body; the remaining cells go geometrically to
+    /// `x_down`): the recirculation region of a subsonic base wake resolved by cells of its own size instead of the fan that starts from the body's end cell. `None`: the fan alone.
+    pub wake_near: Option<(f64, usize)>,
     /// Rows inside the sting (solid; 0 without sting, otherwise >= 2), rows between the sting (or axis) and the base
     /// radius behind the base (these rows are solid beside the body), rows above the body surface.
     pub n_sting: usize,
@@ -520,10 +528,21 @@ pub(crate) fn base_axial_nodes(p: &BaseGridParams) -> Result<(Vec<f64>, usize), 
     }
     let i_end = xs.len() - 1; // node index of the base plane is xs.len() - 1 at this point
     let d_base = xs[i_end] - xs[i_end - 1];
-    let wake = geometric_offsets(d_base, p.x_down, p.n_wake);
     let x_base = bb.x_base();
-    for k in 1..=p.n_wake {
-        xs.push(x_base + wake[k]);
+    match p.wake_near {
+        Some((length, n)) if n >= 1 && n < p.n_wake && length > 0.0 && length < p.x_down => {
+            let near = geometric_offsets(d_base, length, n);
+            let d_last = near[n] - near[n - 1];
+            let far = geometric_offsets(d_last, p.x_down - length, p.n_wake - n);
+            xs.extend(near[1..].iter().map(|o| x_base + o));
+            xs.extend(far[1..].iter().map(|o| x_base + length + o));
+        }
+        _ => {
+            let wake = geometric_offsets(d_base, p.x_down, p.n_wake);
+            for k in 1..=p.n_wake {
+                xs.push(x_base + wake[k]);
+            }
+        }
     }
     Ok((xs, i_end))
 }
@@ -712,6 +731,7 @@ mod tests {
             n_nose: 24,
             n_seg: if boat > 0.0 { vec![16, 8] } else { vec![16] },
             n_wake: 16,
+            wake_near: None,
             n_sting: if sting > 0.0 { 4 } else { 0 },
             n_gap: 8,
             nj_out: 20,
@@ -779,6 +799,19 @@ mod tests {
     }
 
     #[test]
+    fn wake_near_puts_cells_of_its_own_behind_the_base() {
+        let mut p = base_params(0.0, 1.0);
+        let (xs0, i_end) = base_axial_nodes(&p).expect("nodes");
+        p.wake_near = Some((2.0, 10));
+        let (xs1, i1) = base_axial_nodes(&p).expect("nodes");
+        assert_eq!((xs0.len(), i_end), (xs1.len(), i1), "same cell count, same base plane");
+        let xb = p.body.x_base();
+        assert!((xs1[i_end + 10] - (xb + 2.0)).abs() < 1e-12, "the near region ends at its length");
+        assert!((xs1[xs1.len() - 1] - (xb + p.x_down)).abs() < 1e-12);
+        assert!(xs1.windows(2).all(|w| w[1] > w[0]));
+    }
+
+    #[test]
     fn base_body_profile_is_continuous() {
         let b = base_params(0.0, 1.0).body;
         let xs = b.station(1).0;
@@ -840,6 +873,7 @@ mod tests {
             n_nose: 24,
             n_seg: vec![20, 10, 12, 10],
             n_wake: 16,
+            wake_near: None,
             n_sting: 0,
             n_gap: 8,
             nj_out: 20,
