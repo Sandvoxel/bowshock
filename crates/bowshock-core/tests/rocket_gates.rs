@@ -146,7 +146,10 @@ fn arcas_points() -> Vec<StabPoint> {
 
 /// G-X1: the Arcas short model (l/d 18.2, tangent ogive, boattail with the reflex lip modelled as a plain boattail, double-wedge fins as G-F4) `CN_alpha` (secant 0 to 4 degrees, fins
 /// on, roll 0, `arcas_stab::SHORT_*`: figure readings, +-0.9 per rad) and `x_cp`, Lift half domain, fins in the pitch plane, free wake behind the base (the 1 in sting of the transonic tests is
-/// not modelled). Bands: `CN_alpha` 15 %, `x_cp` 0.35 cal (2 % of the length; the reading uncertainty is 0.09 to 0.27 cal).
+/// not modelled). Bands: `CN_alpha` 15 %, `x_cp` 0.35 cal (2 % of the length; the reading uncertainty is 0.09 to 0.27 cal). `FAIL KNOWN` (DESIGN3D item 55): `CN_alpha` at Mach 0.8 and
+/// `x_cp` at Mach 0.6-1.2: the data's own x_cp is that of a model whose stability is "almost neutral" at -2 to 2 degrees below Mach 0.9 (the report's words) and whose `CN` curve is
+/// non-linear at 0-4 degrees; the solver's `CN(2)` at Mach 0.6 / 0.8 is 8.1 / 4.8 per rad against 12.2 / 10.3 at 4 degrees (same non-linearity, stronger), so neither the secant nor the
+/// centre of pressure is defined the way the data's is.
 #[test]
 #[ignore = "validation: lift tier on the GPU"]
 fn gate_x1_arcas_cn_alpha_and_xcp() {
@@ -278,9 +281,10 @@ fn print_axial(lines: &mut Lines, id: &str, case: &str, (gated, viscous, known):
     compare(lines, gated, viscous, known, id, case, v, data, band);
 }
 
-/// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, Mach 0.6 / 0.8 gated (fins on 15 %,
-/// fins off 12 % or 0.03) and Mach 0.9, 0.95, 1.0, 1.2 INFO (the report's reading uncertainty is 0.02 at Mach 0.9-1.0 and the transonic drag rise is where the data of the short model
-/// disagree with the solver most), as G-F4 for the short model.
+/// G-X4: the Arcas **long** model (l/d 23.77: the short model's cylinder 12.55 in longer, NASA TN D-4013 Fig. 12) `C_A,corr` fins on and off, zero incidence, Mach 0.6 / 0.8 gated (fins on
+/// 15 %, fins off 12 % or 0.03, the increment 30 % or 0.03) and Mach 0.7-1.2 INFO (reading uncertainty 0.02 at Mach 0.9-1.0), as G-F4 for the short model. `FAIL KNOWN` (DESIGN3D item 55):
+/// the fins-off lines at Mach 0.6 / 0.8: +16.8 / +16.0 % (the body friction of the fully turbulent solve, 0.235 of 0.29, is where the 0.04 sits; the short model's +8 % scales with the
+/// wetted length).
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
 fn gate_x4_arcas_long_axial_force() {
@@ -311,7 +315,9 @@ fn gate_x4_arcas_long_axial_force() {
 }
 
 /// G-X5: the Lewis sounding-rocket stage's axial force at zero incidence without the base (`yuska` Fig. 5, "adjusted to free-stream static pressure at the base"), the four-fin sector of the
-/// Coarse tier, models A, B and C at the 10 x 10 ft Mach numbers (the 8 x 6 ft ones of model A INFO): 12 %.
+/// Coarse tier, models A, B and C at the 10 x 10 ft Mach numbers (the 8 x 6 ft ones of model A INFO, and three of the four do not converge: DESIGN3D item 55): 12 %, every line
+/// `FAIL KNOWN` (+19 to +34 %): the fin is the planform the mesher takes in place of the drawing's (area as drawn, leading-edge sweep 28 instead of 45 degrees), and the report's base
+/// correction does not say whether it covers the fins' trailing-edge faces (0.9 of the body area, flush with the base): the `ca0-without-fin-te` lines take them out too.
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
 fn gate_x5_yuska_axial_force() {
@@ -348,7 +354,8 @@ fn gate_x5_yuska_axial_force() {
 }
 
 /// G-X6: the generalized research model B4 + F13's forebody axial force at zero incidence (`grm::FINS_ON` `CAF`: the total with the base pressure force removed; `CA - CAB`), the sector of
-/// the Coarse tier, Mach 0.80-1.30. 12 % (the report's `dCA` is 0.014, the repeats of the transonic points scatter by 0.02-0.05, and the transition state is unknown): Mach 0.92-1.10 INFO.
+/// the Coarse tier, Mach 0.80-1.30. 12 % (the report's `dCA` is 0.014, the repeats of the transonic points scatter by 0.02-0.05): Mach 0.92 / 0.94 INFO (scatter), Mach 0.80 / 0.85
+/// `FAIL KNOWN` (+13.6 / +20.4 %: the friction of a fully turbulent solve against a tunnel run whose transition the report does not give, DESIGN3D item 55).
 #[test]
 #[ignore = "validation: Coarse sector on the GPU"]
 fn gate_x6_grm_axial_force() {
