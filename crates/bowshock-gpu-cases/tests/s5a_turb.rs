@@ -374,7 +374,9 @@ impl Case {
         let nc = self.solid.len();
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
         for c in 0..nc {
-            if self.solid[c] {
+            // the wall cells keep their plain `k`, `omega`: with `k` above the law-of-the-wall value the `k` cap (`Sst::wall_cell`) is active and its `y+`-dependent kink amplifies the round-off of
+            // the wall state; the corrections are exercised in every other cell
+            if self.solid[c] || self.wall[c][1] > 0.0 {
                 continue;
             }
             let w = self.w[pidx3(ni, nj, nk, (c % ni) as isize, ((c / ni) % nj) as isize, (c / (ni * nj)) as isize)];
