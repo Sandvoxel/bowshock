@@ -8,7 +8,7 @@
 //! - region refinements of the base-wake grid: `seg<k>` the boattail cells, `cyl<k>` the cylinder cells, `wake<k>` the cells behind the base, `gap<k>` the rows between sting and base
 //!   radius, `njo<k>` the rows above the body, `dx<k>` the end-cell size at the nose tip, shoulder and base corner, `drw<k>` the first cell height (each divided / multiplied by `k`);
 //! - `near<L>_<n>`: the first `n` cells behind the base cover `L` diameters (`BaseGridParams::wake_near`); `rfar<k>`, `xdown<k>`: the outer radius and the outflow distance times `k`;
-//! - `twosided`: the gap rows clustered at both ends (sting wall resolved).
+//! - `twosided`: the gap rows clustered at both ends (the default on a sting now); `plain`: the end-cell size of the plain grid (without `BOATTAIL_DX_FACTOR`, the default of the Coarse and Fine tiers for a boattailed body).
 //!
 //! Prints `WR <variant> M<mach> ...` lines. Needs `BOWSHOCK_WEDGE_BACKEND=gpu` for the GPU.
 #[path = "fin_gates/common.rs"]
@@ -105,6 +105,9 @@ fn case_of(m: f64, variant: &str) -> (Case3, f64, f64, f64, f64) {
             if let Some(v) = p.strip_prefix("near") {
                 let (l, n) = v.split_once('_').expect("nearL_n");
                 base.wake_near = Some((l.parse().expect("nearL"), n.parse().expect("near_n")));
+            }
+            if *p == "plain" {
+                base.dx_tip /= bowshock_core::engine::meshing::BOATTAIL_DX_FACTOR;
             }
             if *p == "twosided" {
                 base.gap_one_sided = false;

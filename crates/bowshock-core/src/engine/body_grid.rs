@@ -367,6 +367,11 @@ impl BaseBody {
     pub fn base_radius(&self) -> f64 {
         self.station(self.segments.len()).1
     }
+    /// Whether an aft segment narrows the body towards the base (a conical boattail; a diameter step is not one): the afterbody whose pressure recovery the base-wake grids resolve
+    /// with a smaller end-cell size ([`crate::engine::meshing::refine_boattail`]).
+    pub fn has_boattail(&self) -> bool {
+        self.segments.iter().any(|s| !s.is_step() && s.slope < 0.0)
+    }
     /// Diameter of the largest cross-section of the body (the nose base, a tube or the end of a flare), in nose diameters.
     pub fn largest_diameter(&self) -> f64 {
         2.0 * (0..=self.segments.len()).map(|k| self.station(k).1).fold(self.body.radius(), f64::max)

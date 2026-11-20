@@ -73,6 +73,20 @@ pub(crate) fn resolve_walls(grid_base: &mut BaseGridParams, grid_sting: &mut Lar
     grid_sting.nj = layer_count(grid_sting.r_far, y1);
 }
 
+/// Factor of the end-cell size `dx_tip` of the wall-resolved base-wake grid of a boattailed body (Coarse and Fine tiers, [`refine_boattail`]). The shoulder suction peak behind the
+/// cylinder and the pressure recovery on the cone are set by the axial cell size at the segment ends, which every segment shares (`dx_tip`, 0.03 d): Fox TM X-2439 (10 degree boattail,
+/// RANS, Mach 0.608) boattail pressure drag 0.0488 / 0.0462 / 0.0455 / 0.0450 at `dx_tip` x 1 / 1/2 / 1/3 / 1/4 (a uniform refinement x2 of every count: 0.0460), the long Arcas
+/// finless 0.0510 / 0.0482 at x 1 / 1/2 (uniform x2 0.0486). No cell is added (the counts are the grid's, the cells only cluster closer to the ends), the radial rows, the cells behind the
+/// base, the gap rows and the far field do not move it (DESIGN3D item 65).
+pub const BOATTAIL_DX_FACTOR: f64 = 0.25;
+
+/// The base-wake grid of a body with a boattail ([`BaseBody::has_boattail`]) with the end cells of every segment [`BOATTAIL_DX_FACTOR`] times as long; other bodies are unchanged.
+pub(crate) fn refine_boattail(base: &mut BaseGridParams, body: &BaseBody) {
+    if body.has_boattail() {
+        base.dx_tip *= BOATTAIL_DX_FACTOR;
+    }
+}
+
 /// Longest mean axial cell of an aft segment (tube or cone) of the grids of [`Case::new`] at level 0, in nose diameters; level `l`
 /// divides it by `2^l`. A segment has 40 cells (tube), 36 (last tube of a sting grid) or 24 (cone) at level 0 however long it is, so a
 /// tube of 40 d, the longest body the facade first accepted, had a mean of 1 d per cell (its largest cell, in the middle of the clustered
