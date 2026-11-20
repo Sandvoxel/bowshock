@@ -9,6 +9,19 @@ pub enum DtMode {
     MinDirection,
 }
 
+/// The cap of the `k` rate in the pseudo-time step, `dt = CFL V / (L_i + L_j + min(L_k, cap (L_i + L_j)))` instead of `CFL V / (L_i + L_j + L_k)` (3D, `DtMode::Sum`). The `k` direction is
+/// line-implicit like the others, but on a finned sector the azimuthal clustering along every `k` line makes the cells near the axis and in the wake slivers `r dtheta_min` wide, `L_k`
+/// is up to 1e7 times `L_i + L_j` there (Draft example sector at the converged state: `L_k > L_i + L_j` in 56 % of the cells, in 75 % of the base wake) and the sum sets their step.
+/// The step is the sum's where `L_k <= cap (L_i + L_j)` and else at most `1 + cap` times the two-direction step `CFL V / (L_i + L_j)`. The capped step takes iterations to settle
+/// but starts badly (the plain sum survives the first 300-600 iterations where the cap rolls back or blows up): it applies from iteration `from_iter`, and then `cfl_max` is at most
+/// `cfl_max` of the cap (see [`ImplicitParams::at_iter`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KCap {
+    pub cap: f64,
+    pub from_iter: usize,
+    pub cfl_max: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitParams {
     /// Pseudo-time CFL: starts at `cfl0` and is multiplied by `growth` every iteration up to `cfl_max`.
@@ -47,6 +60,8 @@ pub struct ImplicitParams {
     /// MUSCL residual has the amplification `1 - (1 + a - b) 2 sigma / (1 + 2 sigma) / (1 + delta)` at large CFL (`1 + a - b` up to 2.3 for van Albada, 2 for minmod), so
     /// `delta` 0.3-0.5 keeps it above -1 while the smooth modes change by `O(delta theta)`. 0 is the plain scheme.
     pub lhs_dis_boost: f64,
+    /// 3D, `DtMode::Sum` only: the capped `k` rate of the pseudo-time step ([`KCap`]); `None` is the plain sum (the default).
+    pub dt_k_cap: Option<KCap>,
 }
 
 /// Lower bound of the reference velocity of the low-Mach preconditioning in units of the free-stream sound speed. Measured on the example
@@ -73,6 +88,14 @@ pub enum LineSolve3 {
 }
 
 impl ImplicitParams {
+    /// The parameters of iteration `iter`: with a [`KCap`] from `from_iter` on, `dt_k_cap` stays `Some` and `cfl_max` is at most the cap's; before that the plain sum (`dt_k_cap` `None`).
+    pub fn at_iter(&self, iter: usize) -> ImplicitParams {
+        match self.dt_k_cap {
+            Some(k) if iter >= k.from_iter => ImplicitParams { cfl_max: self.cfl_max.min(k.cfl_max), ..*self },
+            _ => ImplicitParams { dt_k_cap: None, ..*self },
+        }
+    }
+
     pub const DEFAULT: ImplicitParams = ImplicitParams {
         cfl0: 1.0,
         cfl_max: 30.0,
@@ -87,8 +110,28 @@ impl ImplicitParams {
         line_solve: LineSolve3::Block,
         ddadi: None,
         lhs_dis_boost: 0.0,
+        dt_k_cap: None,
     };
 
     /// Parameters for viscous runs: the weaker-direction pseudo-time step with a lower CFL limit and one more defect-correction pass.
     pub const VISCOUS: ImplicitParams = ImplicitParams { dt_mode: DtMode::MinDirection, cfl_max: 10.0, sub_iters: 3, ..ImplicitParams::DEFAULT };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `at_iter`: the plain sum before `from_iter` (cap dropped, `cfl_max` as given), the cap and `cfl_max` at most the cap's from there; no cap: unchanged.
+    #[test]
+    fn the_k_cap_starts_at_its_iteration() {
+        let p = ImplicitParams { cfl_max: 100.0, dt_k_cap: Some(KCap { cap: 1.0, from_iter: 300, cfl_max: 25.0 }), ..ImplicitParams::DEFAULT };
+        assert_eq!(p.at_iter(299), ImplicitParams { dt_k_cap: None, ..p });
+        let q = p.at_iter(300);
+        assert_eq!((q.cfl_max, q.dt_k_cap), (25.0, p.dt_k_cap));
+        assert_eq!(p.at_iter(5000).cfl_max, 25.0);
+        // a controller that lowered `cfl_max` below the cap's keeps its value
+        assert_eq!(ImplicitParams { cfl_max: 17.5, ..p }.at_iter(400).cfl_max, 17.5);
+        let plain = ImplicitParams::DEFAULT;
+        assert_eq!(plain.at_iter(1000), plain);
+    }
 }

@@ -695,10 +695,9 @@ impl LazySolver3 {
         }
     }
 
-    /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))`
-    /// (`DtMode::MinDirection`), `L_d` = half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is the one-element array of the
-    /// loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`, or `2 min(L_i, L_j)`).
-    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>) -> F {
+    /// The rates `L_d` of the first `n_dirs` directions of every cell (f32): half the sum of `(|u.n| + c) S` over the two faces (the low-Mach `|u'| + c'` with `lm`), plus the
+    /// diffusive rate `diff[d]` of a viscous run.
+    fn dt_rates3(&self, wk: &V5, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>, n_dirs: usize) -> Vec<F> {
         let g = &self.lg;
         let dims = self.dims3();
         let c2 = cf(GAMMA) * &wk[4] / &wk[0];
@@ -718,8 +717,21 @@ impl LazySolver3 {
                 }
             }
         };
-        let l: Vec<F> = (0..if self.no_dt_k { 2 } else { 3 }).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)) + diff.map_or_else(|| 0.0f32 * &g.one, |d| d[dir].clone())).collect();
+        (0..n_dirs).map(|dir| 0.5f32 * (lam(dir, false) + lam(dir, true)) + diff.map_or_else(|| 0.0f32 * &g.one, |d| d[dir].clone())).collect()
+    }
+
+    /// Local pseudo-time step from the cell primitives `wk` (f32): `dt = cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `cfl V / (3 min(L_i, L_j, L_k))` (`DtMode::MinDirection`), `L_d` =
+    /// half the sum of `(|u.n| + c) S` over the two faces of direction `d`. `cfl` is the one-element array of the loop state. Zero in solid cells. `no_dt_k`: `L_k` is left out (`L_i + L_j`,
+    /// or `2 min(L_i, L_j)`). `k_cap` finite (`ImplicitParams::dt_k_cap`, `Sum` only): `L_k` counts at most `k_cap (L_i + L_j)`.
+    fn pseudo_dt3(&self, wk: &V5, cfl: &F, mode: DtMode, k_cap: f64, diff: Option<&[F; 3]>, lm: Option<&LmGpu3>) -> F {
+        let g = &self.lg;
+        let cs = (cf(GAMMA) * &wk[4] / &wk[0]).sqrt();
+        let l = self.dt_rates3(wk, diff, lm, if self.no_dt_k { 2 } else { 3 });
         let dt = match (mode, l.as_slice()) {
+            (DtMode::Sum, [a, b, c]) if k_cap.is_finite() => {
+                let ab = a + b;
+                cfl * &g.vol / (&ab + c.minimum(&(cf(k_cap) * &ab)))
+            }
             (DtMode::Sum, [a, b, c]) => cfl * &g.vol / (a + b + c),
             (DtMode::Sum, [a, b]) => cfl * &g.vol / (a + b),
             (DtMode::MinDirection, [a, b, c]) => cfl * &g.vol / (3.0f32 * a.minimum(b).minimum(c)),
@@ -1149,7 +1161,8 @@ impl LazySolver3 {
             Pc3 { p: self.p_cells3(&wk, &lm), lm }
         });
         let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
-        let cfl = lhs(&s[6]);
+        // the capped phase starts at its own `cfl_max` at once (`ImplicitParams::at_iter`; the CPU step takes the ramp's value capped by it)
+        let cfl = if p.dt_k_cap.is_some() { lhs(&s[6]).minimum(cf(p.cfl_max)) } else { lhs(&s[6]) };
         // a viscous run: the diffusive rates of the directions in the time step and the diffusive spectral radius of every face in the dissipation
         let (diff, lam): (Option<[F; 3]>, Option<[F; 3]>) = match (&self.visc, &rs.vis) {
             (Some(vg), Some(vis)) => {
@@ -1159,7 +1172,7 @@ impl LazySolver3 {
             }
             _ => (None, None),
         };
-        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
+        let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, p.dt_k_cap.map_or(f64::INFINITY, |k| k.cap), diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
         let b: V5 = v5(|k| &lhs(&r0[k]) * &dt);
         let lam = lam.as_ref();
         let du = match p.line_solve {

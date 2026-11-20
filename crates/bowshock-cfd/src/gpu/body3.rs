@@ -513,7 +513,7 @@ struct AxisDt3 {
 
 /// A loop traced by `luma::compile_until_all` and the setting it was traced for.
 struct CompiledLoop3 {
-    key: (Limiter, Staging, [bool; 4], usize),
+    key: (Limiter, Staging, [bool; 5], usize),
     /// The steps it was compiled for (shorter runs use `run_steps`).
     max: usize,
     run: luma::CompiledUntil<State3>,
@@ -1309,17 +1309,28 @@ impl LazySolver3 {
 
     /// Number of iterations from `self.iter` that use the same limiter (the traced step is specific to the limiter).
     fn phase_len3(&self, left: usize) -> usize {
+        let mut left = left;
         if self.iter < self.cfg.first_order_iters {
-            left.min(self.cfg.first_order_iters - self.iter)
-        } else {
-            left
+            left = left.min(self.cfg.first_order_iters - self.iter);
         }
+        // the capped `k` rate of the pseudo-time step starts at `KCap::from_iter` (the traced step is specific to it too)
+        if let Scheme3::Implicit(crate::implicit_params::ImplicitParams { dt_k_cap: Some(k), .. }) = self.cfg.scheme {
+            if self.iter < k.from_iter {
+                left = left.min(k.from_iter - self.iter);
+            }
+        }
+        left
+    }
+
+    /// Whether the pseudo-time step of iteration `self.iter` has the capped `k` rate ([`ImplicitParams::at_iter`]).
+    fn k_capped3(&self) -> bool {
+        matches!(self.cfg.scheme, Scheme3::Implicit(p) if p.at_iter(self.iter).dt_k_cap.is_some())
     }
 
     /// One iteration of the configured scheme from the loop state.
     fn step3(&self, s: &State3, lim: Limiter) -> State3 {
         match self.cfg.scheme {
-            Scheme3::Implicit(p) => self.implicit_step3(s, &p, lim),
+            Scheme3::Implicit(p) => self.implicit_step3(s, &p.at_iter(self.iter), lim),
             Scheme3::Explicit => {
                 let mu_t = self.turb.as_ref().map(|_| s[9].clone());
                 let (u, rn, dt, last) = self.rk3_3(&unpack3(s), mu_t.as_ref(), lim);
@@ -1345,7 +1356,7 @@ impl LazySolver3 {
         while left > 0 {
             let seg = self.phase_len3(left);
             let lim = self.limiter3(self.iter);
-            let key = (lim, self.staging, [self.skip_k, self.no_dt_k, self.k_wall_flux, self.k_src], sync);
+            let key = (lim, self.staging, [self.skip_k, self.no_dt_k, self.k_wall_flux, self.k_src, self.k_capped3()], sync);
             // the loop is traced once per (limiter, configuration): a chunk then costs only its launches (`luma::compile_until_all`; the setters that change what the step
             // reads drop the compiled loop). A step Luma cannot compile (a read-back inside it) runs through `iterate_until_all`, traced again every call
             if self.compiled.as_ref().is_none_or(|c| c.key != key || c.max < seg) {

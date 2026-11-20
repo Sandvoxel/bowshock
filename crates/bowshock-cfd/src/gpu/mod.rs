@@ -749,6 +749,12 @@ impl GpuSolver3 {
         Ok(Some(on3!(self, s => s.viscous_flux_f64()?)))
     }
 
+    /// The rates `[L_i, L_j, L_k]` (convective plus diffusive, f32 as the implicit step sees them) of every cell of the current state on the host: the pseudo-time step is
+    /// `cfl V / (L_i + L_j + L_k)` (`DtMode::Sum`). A diagnostic of the time step (`finned_table --dt-diag`); the implicit scheme only.
+    pub fn dt_rates(&self) -> Result<[Vec<f64>; 3]> {
+        Ok(on3!(self, s => s.dt_rates_f64()?))
+    }
+
     /// `[k, omega]` and `mu_t` of every cell on the host (`None` without SST).
     pub fn turb_state(&self) -> Result<Option<(Vec<[f64; 2]>, Vec<f64>)>> {
         Ok(on3!(self, s => s.turb_f64()?))

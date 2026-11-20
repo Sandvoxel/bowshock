@@ -356,9 +356,9 @@ impl Solver3 {
     }
 
     /// Local pseudo-time step into `self.dt` from the primitives of the last residual evaluation:
-    /// `CFL V / (L_i + L_j + L_k)` (`DtMode::Sum`) or `CFL V / (3 min L_d)`; `L_d = (lam(lo) + lam(hi)) / 2`,
+    /// `CFL V / (L_i + L_j + L_k)` (`DtMode::Sum`; with `k_cap` finite `L_k` is replaced by `min(L_k, k_cap (L_i + L_j))`, [`ImplicitParams::dt_k_cap`]) or `CFL V / (3 min L_d)`; `L_d = (lam(lo) + lam(hi)) / 2`,
     /// `lam(f) = (|u.n| + c) area`. Zero in solid cells. In the axis cells of a wedge at most [`WEDGE_AXIS_DT`]` r_c / c`.
-    pub(crate) fn compute_dt(&mut self, cfl: f64, mode: DtMode) {
+    pub(crate) fn compute_dt(&mut self, cfl: f64, mode: DtMode, k_cap: f64) {
         let (ni, nj, nk) = (self.grid.ni, self.grid.nj, self.grid.nk);
         let wedge = self.is_wedge();
         let (grid, w, solid) = (&self.grid, &self.w, &self.solid);
@@ -390,7 +390,7 @@ impl Solver3 {
                         }
                     }
                     let dtc = match mode {
-                        DtMode::Sum => cfl * grid.vol[c] / (li + lj + lk),
+                        DtMode::Sum => cfl * grid.vol[c] / (li + lj + lk.min(k_cap * (li + lj))),
                         DtMode::MinDirection if wedge => cfl * grid.vol[c] / (2.0 * li.min(lj)),
                         DtMode::MinDirection => cfl * grid.vol[c] / (3.0 * li.min(lj).min(lk)),
                     };
@@ -409,7 +409,7 @@ impl Solver3 {
     fn rk3_step(&mut self) -> f64 {
         self.eval_residual();
         let rn = self.density_residual();
-        self.compute_dt(self.cfg.cfl, DtMode::Sum);
+        self.compute_dt(self.cfg.cfl, DtMode::Sum, f64::INFINITY);
         self.u0.copy_from_slice(&self.u);
         self.stage(1.0, 0.0);
         self.eval_residual();
@@ -871,7 +871,7 @@ mod tests {
         let implicit = Scheme3::Implicit(ImplicitParams { cfl_max: 50.0, ..ImplicitParams::DEFAULT });
         let mut wedge = Solver3::new(sliver_grid(1, 0.0873, Symmetry::Wedge), cfg(fs, implicit, Limiter::VanAlbada));
         wedge.eval_residual();
-        wedge.compute_dt(50.0, DtMode::Sum);
+        wedge.compute_dt(50.0, DtMode::Sum, f64::INFINITY);
         let ni = wedge.grid.ni;
         for i in 0..ni {
             let x = wedge.grid.xc[i];
@@ -883,10 +883,36 @@ mod tests {
         }
         let mut half = Solver3::new(sliver_grid(2, std::f64::consts::PI, Symmetry::Half), cfg(fs, implicit, Limiter::VanAlbada));
         half.eval_residual();
-        half.compute_dt(50.0, DtMode::Sum);
+        half.compute_dt(50.0, DtMode::Sum, f64::INFINITY);
         let x = half.grid.xc[0];
         let cap = WEDGE_AXIS_DT * x[1].hypot(x[2]) / c_inf;
         assert!(half.dt[0] > 1.5 * cap, "the axis cell of a half domain is limited: dt {:e} vs {cap:e}", half.dt[0]);
+    }
+
+    /// `ImplicitParams::dt_k_cap`: `CFL V / (L_i + L_j + min(L_k, cap (L_i + L_j)))` is never below the sum's step, equals it where `L_k <= cap (L_i + L_j)`, grows with a falling cap
+    /// where the narrow azimuthal cells make `L_k` the largest rate, and an infinite cap is the sum.
+    #[test]
+    fn capped_k_time_step_is_bounded_by_the_sum() {
+        let fs = freestream3(0.5, 0.0);
+        let implicit = Scheme3::Implicit(ImplicitParams { cfl_max: 50.0, ..ImplicitParams::DEFAULT });
+        let mut s = Solver3::new(sliver_grid(4, 1.0, Symmetry::Half), cfg(fs, implicit, Limiter::VanAlbada));
+        s.eval_residual();
+        s.compute_dt(50.0, DtMode::Sum, f64::INFINITY);
+        let sum = s.dt.clone();
+        s.compute_dt(50.0, DtMode::Sum, 4.0);
+        let cap4 = s.dt.clone();
+        s.compute_dt(50.0, DtMode::Sum, 1.0);
+        let cap1 = s.dt.clone();
+        let (mut larger, mut equal) = (0, 0);
+        for c in 0..sum.len() {
+            assert!(cap4[c] >= sum[c] * (1.0 - 1e-12) && cap1[c] >= cap4[c] * (1.0 - 1e-12), "cell {c}: {:e} {:e} {:e}", sum[c], cap4[c], cap1[c]);
+            if cap1[c] > sum[c] * (1.0 + 1e-9) {
+                larger += 1;
+            } else {
+                equal += 1;
+            }
+        }
+        assert!(larger > 0 && equal > 0, "the cap acts in {larger} cells and not in {equal}");
     }
 
     /// `restore` of a `snapshot` taken mid-run gives back the run: the same steps afterwards reach the same state, the conserved variables bit for bit (the residual norms

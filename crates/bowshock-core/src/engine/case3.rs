@@ -566,6 +566,18 @@ impl Case3 {
             self.numerics.implicit.ddadi = Some(1.0);
             self.numerics.implicit.lhs_dis_boost = DDADI_DIS_BOOST;
             self.numerics.implicit.cfl_max = DDADI_CFL_MAX;
+            // experiment (DESIGN3D item 60): `BOWSHOCK_DT_CAPK=<cap>,<from_iter>,<cfl_max>` takes the pseudo-time step with the `k` rate capped at `cap (L_i + L_j)` from
+            // iteration `from_iter` on, at `cfl_max` at most ([`bowshock_cfd::implicit_params::KCap`])
+            if let Some(k) = std::env::var("BOWSHOCK_DT_CAPK").ok().and_then(|v| {
+                let f: Vec<&str> = v.split(',').collect();
+                Some(bowshock_cfd::implicit_params::KCap {
+                    cap: f.first()?.parse().ok()?,
+                    from_iter: f.get(1)?.parse().ok()?,
+                    cfl_max: f.get(2)?.parse().ok()?,
+                })
+            }) {
+                self.numerics.implicit.dt_k_cap = Some(k);
+            }
         }
         // the engine's `cfl_max` (100 with DDADI on the 3D domains; on the wedge 50 below Mach 1, 20 above) with the rollback controller of the runners
         // ([`Numerics3::cfl_control`]); the fixed rule of [`VISCOUS_3D_CFL_MAX`] is [`Case3::without_cfl_control`]

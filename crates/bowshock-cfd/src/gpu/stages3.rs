@@ -68,6 +68,7 @@ impl LazySolver3 {
         if p.line_solve != crate::implicit_params::LineSolve3::Block {
             return Err(luma::LumaError::Unsupported("profile_stages3 profiles the block line solve".into()));
         }
+        let p = p.at_iter(self.iter);
         let reps = reps.max(1);
         let lim = self.limiter3(self.iter);
         let s = self.state.clone().ok_or_else(no_state)?;
@@ -151,7 +152,7 @@ impl LazySolver3 {
             let wk: V5 = v5(|k| wf[k].slice(0, 2..self.ni + 2).slice(1, 2..self.nj + 2).slice(2, 2..self.nk + 2));
             let pc: Option<Pc3> = LmGpu3::of(&p, &self.cfg.freestream).map(|lm| Pc3 { p: self.p_cells3(&wk, &lm), lm });
             let cfl = lhs(&s[6]);
-            let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
+            let dt = self.pseudo_dt3(&wk, &cfl, p.dt_mode, p.dt_k_cap.map_or(f64::INFINITY, |k| k.cap), diff.as_ref(), pc.as_ref().map(|c| &c.lm)).cache();
             let mut ev = evs_l(&wf);
             ev.push(Ev::L(dt.clone()));
             if let Some(pc) = &pc {
