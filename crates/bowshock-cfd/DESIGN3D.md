@@ -958,7 +958,7 @@ The peak falls 25-35 % (no exact-size arena on top of the intermediates), the st
 
     (e) *Left to others, from the same data.* The 20 wedge seeds are 23 000 of the 42 750 iterations but 13 s of 266 (1.1 ms per iteration against 11.4 for a sector and 14.6 for an angle iteration), the seed's stop is not worth tuning. The GPU runner executes 30-40 iterations past the iteration the rule fired at (`stop` / `exec` of the table: 1870 / 1900, 810 / 850), the force of the result is that of the later state: about 7-8 s over the 18 finned runs of 12-15 ms per iteration; the rule knows when its next block ends, so a runner that sized the last chunk to it would save most of that (`gpu3.rs`, not this item's).
 
-    (f) *Gates.* `GATE` lines of G-F5 and G-L1 (`release_gates.sh lift`) with the period-aware rule: GATES_PENDING. Default (original rule) unchanged by construction: the confirming full solve at the final commit reproduces 42 750 iterations and the CD / CN of the first column of (d).
+    (f) *Confirmation and gates.* Confirming full solve on the final code (job `0-20261120-001833-10114`, default and `BOWSHOCK_DRIFT_PERIODS=1` twice each, load 13-135): default **42 750 iterations** (iterating 271.6 / 268.0 s), identical to the integration tip's 42 750; period-aware 43 350 (277.7 / 270.2 s). The `GATE` lines of G-F5 and G-L1 (`release_gates.sh lift`) with the period-aware rule are job `1-20261119-233835-28452` (queued behind others when this was written, not read); the default rule's gates are unchanged by construction (same code path, same iteration counts).
 
 ### The viscous half domain at incidence: the CFL limit and the first four incidence points (phys3d, 2026-11-18)
 
