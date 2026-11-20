@@ -114,6 +114,9 @@ fn tp2005_base_pressure_with_jet() {
         nose: NoseSpec { shape: NoseShape::TangentOgive, length: tp2005::NOSE_LENGTH, diameter: tp2005::BODY_DIAMETER },
         aft: vec![AftSpec::Tube { length: tp2005::BASE_STATION - tp2005::NOSE_LENGTH }],
     };
+    // BOWSHOCK_TP_RES=coarse runs the resolution the app's drag nodes use (with BOWSHOCK_ENGINE=3d: the product path, DESIGN3D item 58); the default is Medium
+    let resolution = if std::env::var("BOWSHOCK_TP_RES").is_ok_and(|r| r == "coarse") { Resolution::Coarse } else { Resolution::Medium };
+    println!("engine {:?}, resolution {resolution:?}", bowshock_core::Engine::from_env());
     println!("{:>5} {:>5} {:>9} {:>9} {:>8} {:>10} {:>5} {:<20} {:>6}  gate", "Minf", "Me", "data", "bowshock", "delta", "quality", "iters", "stop", "sec");
     let mut failures = Vec::new();
     let mut results: Vec<(f64, f64, f64)> = Vec::new();
@@ -130,7 +133,8 @@ fn tp2005_base_pressure_with_jet() {
             total_temperature_k: tp2005::JET_TOTAL_TEMPERATURE_K,
         };
         let t = Instant::now();
-        let polar = Analysis::legacy(&body).unwrap().backend(Backend::Auto).resolution(Resolution::Medium).viscous(flight).motor(motor).run(&[minf]).unwrap();
+        let analysis = if resolution == Resolution::Coarse { Analysis::new(&body) } else { Analysis::legacy(&body) };
+        let polar = analysis.unwrap().backend(Backend::Auto).resolution(resolution).viscous(flight).motor(motor).run(&[minf]).unwrap();
         let p = &polar.points[0];
         let data = tp2005::base_pressure_ratio(row);
         let value = 1.0 + 0.7 * minf * minf * p.detail.cp_base;

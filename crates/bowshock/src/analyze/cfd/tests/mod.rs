@@ -13,6 +13,7 @@ mod interp;
 mod openrocket;
 mod perf;
 mod plan;
+mod power_on;
 mod run;
 
 const EXAMPLE: &[u8] = include_bytes!("../../../../assets/examples/hpr_l1_cert.bowshock");
@@ -104,5 +105,6 @@ pub(super) fn table() -> CfdTable {
         points: vec![p(0.5, 0.4), p(1.0, 0.8), p(2.0, 0.6)],
         grid: CfdGrid::Coarse,
         lift: None,
+        power_on: None,
     }
 }

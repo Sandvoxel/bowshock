@@ -37,7 +37,7 @@ pub mod vehicle;
 pub use aero::{Aero, ComponentAero, DragBreakdown, NormalForce, RollAero, Stability};
 pub use analysis::{monte_carlo, vs_alpha, vs_mach, AlphaPoint, Dispersion, MachPoint, MonteCarlo, MonteCarloRun, MonteCarloStats};
 pub use atmosphere::{AirState, Atmosphere};
-pub use drag_table::{DragTable, DragTablePoint};
+pub use drag_table::{DragTable, DragTablePoint, PowerRatio};
 pub use flight::{
     normal_gravity, simulate, Branch, BranchSummary, Deploy, Event, EventKind, FlightModel, FlightResult, Launch, RecoveryDevice, Sample, SimInput, Summary,
     Trajectory, Turbulence, WindPoint, EARTH_RATE,

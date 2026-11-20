@@ -43,10 +43,7 @@ fn case_of(r: &Rocket, mach: f64, variant: &str) -> Case3 {
     let mut spec = r.body.clone();
     if parts.contains(&"lip") {
         let tube = arcas_stab::LONG_TUBE_LENGTH - if parts.contains(&"short") { arcas_stab::LONG_TUBE_LENGTH - arcas::TUBE_LENGTH } else { 0.0 };
-        spec.aft = vec![
-            AftSpec::Tube { length: tube },
-            AftSpec::Transition { length: 1.757 * IN, aft_diameter: 1.308 * IN },
-        ];
+        spec.aft = vec![AftSpec::Tube { length: tube }, AftSpec::Transition { length: 1.757 * IN, aft_diameter: 1.308 * IN }];
     }
     let (mut body, _) = spec.to_internal().expect("body");
     if parts.contains(&"lip") {
@@ -108,7 +105,13 @@ fn edges(x_bt: f64, x_end: f64) -> Vec<f64> {
     let mut e = vec![0.0];
     let mut x = 0.0;
     while x < x_bt - 1e-9 {
-        x += if x < 2.0 { 0.25 } else if x < 4.71 { 0.5 } else { 1.0 };
+        x += if x < 2.0 {
+            0.25
+        } else if x < 4.71 {
+            0.5
+        } else {
+            1.0
+        };
         e.push(x.min(x_bt));
     }
     while *e.last().unwrap() < x_end - 1e-9 {

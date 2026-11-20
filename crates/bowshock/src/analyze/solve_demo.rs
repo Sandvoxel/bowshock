@@ -571,6 +571,7 @@ mod tests {
             compute: Default::default(),
             cpu_only: false,
             stability: Vec::new(),
+            power_on: Vec::new(),
         };
         let t = tracked(Tracker::drag_units(&nodes), &events(Demo::Mid, &job));
         assert_eq!(t.done_count(), 4);

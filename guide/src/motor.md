@@ -125,6 +125,33 @@ The exit pressure and total temperature are properties of your motor at the flig
 the exit pressure usually changes with altitude when the nozzle is not ideally expanded. Run one
 analysis per condition.
 
+## In the app: the CFD table's power-on part
+
+**Off by default.** The solved jet raises the base drag (x2 at subsonic Mach numbers), the opposite sign to the exit-area
+correction the flight simulator applies by default, and it is not validated (see Accuracy below). It is an opt-in:
+set `BOWSHOCK_POWER_ON` (or build with `plan::POWER_ON`) and re-solve the table. Without it the table has no power-on nodes
+and the flight keeps the exit-area correction.
+
+With it, the app's CFD table (Analyze, the 3D engine) also solves the jet of the stack's motor, and the
+flight simulator flies it while the motor burns. The motor files carry a case diameter and a thrust
+curve and no nozzle, so the jet is derived (`analyze::cfd::plan::jet_of`): an air jet at exit Mach 2.5 and
+3000 K total temperature whose thrust is the motor's average (impulse over burn time),
+
+```text
+F = p_e A_e (1 + gamma M_e^2) - p_sl A_e        (static thrust, p_sl = 101 325 Pa)
+A_e = F / (gamma M_e^2 p_sl)                    (the exit matched to sea level), kept between 0.5 and 0.8 of the case diameter
+p_e = (F / A_e + p_sl) / (1 + gamma M_e^2)      (at the kept area)
+```
+
+so it does not depend on the flight altitude (the solver puts it in the free stream's units: the exit-to-ambient pressure
+ratio rises as the rocket climbs). At the Mach numbers 0.5, 0.9, 1.3 and 2.3 that the table has, the body alone (no fins:
+the axisymmetric wedge) is solved with the jet on and with it off on the table's grid, and the ratios of friction,
+nose/aft pressure and base drag are stored with the table (`CfdTable::power_on`). The flight multiplies the table's parts by
+the ratios, linear between the nodes and held beyond them, and no longer takes the motor's exit area out of the base drag. A
+table without a power-on part for the motor it flies (solved before the motor changed) keeps that old correction and the
+Simulate screen says so. The fins' drag is not scaled by the ratios (the finned sector with the jet differs from the body's by
+at most 5 % in the base-drag ratio, DESIGN3D item 58).
+
 ## Limits
 
 - The jet is a cold-air model with a uniform exit state; real exhaust has a different gamma and

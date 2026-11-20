@@ -51,6 +51,7 @@ fn a_tiny_grid_solves_and_is_sane() {
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let points = Arc::new(Mutex::new(0usize));
     let counter = points.clone();
@@ -80,7 +81,17 @@ fn the_example_table_solves_and_agrees_with_extended() {
     let (mut rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     let nodes = nodes((0.1, 3.0)).unwrap();
-    let job = Job { plan, altitude: 120.0, nodes, stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes,
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: Vec::new(),
+        power_on: Vec::new(),
+    };
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), move |e| {
         if let Event::Point(p) = e {
@@ -112,7 +123,7 @@ fn a_table_says_why_the_legacy_engine_solved_it_when_there_is_no_gpu() {
     let (rocket, vehicle) = example();
     let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
     let job =
-        Job { plan, altitude: 120.0, nodes: vec![0.6], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new() };
+        Job { plan, altitude: 120.0, nodes: vec![0.6], stage: 1, grid: CfdGrid::Coarse, compute: Default::default(), cpu_only: false, stability: Vec::new(), power_on: Vec::new() };
     let notes = job_notes(&job);
     match solver::Engine::no_gpu_fallback() {
         Some(why) => {
@@ -134,6 +145,7 @@ fn a_cancel_stops_before_the_next_point() {
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let cancel = Arc::new(AtomicBool::new(true));
     assert_eq!(solve(&job, &cancel, |_| ()).unwrap_err(), CANCELLED);
@@ -155,6 +167,7 @@ fn a_cancel_ends_the_point_in_flight_within_a_report() {
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -196,6 +209,7 @@ fn a_real_point_streams_progress() {
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let log = events.clone();
@@ -242,6 +256,7 @@ fn a_table_that_stopped_early_is_a_partial_of_the_range_and_nothing_else_is() {
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let mut tracker = Tracker::new(Tracker::drag_units(&job.nodes));
     let done = |mach: f64, quality: Option<CfdQuality>| PointDone {
@@ -317,6 +332,7 @@ fn a_stopped_share_keeps_the_machines_that_solved_it_and_the_part_without_a_gap(
         compute: Default::default(),
         cpu_only: false,
         stability: Vec::new(),
+        power_on: Vec::new(),
     };
     let mut t = Tracker::new(Tracker::drag_units(&job.nodes));
     t.set_machines(&[MachineInfo { name: "This computer".into(), remote: false }, MachineInfo { name: "omarchy".into(), remote: true }]);
@@ -371,8 +387,17 @@ fn solves_that_cannot_reach_a_machine_fail_with_its_error_or_with_every_machines
     let run = |compute: Compute| {
         events.lock().unwrap().clear();
         let log = events.clone();
-        let job =
-            Job { plan: plan.clone(), altitude: 0.0, nodes: vec![0.6, 2.0], stage: 1, grid: CfdGrid::Coarse, compute, cpu_only: false, stability: Vec::new() };
+        let job = Job {
+            plan: plan.clone(),
+            altitude: 0.0,
+            nodes: vec![0.6, 2.0],
+            stage: 1,
+            grid: CfdGrid::Coarse,
+            compute,
+            cpu_only: false,
+            stability: Vec::new(),
+            power_on: Vec::new(),
+        };
         solve(&job, &Arc::new(AtomicBool::new(false)), move |e| log.lock().unwrap().push(e))
     };
     // one machine, picked: its error as it is
@@ -437,6 +462,7 @@ fn a_remote_and_a_shared_solve_agree_with_the_local_one() {
             compute,
             cpu_only: false,
             stability: nodes.clone(),
+            power_on: Vec::new(),
         };
         let mut drag = solve(&job, &cancel, tap(log.clone())).expect("the table solves");
         let lift = drag.lift.take().expect("the 3D angles solve");

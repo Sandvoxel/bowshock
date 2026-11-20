@@ -481,7 +481,7 @@ fn table_from_buildup(aero: &Aero, k: f64) -> DragTable {
             DragTablePoint { mach: m, friction: k * d.friction, pressure: k * d.pressure, base: k * d.base, fins: k * d.fins, other: k * d.protuberances }
         })
         .collect();
-    DragTable { points, altitude: TABLE_ALT }
+    DragTable { points, altitude: TABLE_ALT, power_on: Vec::new() }
 }
 
 fn close(a: f64, b: f64) {
@@ -526,6 +526,34 @@ fn motor_on_scales_only_the_table_base_by_the_buildup_ratio() {
     close(on.pressure, off.pressure);
     close(on.fins, off.fins);
     close(on.protuberances, off.protuberances);
+}
+
+#[test]
+fn a_solved_jet_replaces_the_exit_area_correction_of_the_motor_on_base() {
+    use bowshock_sim::PowerRatio;
+    let plain = Aero::new(&input().vehicle);
+    let mut table = table_from_buildup(&plain, 1.2);
+    let ratio = |mach: f64, base: f64| PowerRatio { mach, friction: 1.0, pressure: 1.05, base };
+    table.power_on = vec![ratio(0.6, 0.4), ratio(1.2, 0.8)];
+    let aero = plain.clone().with_table(table.clone());
+    // at a node: the table's part times the jet's effect, the exit area is not taken out again
+    let m = 0.6;
+    let (off, on) = (aero.drag(m, re_tab(m), false), aero.drag(m, re_tab(m), true));
+    close(on.base, 0.4 * off.base);
+    close(on.pressure, 1.05 * off.pressure);
+    close(on.fins, off.fins);
+    close(on.friction, off.friction);
+    // between the nodes the effect is linear, beyond them the end node's is held
+    let m = 0.9;
+    let (off, on) = (aero.drag(m, re_tab(m), false), aero.drag(m, re_tab(m), true));
+    close(on.base, 0.6 * off.base);
+    let (off, on) = (aero.drag(2.0, re_tab(2.0), false), aero.drag(2.0, re_tab(2.0), true));
+    close(on.base, 0.8 * off.base);
+    let (off, on) = (aero.drag(0.3, re_tab(0.3), false), aero.drag(0.3, re_tab(0.3), true));
+    close(on.base, 0.4 * off.base);
+    // the motor off flies the table as it is
+    let a = plain.clone().with_table(table_from_buildup(&plain, 1.2));
+    close(aero.drag(0.9, re_tab(0.9), false).total, a.drag(0.9, re_tab(0.9), false).total);
 }
 
 #[test]

@@ -80,6 +80,73 @@ pub enum CfdGrid {
     Medium,
 }
 
+/// The motor jet a power-on solve was run with: the cold-air model of `bowshock_core::MotorSpec` (the nozzle exit of the motor's stage, see the app's `plan`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdJet {
+    /// Diameter of the nozzle exit (m).
+    pub exit_diameter: f64,
+    /// Mach number of the jet at the exit.
+    pub exit_mach: f64,
+    /// Static pressure at the exit (Pa).
+    pub exit_pressure_pa: f64,
+    /// Total temperature of the jet (K).
+    pub total_temperature_k: f64,
+}
+
+impl CfdJet {
+    /// Whether `other` is the same jet to the precision the app derives it at (a motor edited and put back reads as the same).
+    pub fn same_as(&self, other: &CfdJet) -> bool {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-4 * a.abs().max(b.abs());
+        close(self.exit_diameter, other.exit_diameter)
+            && close(self.exit_mach, other.exit_mach)
+            && close(self.exit_pressure_pa, other.exit_pressure_pa)
+            && close(self.total_temperature_k, other.total_temperature_k)
+    }
+}
+
+/// What the motor jet does to the drag at one Mach number: the parts of the axisymmetric body (no fins, the wedge of the 3D engine) solved with the jet on over the same
+/// parts solved with it off, both on the same grid. Ratios, because the jet changes the base flow and the base wake of the body alone carries that change to the finned rocket
+/// (a finned sector with the jet in it costs 1.5 to 2.5 times the table's whole per-point time, the body alone about a tenth of it; DESIGN3D item 58).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdPowerPoint {
+    /// Mach number.
+    pub mach: f64,
+    /// Skin friction, power on over power off.
+    pub friction: f64,
+    /// Pressure drag of the nose and the aft body, power on over power off.
+    pub pressure: f64,
+    /// Base drag: the annulus around the nozzle exit with the jet on (the exit's pressure force is the jet's, not drag) over the whole base without it.
+    pub base: f64,
+    /// Trust in the point (the worse of the two runs).
+    pub quality: CfdQuality,
+}
+
+/// The power-on part of a drag table: the jet of the stack's motor at a few Mach numbers. It belongs to the table it was solved with (a new table replaces it) and is flown while its
+/// [`jet`](CfdPowerOn::jet) is the one the motor gives now.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CfdPowerOn {
+    /// The jet the points were solved with.
+    pub jet: CfdJet,
+    /// When it finished: seconds since the Unix epoch.
+    pub solved_at: u64,
+    /// Wall time of the solve (s).
+    pub solve_seconds: f64,
+    /// The solved Mach numbers, ascending.
+    pub points: Vec<CfdPowerPoint>,
+    /// Notes on points left out.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl CfdPowerOn {
+    fn is_sound(&self) -> bool {
+        !self.points.is_empty()
+            && self.solve_seconds.is_finite()
+            && self.points.windows(2).all(|w| w[0].mach < w[1].mach)
+            && self.points.iter().all(|p| [p.mach, p.friction, p.pressure, p.base].iter().all(|v| v.is_finite() && *v >= 0.0))
+    }
+}
+
 /// The 3D Euler result of one solved (Mach, angle of attack): normal force and centre of pressure.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CfdLiftPoint {
@@ -168,6 +235,9 @@ pub struct CfdTable {
     /// of the legacy engine and for one stored before the bands existed: those show no band.
     #[serde(default)]
     pub bands: bool,
+    /// The drag with the motor jet on, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_on: Option<Box<CfdPowerOn>>,
 }
 
 impl CfdTable {
@@ -235,6 +305,9 @@ impl Rocket {
             if t.lift.as_ref().is_some_and(|l| !l.is_sound()) {
                 t.lift = None;
             }
+            if t.power_on.as_ref().is_some_and(|p| !p.is_sound()) {
+                t.power_on = None;
+            }
         }
         let excess = self.cfd.0.len().saturating_sub(MAX_CFD_TABLES);
         self.cfd.0.drain(..excess);
@@ -275,6 +348,7 @@ mod tests {
             points: vec![point(0.3), point(0.9), point(2.0)],
             grid: CfdGrid::Coarse,
             lift: None,
+            power_on: None,
         }
     }
 
@@ -314,6 +388,44 @@ mod tests {
         assert_eq!(back.cfd_table(1), r.cfd_table(1));
         // Nothing is written while there is nothing to write, so old files and readers are untouched.
         assert!(!crate::format::cbor_text(&plain).contains("cfd"));
+    }
+
+    fn power_on(base: f64) -> CfdPowerOn {
+        let jet = CfdJet { exit_diameter: 0.0145, exit_mach: 2.5, exit_pressure_pa: 95_787.5, total_temperature_k: 3000.0 };
+        CfdPowerOn {
+            jet,
+            solved_at: 5,
+            solve_seconds: 40.0,
+            points: vec![CfdPowerPoint { mach: 0.5, friction: 1.0, pressure: 1.2, base, quality: CfdQuality::Converged }],
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_power_on_part_survives_the_file_and_an_unsound_one_is_dropped_on_load() {
+        let mut r = Rocket::default();
+        r.store_cfd_table(CfdTable { power_on: Some(Box::new(power_on(1.9))), ..table(1, 1) });
+        let back = Rocket::from_bytes(&r.to_bytes()).unwrap();
+        assert_eq!(back.cfd_table(1).unwrap().power_on.as_deref(), Some(&power_on(1.9)));
+        // a table written without one (every older file) reads as none
+        let mut v = serde_json::to_value(table(1, 1)).unwrap();
+        assert!(v.as_object_mut().unwrap().remove("power_on").is_none(), "nothing is written for none");
+        assert!(serde_json::from_value::<CfdTable>(v).unwrap().power_on.is_none());
+        // a ratio that is not a number is not kept
+        let mut bad = Rocket::default();
+        bad.store_cfd_table(CfdTable { power_on: Some(Box::new(power_on(f64::NAN))), ..table(1, 2) });
+        bad.repair_cfd();
+        assert!(bad.cfd_table(1).unwrap().power_on.is_none());
+        // a new table of the stack replaces the old power-on part: it was solved for that table's geometry
+        r.store_cfd_table(table(1, 3));
+        assert!(r.cfd_table(1).unwrap().power_on.is_none());
+    }
+
+    #[test]
+    fn the_jet_of_a_motor_edited_and_put_back_is_the_same() {
+        let a = power_on(1.0).jet;
+        assert!(a.same_as(&CfdJet { exit_pressure_pa: a.exit_pressure_pa * (1.0 + 1e-6), ..a }));
+        assert!(!a.same_as(&CfdJet { exit_diameter: 1.1 * a.exit_diameter, ..a }));
     }
 
     #[test]

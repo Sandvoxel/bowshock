@@ -611,6 +611,8 @@ impl State {
             cpu_only: ctx.local_solver == crate::app::settings::LocalSolver::Cpu,
             // the draft grid solves the drag alone (its angles are not worth their time, DESIGN3D item 57): the stability stays on Extended until the coarse solve brings the 3D angles
             stability: if self.cfd.angles && grid != CfdGrid::Draft { cfd::lift_nodes(self.cond.mach).unwrap_or_default() } else { Vec::new() },
+            // opt-in (DESIGN3D item 58): the stack's motor burns and the power-on part is asked for, so the table also has the base flow with the jet in it; not solved by default
+            power_on: if cfd::power_on_requested() && plan.motor.is_some() && grid != CfdGrid::Draft { cfd::power_on_nodes(&nodes) } else { Vec::new() },
         });
         let tracker = solve::Tracker::new(job.units());
         let script = self.cfd.demo.pop_front().map(|demo| solve_demo::events(demo, &job));

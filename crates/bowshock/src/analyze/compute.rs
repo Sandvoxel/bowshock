@@ -921,6 +921,7 @@ mod tests {
             points: vec![point(0.3), point(1.0), point(2.0)],
             grid: CfdGrid::Coarse,
             lift: None,
+            power_on: None,
         };
         let info = |mach: (f64, f64)| cfd_info(&table, Analysis::Drag, &Conditions { mach, ..Conditions::default() });
         let low = info((0.1, 2.0));
@@ -1036,8 +1037,9 @@ mod tests {
             points: [0.1, 0.5, 1.0, 2.0, 3.0].into_iter().map(point).collect(),
             grid: CfdGrid::Coarse,
             lift: None,
+            power_on: None,
         };
-        let drag_table = DragTable::from_cfd(&cfd_table);
+        let drag_table = DragTable::from_cfd(&cfd_table, None);
         let conditions = Conditions { runs: 16, ..Conditions::default() };
         let request = |method, cfd: Option<Arc<CfdTable>>, drag_tables| Request {
             analysis: Analysis::Dispersion,

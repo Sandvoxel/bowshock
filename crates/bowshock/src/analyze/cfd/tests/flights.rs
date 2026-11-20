@@ -271,7 +271,7 @@ fn launch(f: &Fixture) -> Launch {
 fn fly(f: &Fixture, v: &Vehicle, table: Option<&CfdTable>) -> (f64, f64) {
     let mut input = SimInput::new(v.clone(), launch(f), Vec::new());
     if let Some(t) = table {
-        input.drag_tables = vec![Some(DragTable::from_cfd(t))];
+        input.drag_tables = vec![Some(DragTable::from_cfd(t, None))];
     }
     let s = simulate(&input).summary;
     (s.apogee / FT, s.max_mach)
@@ -362,6 +362,7 @@ fn flight_validation() {
                 compute: Default::default(),
                 cpu_only: false,
                 stability: job_nodes().1,
+            power_on: Vec::new(),
             };
             let t0 = Instant::now();
             let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points(f.id.clone())).unwrap_or_else(|e| panic!("{}: solve failed: {e}", f.id));
@@ -464,6 +465,7 @@ fn stepped_rocket_solves_and_settles() {
         compute: Default::default(),
         cpu_only: false,
         stability: job_nodes().1,
+            power_on: Vec::new(),
     };
     let t0 = Instant::now();
     let table = solve(&job, &Arc::new(AtomicBool::new(false)), log_points("stepped".into())).expect("the stepped rocket solves");

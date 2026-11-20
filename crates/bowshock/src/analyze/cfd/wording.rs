@@ -359,6 +359,28 @@ pub fn restart_note(mach: f64, r: &bowshock_model::CfdRestart) -> String {
     format!("Mach {mach:.2} converged {times} at a lower CFL limit ({:.1} to {:.1}): the run first went unstable, so the point is from different numerics than the others.", r.cfl_from, r.cfl_to)
 }
 
+/// The note for a Mach number of the power-on part that did not converge (it is left out; the flight holds the neighbour's effect).
+pub fn power_on_left_out(mach: f64) -> String {
+    format!("Power-on Mach {mach:.2} did not converge and is left out.")
+}
+
+/// Why a table has no power-on part although the stack has a motor.
+pub fn power_on_none() -> &'static str {
+    "No power-on point converged: the flight takes the exit area of the motor out of the base drag."
+}
+
+/// The note of a solved power-on part: the jet, the Mach numbers and the base drag with the jet on over the power-off one (`base_ratio`, per Mach number, solved on the body alone).
+pub fn power_on_note(jet: &bowshock_model::CfdJet, base_ratio: &[(f64, f64)]) -> String {
+    let machs: Vec<String> = base_ratio.iter().map(|(m, r)| format!("{m:.1}: {r:.2}")).collect();
+    format!(
+        "Power on: the motor's jet (nozzle exit {:.0} mm, Mach {:.1}, {:.2} bar at the exit, solved as air) in the base flow; the base drag with the jet on over the power-off one (the body alone) at Mach {}; the flight uses it while the motor burns.",
+        jet.exit_diameter * 1e3,
+        jet.exit_mach,
+        jet.exit_pressure_pa * 1e-5,
+        machs.join(", ")
+    )
+}
+
 /// The short form for the point list of the solve screen.
 pub fn restart_tag(r: &bowshock_model::CfdRestart) -> String {
     format!("restarted at CFL {:.1}", r.cfl_to)

@@ -203,7 +203,10 @@ fn bt1_fox_boattail() {
                     }
                 }
                 acc.sort_by_key(|a| a.0);
-                println!("{tag} segment drag (wall extrapolation / first cell): {}", acc.iter().map(|(n, a, b)| format!("seg{n} {a:+.4} / {b:+.4}")).collect::<Vec<_>>().join(", "));
+                println!(
+                    "{tag} segment drag (wall extrapolation / first cell): {}",
+                    acc.iter().map(|(n, a, b)| format!("seg{n} {a:+.4} / {b:+.4}")).collect::<Vec<_>>().join(", ")
+                );
             }
             // Cp at the data orifices (linear interpolation of the wall samples)
             let at = |x: f64| -> f64 {
@@ -242,7 +245,9 @@ fn bt1_fox_boattail() {
                     continue;
                 }
                 // the first fluid cell above a solid one
-                let Some(j) = (1..g.nj).find(|&j| g.is_solid(i, j - 1, 0) && !g.is_solid(i, j, 0)).or_else(|| (!g.is_solid(i, 0, 0)).then_some(0)) else { continue };
+                let Some(j) = (1..g.nj).find(|&j| g.is_solid(i, j - 1, 0) && !g.is_solid(i, j, 0)).or_else(|| (!g.is_solid(i, 0, 0)).then_some(0)) else {
+                    continue;
+                };
                 let w1 = cons_to_prim3(&h.u[g.cell(i, j, 0)]);
                 let w4 = cons_to_prim3(&h.u[g.cell(i, (j + 4).min(g.nj - 1), 0)]);
                 println!(
@@ -416,7 +421,13 @@ fn quad(k: usize, nose: bool, cp: Option<&[f64]>) -> f64 {
     let cps: &[f64] = cp.unwrap_or(data);
     let (rho, l, r0) = (4.25f64, 2.0f64, 0.5f64);
     let area = |x: f64| -> f64 {
-        let r = if x <= l { (rho * rho - (l - x).powi(2)).sqrt() + r0 - rho } else if x < 4.0 { r0 } else { r0 - (x - 4.0) * 10f64.to_radians().tan() };
+        let r = if x <= l {
+            (rho * rho - (l - x).powi(2)).sqrt() + r0 - rho
+        } else if x < 4.0 {
+            r0
+        } else {
+            r0 - (x - 4.0) * 10f64.to_radians().tan()
+        };
         4.0 * r * r
     };
     let pts: Vec<(f64, f64)> = xs.iter().zip(cps).filter(|(&x, _)| if nose { x <= 2.0 } else { x > 3.99 }).map(|(&x, &c)| (x, c)).collect();
@@ -457,7 +468,8 @@ fn bt4_perturbation() {
         let first_fluid = |i: usize| (0..g.nj).find(|&j| !g.is_solid(i, j, 0)).unwrap();
         // the rows: above the sting at the last columns, above the cylinder at x ~ 3
         let i_cyl = (0..g.ni).find(|&i| g.xc[g.cell(i, 0, 0)][0] > 3.0).unwrap();
-        let rows: Vec<(&str, usize, Vec<usize>)> = vec![("sting", first_fluid(g.ni - 1), (g.ni - 30..g.ni - 2).collect()), ("cyl", first_fluid(i_cyl), (i_cyl - 10..i_cyl + 10).collect())];
+        let rows: Vec<(&str, usize, Vec<usize>)> =
+            vec![("sting", first_fluid(g.ni - 1), (g.ni - 30..g.ni - 2).collect()), ("cyl", first_fluid(i_cyl), (i_cyl - 10..i_cyl + 10).collect())];
         for (name, j, cols) in rows {
             let mut u0 = cpu.u.clone();
             for &i in &cols {
