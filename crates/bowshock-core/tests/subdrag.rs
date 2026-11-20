@@ -8,6 +8,8 @@
 //! - `ref15`, `ref20`: the grid refined by 1.5 / 2 (cell counts, wall spacing);
 //! - `xtr<N>`: laminar to N calibres from the tip (a trip that does not work: natural transition), turbulent behind;
 //! - `short`: the short model (data `arcas::TRANSONIC`); `euler`: the Euler tier (pressure only);
+//! - `lip`: the base as drawn in D-4014 Fig. 1(a) detail A: a 15 degree tail cone to a 1.308 in diameter (1.757 in long) and the reflexed lip, a 0.053 in step back out to the 1.470 in base
+//!   (the gate's boattail is the straight 12.2 degree cone to the 1.470 in base);
 //! - tokens combine with `+` (`ref15+trip+sting`).
 //!
 //! Prints `SD <variant> M<mach> ...` lines (`parts`, `y+`, `cfx` / `cpx` binned along the body) for `tools/subdrag_post.py`. Needs `BOWSHOCK_WEDGE_BACKEND=gpu`, `BOWSHOCK_FIN_TIER=coarse`.
@@ -19,6 +21,7 @@ mod rockets;
 use bowshock_cfd::viscous3::WallTraction;
 use bowshock_core::engine::case3::Case3;
 use bowshock_core::engine::run3::{wall_samples, Wall};
+use bowshock_core::AftSpec;
 use bowshock_reference::{arcas, arcas_stab};
 use common::{machs, tier, tier_kind, Session, TierKind};
 use rockets::{arcas_rocket, Rocket};
@@ -29,14 +32,24 @@ fn model(short: bool) -> Rocket {
     arcas_rocket(extra, arcas::TRANSONIC_RE_PER_M, arcas::TRANSONIC_T0_K)
 }
 
+const IN: f64 = 0.0254;
 /// Sting radius of the test over the nose diameter (1 in diameter sting, 2.25 in nose).
 const STING_RADIUS: f64 = 0.5 / 2.25;
 /// The transition band of the test, nose diameters from the tip (1.25 in aft of the nose tip).
 const TRIP_X: f64 = 1.25 / 2.25;
 
 fn case_of(r: &Rocket, mach: f64, variant: &str) -> Case3 {
-    let (mut body, _) = r.body.to_internal().expect("body");
     let parts: Vec<&str> = variant.split('+').collect();
+    let mut spec = r.body.clone();
+    if parts.contains(&"lip") {
+        let tube = arcas_stab::LONG_TUBE_LENGTH - if parts.contains(&"short") { arcas_stab::LONG_TUBE_LENGTH - arcas::TUBE_LENGTH } else { 0.0 };
+        spec.aft = vec![
+            AftSpec::Tube { length: tube },
+            AftSpec::Transition { length: 1.757 * IN, aft_diameter: 1.308 * IN },
+            AftSpec::Transition { length: 0.053 * IN, aft_diameter: arcas::BASE_DIAMETER },
+        ];
+    }
+    let (mut body, _) = spec.to_internal().expect("body");
     if parts.contains(&"sting") {
         body = body.with_sting(STING_RADIUS);
     }
@@ -157,7 +170,7 @@ fn sd1_arcas_long_finless() {
                 p.friction.base
             );
             // local Cf (axial traction / q) and Cp of the body surface
-            let (body, _) = r.body.to_internal().unwrap();
+            let body = case.body.clone();
             let x_bt = body.station(body.segments.len() - 1).0;
             let x_end = body.x_base();
             let e = edges(x_bt, x_end);
