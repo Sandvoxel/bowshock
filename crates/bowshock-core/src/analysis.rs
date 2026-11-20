@@ -18,6 +18,7 @@ use crate::field::{Field, FieldSink, FieldTap};
 use crate::field3::Field3;
 use crate::progress::{Progress, ProgressSink};
 use crate::spec::{BodySpec, FinOutline, FinSpec, MotorSpec};
+use crate::uncertainty::Band;
 use bowshock_cfd::gas3::GAMMA;
 use bowshock_cfd::solver::Solver;
 use bowshock_cfd::solver3::Solver3;
@@ -72,16 +73,29 @@ impl Default for Engine {
 }
 
 impl Engine {
-    /// THE DEFAULT ENGINE: the one a new [`Analysis`] uses unless `BOWSHOCK_ENGINE` says otherwise and the one an [`AnalysisSpec`] without an `engine` key means. The flip
-    /// to the 3D engine is this one line.
-    pub const DEFAULT: Engine = Engine::Legacy;
+    /// THE DEFAULT ENGINE: the one a new [`Analysis`] uses unless `BOWSHOCK_ENGINE` says otherwise (and a machine without a GPU, see [`Engine::from_env`]) and the one an
+    /// [`AnalysisSpec`] without an `engine` key means. The 3D engine since the product moved to it; [`Engine::Legacy`] stays for tests, tools and machines without a GPU.
+    pub const DEFAULT: Engine = Engine::Solver3;
+
+    /// Why [`Engine::from_env`] chose [`Engine::Legacy`] on its own: the default engine is the 3D one, which needs a GPU (a full 3D solve on the CPU takes hours), and
+    /// this machine has none. `None` when `BOWSHOCK_ENGINE` names an engine (then that one runs, GPU or not) or the default engine runs as it is.
+    pub fn no_gpu_fallback() -> Option<&'static str> {
+        let named = std::env::var("BOWSHOCK_ENGINE").is_ok_and(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("3d") || v.eq_ignore_ascii_case("solver3") || v.eq_ignore_ascii_case("legacy")
+        });
+        (!named && Engine::DEFAULT == Engine::Solver3 && crate::device::gpu_name().is_none())
+            .then_some("No GPU was found, so the faster legacy engine (axisymmetric drag, 3D Euler stability) was used instead of the 3D CFD solver; its drag and stability are less accurate. Set BOWSHOCK_ENGINE=3d to run the 3D solver on the CPU or on a remote GPU.")
+    }
 
     /// The engine the `BOWSHOCK_ENGINE` environment variable names (`3d` or `solver3`: [`Engine::Solver3`]; `legacy`: [`Engine::Legacy`]; unset or anything else:
-    /// [`Engine::DEFAULT`]): the default of every new [`Analysis`], so that the app and the tests can switch without code.
+    /// [`Engine::DEFAULT`], or [`Engine::Legacy`] when that is the 3D engine and the machine has no GPU: [`Engine::no_gpu_fallback`] says so): the default of every new
+    /// [`Analysis`], so that the app and the tests can switch without code.
     pub fn from_env() -> Engine {
         match std::env::var("BOWSHOCK_ENGINE").as_deref().map(str::trim) {
             Ok(v) if v.eq_ignore_ascii_case("3d") || v.eq_ignore_ascii_case("solver3") => Engine::Solver3,
             Ok(v) if v.eq_ignore_ascii_case("legacy") => Engine::Legacy,
+            _ if Engine::no_gpu_fallback().is_some() => Engine::Legacy,
             _ => Engine::DEFAULT,
         }
     }
@@ -280,6 +294,15 @@ pub struct PolarPoint {
     /// Absolute difference of the total drag to the run at the neighbouring grid level, if [`Analysis::estimate_uncertainty`] was on and
     /// neither point failed.
     pub cd_uncertainty: Option<f64>,
+    /// The 3D engine's band of the total drag: where the true value is expected to lie from the measured terms of [`crate::uncertainty`], one-sided each way
+    /// (the model is high against free flight, the wall temperature pushes the other way). `None` for the legacy engine and for a point without a finite drag.
+    /// [`PolarPoint::cd_uncertainty`] is its larger half.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub cd_band: Option<Band>,
+    /// The 3D engine's band of the centre of pressure [`Forces::x_cp`], in metres from the nose tip: `low` is how far forward the true one may be (the stability margin
+    /// falls by that much), `high` how far aft. `None` for the legacy engine and for a point without a centre of pressure.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub x_cp_band: Option<Band>,
     /// The final flow field of a zero-incidence point, on the grid its drag was computed on; `Some` only with [`Analysis::keep_fields`].
     #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
     pub field: Option<Field>,
@@ -420,7 +443,7 @@ pub struct AnalysisSpec {
     #[doc(hidden)]
     #[cfg_attr(feature = "serde", serde(default))]
     pub fin_outline: FinOutline,
-    /// The engine ([`Analysis::engine`]); [`Engine::Legacy`] when absent.
+    /// The engine ([`Analysis::engine`]); [`Engine::DEFAULT`] when absent.
     #[doc(hidden)]
     #[cfg_attr(feature = "serde", serde(default))]
     pub engine: Engine,
@@ -505,21 +528,28 @@ impl Analysis {
             keep_fields: false,
             field_sink: None,
             field3_sink: None,
-            engine: Engine::from_env(),
+            engine: Engine::Legacy,
             fin_outline: FinOutline::Trapezoid,
         }
     }
 
-    /// Analysis of a dimensional body (same defaults as [`Analysis::from_internal`]); drag coefficients refer to the largest
+    /// Analysis of a dimensional body (same defaults as [`Analysis::from_internal`], but the engine is [`Engine::from_env`]: the 3D engine needs a dimensional body, an internal one is always the legacy engine's); drag coefficients refer to the largest
     /// cross-section of the body unless [`Analysis::reference_diameter`] says otherwise.
     pub fn new(spec: &BodySpec) -> Result<Analysis, Error> {
         let (body, scale) = spec.to_internal()?;
         let mut a = Analysis::from_internal(body);
+        a.engine = Engine::from_env();
         a.d_nose = scale.d_nose;
         a.d_ref = spec.reference_diameter();
         a.dimensional = true;
         a.body_spec = Some(spec.clone());
         Ok(a)
+    }
+
+    /// [`Analysis::new`] on the legacy engine, whatever `BOWSHOCK_ENGINE` and the GPU say: what tests and tools that need the legacy engine ask for.
+    #[doc(hidden)]
+    pub fn legacy(spec: &BodySpec) -> Result<Analysis, Error> {
+        Analysis::new(spec).map(|a| a.engine(Engine::Legacy))
     }
 
     /// The serialisable description of this analysis: everything but the progress callback (see [`AnalysisSpec`]).
@@ -589,8 +619,7 @@ impl Analysis {
         self
     }
 
-    /// The engine that solves the conditions (default [`Engine::Legacy`], or the one `BOWSHOCK_ENGINE` names). Hidden: the product
-    /// flips by changing the default, not through this call; tests and the app's switch use it.
+    /// The engine that solves the conditions (default [`Engine::DEFAULT`], or the one `BOWSHOCK_ENGINE` names). Hidden: tests and the app's switch use it.
     #[doc(hidden)]
     pub fn engine(mut self, engine: Engine) -> Self {
         self.engine = engine;
@@ -745,7 +774,7 @@ impl Analysis {
     }
 
     /// Also run the sweep one grid level away (`level - 1`, or `level + 1` on the coarsest level) and report the difference of the
-    /// total drag in [`PolarPoint::cd_uncertainty`]. Costs a second sweep.
+    /// total drag in [`PolarPoint::cd_uncertainty`]. Costs a second sweep. The legacy engine only: the 3D engine always reports the bands of [`crate::uncertainty`].
     pub fn estimate_uncertainty(mut self, on: bool) -> Self {
         self.estimate_uncertainty = on;
         self
@@ -1128,7 +1157,7 @@ impl Analysis {
             (quality != Quality::Failed && self::quality(o, &od) != Quality::Failed).then(|| (drag.total - od.total).abs())
         });
         let detail = self.detail(&detail);
-        PolarPoint { mach, alpha_deg: 0.0, drag, forces: None, quality, warnings, cd_uncertainty, detail, field, field3: None }
+        PolarPoint { mach, alpha_deg: 0.0, drag, forces: None, quality, warnings, cd_uncertainty, cd_band: None, x_cp_band: None, detail, field, field3: None }
     }
 
     /// Public summary of a solver result: coefficients on the reference area, wall points in metres.
@@ -1405,6 +1434,8 @@ impl Analysis {
             quality: lift_quality(r),
             warnings: Vec::new(),
             cd_uncertainty: None,
+            cd_band: None,
+            x_cp_band: None,
             detail,
             field: None,
             field3,

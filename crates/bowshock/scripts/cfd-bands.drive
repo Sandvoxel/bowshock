@@ -1,0 +1,17 @@
+# Analyze > CFD table with the 3D engine's uncertainty bands (Cd band, margin lower bound, the "not meshed" row) and the OpenRocket export.
+# A scripted finished solve (`BOWSHOCK_CFD_DEMO=done` plays it when the CFD table is chosen; made-up numbers, `analyze/solve_demo.rs`), then the readout beside the plots and the export button:
+#   ICED_TEST_BACKEND=wgpu BOWSHOCK_CFD_DEMO=done BOWSHOCK_EXPORT_FILE=/tmp/bands-export.csv cargo run --release -q -p bowshock -- drive --example crates/bowshock/scripts/cfd-bands.drive out/cfd-bands
+# (or open a document with a real table: `BOWSHOCK_OPEN=/tmp/product-cfd.bowshock`, from the ignored `product_default_engine_end_to_end`, without the demo).
+viewport 1300x1000
+click "Analyze"
+click "CFD table"
+click "Aerodynamics"
+move (700, 300)
+move (702, 302)
+screenshot bands-aero-dark.png
+click "Stability"
+move (700, 300)
+move (702, 302)
+screenshot bands-stability-dark.png
+click "OpenRocket CFD"
+screenshot bands-exported-dark.png

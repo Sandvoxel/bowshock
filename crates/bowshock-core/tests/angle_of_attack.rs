@@ -20,7 +20,7 @@ fn analysis() -> Analysis {
         root_te_to_base: 0.0,
         profile: FinProfile::Square,
     };
-    Analysis::new(&spec)
+    Analysis::legacy(&spec)
         .unwrap()
         .fins(fins)
         .backend(Backend::Cpu)
@@ -139,7 +139,7 @@ fn analysis_full() -> Analysis {
         root_te_to_base: 0.0,
         profile: FinProfile::Square,
     };
-    Analysis::new(&spec).unwrap().fins(fins).backend(Backend::Gpu).resolution(Resolution::Coarse)
+    Analysis::legacy(&spec).unwrap().fins(fins).backend(Backend::Gpu).resolution(Resolution::Coarse)
 }
 
 /// What the flow field of a running 3D solve costs: the same two conditions on the GPU with and without `on_field3(100)` (five times the rate of

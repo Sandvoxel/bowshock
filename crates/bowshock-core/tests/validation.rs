@@ -67,7 +67,7 @@ fn arcas_axial_force() {
     let mut backends = Vec::new();
     let t_all = Instant::now();
     for (config, m, data, t0, re, fins, gated) in cases {
-        let mut a = Analysis::new(&body).unwrap().backend(Backend::Auto).resolution(Resolution::Medium).viscous(tunnel(m, t0, re));
+        let mut a = Analysis::legacy(&body).unwrap().backend(Backend::Auto).resolution(Resolution::Medium).viscous(tunnel(m, t0, re));
         if fins {
             a = a.fins(arcas_fins());
         }
@@ -130,7 +130,7 @@ fn tp2005_base_pressure_with_jet() {
             total_temperature_k: tp2005::JET_TOTAL_TEMPERATURE_K,
         };
         let t = Instant::now();
-        let polar = Analysis::new(&body).unwrap().backend(Backend::Auto).resolution(Resolution::Medium).viscous(flight).motor(motor).run(&[minf]).unwrap();
+        let polar = Analysis::legacy(&body).unwrap().backend(Backend::Auto).resolution(Resolution::Medium).viscous(flight).motor(motor).run(&[minf]).unwrap();
         let p = &polar.points[0];
         let data = tp2005::base_pressure_ratio(row);
         let value = 1.0 + 0.7 * minf * minf * p.detail.cp_base;

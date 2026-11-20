@@ -211,7 +211,7 @@ fn bt1_fox_boattail() {
                 let (a, b) = (cps[i - 1], cps[i]);
                 a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)
             };
-            let xs = if k == 0 || true { fox::OGIVE_CYL_X_D } else { fox::OGIVE_CYL_X_D };
+            let xs = fox::OGIVE_CYL_X_D;
             let mut sq = 0.0;
             let mut n = 0;
             for &x in xs.iter().filter(|&&x| x > 3.0) {

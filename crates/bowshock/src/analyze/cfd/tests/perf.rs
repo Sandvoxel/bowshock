@@ -347,6 +347,59 @@ fn shared_grid_setting() -> bool {
     }
 }
 
+/// The product default end to end on the GPU: no `BOWSHOCK_ENGINE`, the FINNED example rocket through the app's solve (`solve_sized`) must be the 3D engine's table
+/// (`bands`), with the drag band of the points and the margin band of the angles, and its OpenRocket export must read back through the importer.
+/// `tools/gpuq/gpuq submit --host local --name product-default -- cargo nextest run --release -p bowshock product_default_engine --run-ignored only --no-capture`.
+#[test]
+#[ignore = "solves the finned example's table and angles on the GPU with the default engine"]
+fn product_default_engine_end_to_end() {
+    assert!(std::env::var("BOWSHOCK_ENGINE").is_err(), "the point is the default: run without BOWSHOCK_ENGINE");
+    assert!(solver::gpu_name().is_some(), "needs a GPU");
+    assert_eq!(solver::Engine::from_env(), solver::Engine::Solver3, "the default engine on a machine with a GPU");
+    let (mut rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    assert!(plan.fins.is_some());
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
+    };
+    let t0 = Instant::now();
+    let table = solve_sized(&job, &Arc::new(AtomicBool::new(false)), |_| (), true).expect("the example solves");
+    println!(
+        "{} points + {} angle points on {}; {:.1} s wall; notes {:?}",
+        table.points.len(),
+        table.lift.as_ref().map_or(0, |l| l.points.len()),
+        table.backend,
+        t0.elapsed().as_secs_f64(),
+        table.notes
+    );
+    assert!(table.bands && table.lift.as_ref().is_some_and(|l| l.bands), "a 3D table carries the bands");
+    assert!(table.notes.iter().all(|n| !n.contains("No GPU")));
+    for p in &table.points {
+        let b = solver::uncertainty::cd_band(p.cd, p.mach, solver::Resolution::Coarse);
+        println!("BAND M {:.2} cd {:.4} [{:.4}, {:.4}]", p.mach, p.cd, p.cd - b.low, p.cd + b.high);
+    }
+    let files = crate::analyze::openrocket::export(&table);
+    println!("{}", files.drag);
+    let stability = files.stability.expect("the table has the angles");
+    println!("{stability}");
+    let drag = crate::analyze::import::parse(&files.drag, crate::analyze::import::Source::OpenRocket).unwrap();
+    assert_eq!(drag.rows.len(), table.points.len());
+    let stab = crate::analyze::import::parse(&stability, crate::analyze::import::Source::OpenRocket).unwrap();
+    assert!(stab.rows.iter().all(|r| r.cn.is_some() && r.cm.is_some() && r.cp.is_some()));
+    // the document with the table stored, for a drive script (`BOWSHOCK_OPEN`)
+    if let Some(path) = std::env::var_os("BOWSHOCK_CFD_FIXTURE") {
+        assert!(rocket.store_cfd_table(table));
+        std::fs::write(path, rocket.to_bytes()).unwrap();
+    }
+}
+
 /// Where the time of the 3D engine goes, through the app path: the FINNED example rocket as the app solves it under `BOWSHOCK_ENGINE=3d`: 10 sector points
 /// at zero incidence, then 8 Mach numbers at 2 and 6 degrees on the half domain, one `run` per node (`solve`). Prints one line per solved point (the runner's
 /// `PointTiming` joined with the facade's `FacadeTiming`), the sums by kind and the whole solve, and a `PERF` line.

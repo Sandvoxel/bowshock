@@ -590,9 +590,17 @@ fn export<'a>(state: &'a State, ready: bool, index: usize) -> Element<'a, Messag
     table = if ready { table.on_press(Message::Table(!state.show_table)) } else { table.disabled("Nothing computed yet") };
     csv = if ready { csv.on_press(Message::ExportCsv) } else { csv.disabled("Nothing computed yet") };
     let cdx = push("RASAero .CDX1", Weight::Secondary).disabled(RASAERO_REASON);
-    let (table, csv, cdx): (Element<'a, Message>, Element<'a, Message>, Element<'a, Message>) = (table.into(), csv.into(), cdx.into());
+    let mut ork = push("OpenRocket CFD", Weight::Secondary);
+    ork = if state.cfd.table.is_some() { ork.on_press(Message::ExportOpenRocket) } else { ork.disabled("Solve a CFD table first") };
+    let (table, csv, cdx, ork): (Element<'a, Message>, Element<'a, Message>, Element<'a, Message>, Element<'a, Message>) =
+        (table.into(), csv.into(), cdx.into(), ork.into());
     let flow: Element<'a, Message> = flow_button(state).into();
-    section(index, "Export", true, vec![row![table, flow].spacing(SPACE_2).boxed(), row![csv, cdx].spacing(SPACE_2).boxed()])
+    section(
+        index,
+        "Export",
+        true,
+        vec![row![table, flow].spacing(SPACE_2).boxed(), row![csv, cdx].spacing(SPACE_2).boxed(), row![ork].spacing(SPACE_2).boxed()],
+    )
 }
 
 /// The `Flow field` button beside `Table view`: the flow fields of the CFD table solved in this session, or why there are none.

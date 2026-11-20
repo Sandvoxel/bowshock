@@ -116,6 +116,9 @@ pub fn help(label: &str) -> Option<&'static str> {
         "Base" => "Low-pressure wake behind the blunt aft end. Smaller while the motor burns (the exhaust fills the wake).",
         "Fins" => "The fins' own skin friction plus leading- and trailing-edge pressure drag.",
         "Other" => "Launch lugs and rail buttons sticking out into the airflow.",
+        "Cd band" => "Where the true drag coefficient is expected, from the measured errors of the CFD solve against free flight (a high smooth-model bias, the stop rule, the grid, the wall temperature). The solve is more likely to read high than low. It does not include lugs and rail buttons that are not meshed: one lug raised the apogee drag of a model-scale rocket by 16 % when it was measured.",
+        "Not meshed" => "Launch lugs and rail buttons are not meshed by the CFD solve; the table adds the build-up method's drag for them. One lug changed the apogee of a model-scale rocket by +16 % when it was measured, so a rocket with large buttons is outside the Cd band.",
+        "Margin lower bound" => "The static margin if the centre of pressure is as far forward as the CFD comparison with free flight allows (0.12 caliber subsonic, 0.25 caliber supersonic). The solve puts the centre of pressure too far aft and the normal-force slope 3-11 % high, so it overstates stability: judge the rocket by this number.",
         "Total Cd" => "Total drag coefficient: drag force divided by dynamic pressure and reference area. Lower is better.",
         "Static margin" => {
             "Distance from the centre of gravity back to the centre of pressure, in body diameters (calibers). Above about 1 the rocket flies straight."
@@ -176,6 +179,15 @@ fn severity(bands: StabilityBands, margin: f64) -> Severity {
 fn length(m: f64, units: UnitSystem) -> (String, String) {
     let (v, u) = ui::readout(m, Quantity::Length, units);
     (v, u.to_string())
+}
+
+/// The solver grid of a table as the resolution the uncertainty table is keyed by.
+fn resolution_of(grid: bowshock_model::CfdGrid) -> bowshock_core::Resolution {
+    match grid {
+        bowshock_model::CfdGrid::Draft => bowshock_core::Resolution::Draft,
+        bowshock_model::CfdGrid::Coarse => bowshock_core::Resolution::Coarse,
+        bowshock_model::CfdGrid::Medium => bowshock_core::Resolution::Medium,
+    }
 }
 
 fn cal(v: f64) -> String {
@@ -274,7 +286,13 @@ pub fn compare_section(out: &Output, overlay: &Overlay, x_si: Option<f64>, activ
     (!rows.is_empty()).then(|| Section { title: format!("Compare · {}", overlay.label), rows })
 }
 
-fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output) -> Vec<Row> {
+/// The 3D engine's lower bound of the static margin at `mach` (calibers), when the stability solve is the 3D engine's.
+fn margin_bound(out: &Output, margin: f64, mach: f64) -> Option<f64> {
+    out.cfd.as_ref()?.lift.as_ref().filter(|l| l.bands)?;
+    Some(margin - bowshock_core::uncertainty::x_cp_band_cal(mach).low)
+}
+
+fn stability_rows(run: &Run, p: &MachPointLike, mach: f64, units: UnitSystem, out: &Output) -> Vec<Row> {
     let (cp, u) = length(p.cp, units);
     let burnout = out.conditions.burnout;
     let lift = if out.lift_3d() { super::cfd::LIFT_LABEL } else { "" };
@@ -286,6 +304,9 @@ fn stability_rows(run: &Run, p: &MachPointLike, units: UnitSystem, out: &Output)
                 rows.push(Row::new(r.name.clone(), cal(v), "cal").swatch(config_color(i)));
             }
         }
+    }
+    if let Some(bound) = margin_bound(out, p.margin, mach) {
+        rows.push(Row::new("Margin lower bound", cal(bound), "cal").muted());
     }
     rows.push(Row::new(format!("CP{lift}"), cp, u.clone()));
     // The kit shows one CG: the one the margin uses (the Conditions' "CG for margin").
@@ -324,7 +345,7 @@ fn stability_title(out: &Output) -> String {
 fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem) -> Readout {
     let Some(at) = mach_at(points, x) else { return Readout { cursor: String::new(), sections: Vec::new() } };
     let like = MachPointLike { x, margin: at.margin_cal, cp: at.cp, cn_alpha: at.cn_alpha };
-    let stability = Section { title: stability_title(out), rows: stability_rows(run, &like, units, out) };
+    let stability = Section { title: stability_title(out), rows: stability_rows(run, &like, x, units, out) };
 
     let d = at.drag;
     let show_other = other_visible(points);
@@ -334,6 +355,11 @@ fn mach(out: &Output, run: &Run, points: &[MachPoint], x: f64, units: UnitSystem
     }
     if show_other {
         drag.push(Row::new("Other", cd(d.protuberances), "").swatch(SeriesColor::Muted).share(d.protuberances / d.total.max(1e-12)));
+    }
+    if let Some(info) = out.cfd.as_ref().filter(|c| c.bands) {
+        let band = bowshock_core::uncertainty::cd_band(d.total, x, resolution_of(info.grid));
+        drag.insert(1, Row::new("Cd band", format!("{} – {}", cd(d.total - band.low), cd(d.total + band.high)), "").muted());
+        drag.push(Row::new("Not meshed", "lugs, buttons", "").muted());
     }
 
     let by_margin = |a: &&MachPoint, b: &&MachPoint| a.margin_cal.total_cmp(&b.margin_cal);
@@ -379,7 +405,7 @@ fn alpha(out: &Output, run: &Run, alpha_rad: f64, units: UnitSystem) -> Readout 
     let Data::Alpha(points) = &run.data else { unreachable!("called for an angle sweep") };
     let Some(at) = alpha_at(points, alpha_rad) else { return Readout { cursor: String::new(), sections: Vec::new() } };
     let like = MachPointLike { x: alpha_rad, margin: at.margin_cal, cp: at.cp, cn_alpha: at.cn_alpha };
-    let stability = Section { title: stability_title(out), rows: stability_rows(run, &like, units, out) };
+    let stability = Section { title: stability_title(out), rows: stability_rows(run, &like, out.conditions.mach_fixed, units, out) };
     let force = Section {
         title: "Force".into(),
         rows: vec![Row::new("Normal force CN", format!("{:.3}", at.cn), "").big(), Row::new("Total Cd", cd(at.drag.total), "")],

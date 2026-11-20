@@ -71,11 +71,11 @@ fn lift_spec() -> AnalysisSpec {
         root_te_to_base: 0.0,
         profile: FinProfile::Square,
     };
-    Analysis::new(&body()).unwrap().fins(fins).backend(Backend::Gpu).resolution(Resolution::Coarse).spec().unwrap()
+    Analysis::legacy(&body()).unwrap().fins(fins).backend(Backend::Gpu).resolution(Resolution::Coarse).spec().unwrap()
 }
 
 fn drag_spec() -> AnalysisSpec {
-    Analysis::new(&body()).unwrap().backend(Backend::Gpu).resolution(Resolution::Coarse).spec().unwrap()
+    Analysis::legacy(&body()).unwrap().backend(Backend::Gpu).resolution(Resolution::Coarse).spec().unwrap()
 }
 
 #[test]

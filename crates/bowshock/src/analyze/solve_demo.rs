@@ -190,7 +190,7 @@ fn fixture_field(mach: f64, alpha_deg: f64, iteration: usize) -> Option<Arc<solv
 /// boundary layer and a dead-water wake behind the base. It is shaped like a flow, not computed from one; its shock grows out of the
 /// body as the iterations go (settled from about 2 000).
 fn synthetic_field(job: &Job, mach: f64, iteration: usize) -> Option<Arc<solver::Field3>> {
-    let mut f = solver::Analysis::new(&job.plan.body)
+    let mut f = solver::Analysis::legacy(&job.plan.body)
         .ok()?
         .viscous(solver::FlightConditions { atmosphere: solver::Atmosphere::Isa { altitude_m: job.altitude.clamp(0.0, 20_000.0) } })
         .resolution(match job.grid {
@@ -458,6 +458,7 @@ pub fn events(demo: Demo, job: &Job) -> Vec<Event> {
                 key: cfd::lift_key(job.plan.geometry, &job.stability),
                 solved_at: cfd::now(),
                 solve_seconds: at,
+                bands: crate::analyze::cfd::solves_3d(),
                 backend: "GPU (Luma)".to_string(),
                 points,
                 notes: Vec::new(),
@@ -478,14 +479,11 @@ fn angle_events(demo: Demo, job: &Job, shape: &Shape, out: &mut Vec<Event>, at: 
     let owner = |i: usize| if demo == Demo::AngleShareMid { i % 2 } else { 0 };
     let mut points: Vec<CfdLiftPoint> = Vec::new();
     // CN grows with the angle (slightly sub-linearly) and with Mach up to the transonic range; CP sits about 60 % of the length aft.
-    let lift = |mach: f64, a: f64| CfdLiftPoint {
-        mach,
-        alpha_deg: a,
-        cn: a.to_radians() * (2.4 + 0.5 * mach.min(1.2)) * (1.0 - 0.01 * a),
-        x_cp: 0.85 + 0.04 * mach.min(1.5),
-        cd: None,
-        cm: None,
-        quality: CfdQuality::Converged,
+    let lift = |mach: f64, a: f64| {
+        let cn = a.to_radians() * (2.4 + 0.5 * mach.min(1.2)) * (1.0 - 0.01 * a);
+        let x_cp = 0.85 + 0.04 * mach.min(1.5);
+        // the moment about the nose tip on a made-up 76 mm reference diameter, as the solver gives it
+        CfdLiftPoint { mach, alpha_deg: a, cn, x_cp, cd: None, cm: Some(-cn * x_cp / 0.076), quality: CfdQuality::Converged }
     };
     for (i, &mach) in nodes[..shape.stability].iter().enumerate() {
         let mut hand = Vec::new();

@@ -214,7 +214,7 @@ impl Facade {
 
     /// Runs the case; the error text of a failed run goes into the record, it does not stop the generator.
     fn run(&self) -> Result<Value, String> {
-        let mut a = Analysis::new(&self.body).map_err(|e| e.to_string())?.resolution(self.res).backend(self.backend);
+        let mut a = Analysis::legacy(&self.body).map_err(|e| e.to_string())?.resolution(self.res).backend(self.backend);
         if let Some(atmosphere) = self.atmosphere {
             a = a.viscous(FlightConditions { atmosphere });
         }

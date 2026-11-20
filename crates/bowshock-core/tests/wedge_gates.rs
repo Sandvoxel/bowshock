@@ -1210,7 +1210,7 @@ mod cpu_wedge {
             if !c.wake_base {
                 return Err("the wedge is built on the base-wake grid".to_string());
             }
-            let mut analysis = Analysis::new(&c.body).map_err(|e| e.to_string())?.resolution(c.resolution).wake(Wake::Base);
+            let mut analysis = Analysis::legacy(&c.body).map_err(|e| e.to_string())?.resolution(c.resolution).wake(Wake::Base);
             if c.rans {
                 let atmosphere = c.atmosphere.ok_or("a RANS case without an atmosphere")?;
                 analysis = analysis.viscous(bowshock_core::FlightConditions { atmosphere }).roughness(c.roughness_m);

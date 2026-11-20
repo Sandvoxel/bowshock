@@ -33,7 +33,7 @@ fn awkward_bodies_return_ok_with_finite_or_failed_points() {
         ("80 d long", spec(NoseShape::TangentOgive, 3.0, vec![tube(77.0)])),
     ];
     for (name, body) in &bodies {
-        let result = Analysis::new(body)
+        let result = Analysis::legacy(body)
             .unwrap_or_else(|e| panic!("{name}: Analysis::new failed: {e}"))
             .backend(Backend::Cpu)
             .resolution(Resolution::Coarse)
@@ -72,7 +72,7 @@ fn fins_and_motor_return_ok_with_finite_or_failed_points() {
     };
     let motor = MotorSpec { exit_diameter: 0.06, exit_mach: 2.5, exit_pressure_pa: 101_325.0, total_temperature_k: 1500.0 };
     let analysis = || {
-        Analysis::new(&body)
+        Analysis::legacy(&body)
             .unwrap()
             .fins(fins.clone())
             .viscous(FlightConditions { atmosphere: Atmosphere::Isa { altitude_m: 0.0 } })
