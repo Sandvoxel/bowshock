@@ -86,6 +86,13 @@ pub struct Numerics3 {
     /// (mean 4 800, against 6 000-8 000 for the mean rule), 0.2-1.1 % from the converged CA. `0`: off.
     pub drift_block: f64,
     pub drift_tol: f64,
+    /// The period-aware variant of the drift rule (DESIGN3D item 68, **opt-in**: measured on the example rocket's full solve it takes as many iterations as the original, 43 350
+    /// against 42 750, and is neither faster nor, at the stop the runners judge, more accurate on average; it is robust where the original is not): the blocks end after a whole number
+    /// of periods of the oscillation of the judged coefficient (`run3::MEAN_EVERY`-spaced samples, the period from the autocorrelation of their changes), so that a limit cycle of any
+    /// amplitude does not alias into the block means, and the ratio test of consecutive blocks is replaced by agreement of their extrapolated limits `m3 + e` within half the tolerance
+    /// (a ratio that merely repeats, which a tail of two time scales does for a few blocks, is no proof). A run that stops on a cycle beyond the tolerance reports the means of
+    /// the last block as CN, CA (zero incidence) or `x_cp`.
+    pub drift_period_aware: bool,
 }
 
 impl Numerics3 {
@@ -121,6 +128,7 @@ impl Numerics3 {
             cfl_control: true,
             drift_block: 0.0,
             drift_tol: 5e-3,
+            drift_period_aware: false,
         }
     }
 
@@ -180,6 +188,7 @@ impl Numerics3 {
             pressure_outflow: false,
             drift_block: 10_000.0,
             drift_tol: 5e-3,
+            drift_period_aware: std::env::var_os("BOWSHOCK_DRIFT_PERIODS").is_some(),
         }
     }
 
