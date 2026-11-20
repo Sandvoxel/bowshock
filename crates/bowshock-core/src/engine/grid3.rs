@@ -69,6 +69,11 @@ const LE_RADIUS_CELLS: f64 = 4.0;
 /// as long as keeps them below it (`ramp_need` in `body_grid3_inner`).
 const RAMP_SLOPE: f64 = 0.5;
 
+/// The smallest angle between the edges of the cells beside a trailing edge that overhangs the root's, where the rows bent to meet the tip's cylinder and the sheared column lean the one
+/// way (`overhang_need` in `body_grid3_inner`, DESIGN3D item 73), and the least row slope the fade is allowed to ask for to keep it.
+const OVERHANG_EDGE_ANGLE_DEG: f64 = 25.0;
+const OVERHANG_MIN_SLOPE: f64 = 0.25;
+
 /// A fin whose zone is not widened still fades the move of its edges over more than four rows above the tip when four rows lift less than this many moves above it: the
 /// shear of four rows is then steeper than 59 degrees from the radial (Byrum, Cancer Descending, Ion Drive: 10, 5 and 4.8 degrees between the cell edges above the tip; the
 /// example rocket's rows are 0.77 and 1.29 moves high and keep their four).
@@ -962,7 +967,9 @@ fn plan_fins(p: &Grid3Params, f: &Fins3, xs: &mut Vec<f64>, host: &Host) -> Resu
         sj,
         fin_offs,
         edge,
-        round_rows: matches!(f.profile, FinProfile::Rounded) && p.fin_le_rows,
+        // a round edge keeps the root's first chord cell down the span when asked for, and always on a fin whose tip trailing edge is behind the root's (DESIGN3D item 73: Cancer
+        // Descending, Coarse Mach 0.5, C_D 0.52 in 770 iterations with, vacuum cells at the tip leading edge after 1 300 to 2 700 iterations without)
+        round_rows: matches!(f.profile, FinProfile::Rounded) && (p.fin_le_rows || x_le_root + x_back > x_te_root + 1e-9),
     })
 }
 
@@ -1155,9 +1162,59 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
             }
             need
         };
+        // The same for a trailing edge that overhangs the root's (DESIGN3D item 73). A tip trailing edge aft of the root's leans aft below the tip and forward above it (the move
+        // fades over the rows above), and the rows beside the edge, bent to meet the tip's cylinder, rise (below the tip, squeezed toward the body) or fall (above it) aft to the
+        // nominal radius: the edges of the cell between such a row and the column are then nearly antiparallel however `RAMP_SLOPE` limits the slope (5.6 degrees at the first row
+        // above the tip of the Cancer Descending fin, 0.42 d of overhang: the fade of 4 + 4 columns, 0.04 d long, drops the row by 0.11 d). A row of slope `S` beside a column that leans
+        // by `L = shift / dr` makes the angle `asin((1 - S L) / sqrt((1 + S^2)(1 + L^2)))`; the fade is long enough that it stays above `OVERHANG_EDGE_ANGLE_DEG`. Only the cells
+        // whose row and column lean the one way count, and only on a fin whose trailing edge is aft of the root's somewhere along the span.
+        let overhang_need = |i_ref: usize, x_edge: &dyn Fn(usize) -> f64| -> f64 {
+            // only a trailing edge that is aft of the root's somewhere along the span: the grids of every other fin (the example rocket, the gate rockets) are as they were
+            if !(0..=pl.j_tip).any(|jj| x_edge(jj) > pl.x_te_root + 1e-9) {
+                return 0.0;
+            }
+            let scale = r_far - r_in[i_ref];
+            let sin_min = OVERHANG_EDGE_ANGLE_DEG.to_radians().sin();
+            let bend = |jj: usize| (pl.remap(jj, tcol[i_ref]) - sj[jj]) * scale;
+            let mut need = 0.0f64;
+            for jj in 0..(pl.j_tip + nfade).min(nj - j_off) {
+                let dr = (pl.remap(jj + 1, tcol[i_ref]) - pl.remap(jj, tcol[i_ref])) * scale;
+                let shift = x_edge(jj + 1) - x_edge(jj);
+                if dr <= 0.0 || shift == 0.0 {
+                    continue;
+                }
+                let lean = shift.abs() / dr;
+                // the largest row slope that keeps the angle: (1 - S L) / sqrt((1 + S^2)(1 + L^2)) falls with S
+                let angle_ok = |s: f64| (1.0 - s * lean) / ((1.0 + s * s) * (1.0 + lean * lean)).sqrt() >= sin_min;
+                let s_max = if lean >= 1.0 || !angle_ok(0.0) {
+                    OVERHANG_MIN_SLOPE
+                } else {
+                    let (mut lo, mut hi) = (0.0f64, 1.0 / lean);
+                    for _ in 0..60 {
+                        let m = 0.5 * (lo + hi);
+                        if angle_ok(m) {
+                            lo = m;
+                        } else {
+                            hi = m;
+                        }
+                    }
+                    lo.max(OVERHANG_MIN_SLOPE)
+                };
+                // the columns behind the edge are the segment's nodes between it and the base, remapped linearly: a row whose edge moved aft by `m` has them `1 - m / room` as far apart
+                let squeeze = if pl.i_te == pl.i_seg1 { 1.0 } else { ((xs[pl.i_seg1] - x_edge(jj)) / (xs[pl.i_seg1] - pl.x_te_root)).max(0.05) };
+                for b in [bend(jj), bend(jj + 1)] {
+                    // `b` rises the row going aft when it is negative (the fin side squeezes the rows toward the body), falls when positive; the column leans aft when `shift` is
+                    // positive: antiparallel edges are a falling row beside a forward lean, or a rising row beside an aft lean
+                    if b * shift < 0.0 {
+                        need = need.max(b.abs() / (s_max * squeeze));
+                    }
+                }
+            }
+            need
+        };
         let x_le_eff = |jj: usize| pl.x_le_root + vj_of(jj) * (row(jj).1 - pl.x_le_root);
         let x_te_eff = |jj: usize| pl.x_te_root + vj_of(jj) * (row(jj).1 + row(jj).2 - pl.x_te_root);
-        let (need_le, need_te) = (ramp_need(pl.i_le, &x_le_eff), ramp_need(pl.i_te, &x_te_eff));
+        let (need_le, need_te) = (ramp_need(pl.i_le, &x_le_eff), ramp_need(pl.i_te, &x_te_eff).max(overhang_need(pl.i_te, &x_te_eff)));
         // columns beside the edges: the rows follow the tip's cylinder at full weight over the 4 columns next to the edge and fade away over the next 4; when the sweep zone is
         // widened ([`ZONE_REACH`]) the sweep shears the rows of those columns by up to the move of the edge, and a fade over cells that short bends them (a slope of 0.44 against
         // the shear's 0.42 at Mach 2.3 of the Rabia grid) into a fold: the fade is `RAMP_REACH` times the move longer. Where those columns do not give the length `ramp_need`
@@ -1544,6 +1601,7 @@ pub fn print_quality(label: &str, g: &Grid3) {
     let mut vol_min = (f64::INFINITY, 0, 0, 0);
     let mut aspect = (0.0f64, 0, 0, 0);
     let mut skew = (90.0f64, 0, 0, 0);
+    let mut skew_pair = (0usize, 0usize);
     let mut ratio = [(0.0f64, 0, 0, 0); 3];
     let mut fluid = 0usize;
     let mut aspect_hist = [0usize; 5];
@@ -1607,6 +1665,7 @@ pub fn print_quality(label: &str, g: &Grid3) {
                     let ang = cs.abs().min(1.0).acos().to_degrees();
                     if ang < skew.0 {
                         skew = (ang, i, j, k);
+                        skew_pair = (m, n);
                     }
                 }
                 for (d, (di, dj, dk)) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)].into_iter().enumerate() {
@@ -1632,7 +1691,13 @@ pub fn print_quality(label: &str, g: &Grid3) {
         aspect.0,
         at(aspect.1, aspect.2, aspect.3)
     );
-    println!("GRID {label}: min angle between cell edges {:.2} deg at {}", skew.0, at(skew.1, skew.2, skew.3));
+    println!(
+        "GRID {label}: min angle between cell edges {:.2} deg at {} (between the {} and {} edges)",
+        skew.0,
+        at(skew.1, skew.2, skew.3),
+        ["i", "j", "k"][skew_pair.0],
+        ["i", "j", "k"][skew_pair.1]
+    );
     for (d, n) in ["i", "j", "k"].iter().enumerate() {
         let (r, i, j, k) = ratio[d];
         if r == 0.0 {

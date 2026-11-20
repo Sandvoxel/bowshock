@@ -125,7 +125,8 @@ fn fixtures() -> Vec<Fixture> {
         all.iter_mut().for_each(|f| f.nose.blunt_radius = blunt);
     }
     // `FLIGHTVAL_SHOULDER=0` merges the body sections into one tube of the first section's diameter (no fin can, no conical shoulder); `FLIGHTVAL_FIN_THICK_IN`,
-    // `FLIGHTVAL_SPAN_IN`, `FLIGHTVAL_SWEEP_IN` set the fin's thickness, span and sweep
+    // `FLIGHTVAL_SPAN_IN`, `FLIGHTVAL_SWEEP_IN` set the fin's thickness, span and sweep, `FLIGHTVAL_TE_IN` the distance of the root trailing edge ahead of the base,
+    // `FLIGHTVAL_ROOT_IN` the root chord
     if std::env::var("FLIGHTVAL_SHOULDER").is_ok_and(|v| v == "0") {
         for f in &mut all {
             let (d, l) = (f.body[0].fore_diameter, f.body.iter().map(|s| s.length).sum());
@@ -137,6 +138,8 @@ fn fixtures() -> Vec<Fixture> {
         f.fins.thickness = probe("FLIGHTVAL_FIN_THICK_IN").unwrap_or(f.fins.thickness);
         f.fins.span = probe("FLIGHTVAL_SPAN_IN").unwrap_or(f.fins.span);
         f.fins.sweep = probe("FLIGHTVAL_SWEEP_IN").unwrap_or(f.fins.sweep);
+        f.fins.te_to_base = probe("FLIGHTVAL_TE_IN").unwrap_or(f.fins.te_to_base);
+        f.fins.root_chord = probe("FLIGHTVAL_ROOT_IN").unwrap_or(f.fins.root_chord);
         if let Ok(s) = std::env::var("FLIGHTVAL_SECTION") {
             f.fins.section = s;
         }
