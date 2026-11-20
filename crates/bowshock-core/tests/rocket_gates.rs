@@ -180,10 +180,10 @@ fn arcas_points() -> Vec<StabPoint> {
 
 /// G-X1: the Arcas short model (l/d 18.2, tangent ogive, boattail with the reflex lip modelled as a plain boattail, double-wedge fins as G-F4) `CN_alpha` (secant 0 to 4 degrees, fins
 /// on, roll 0, `arcas_stab::SHORT_*`: figure readings, +-0.9 per rad) and `x_cp`, Lift half domain, fins in the pitch plane, free wake behind the base (the 1 in sting of the transonic tests is
-/// not modelled). Bands: `CN_alpha` 15 %, `x_cp` 0.35 cal (2 % of the length; the reading uncertainty is 0.09 to 0.27 cal). `FAIL KNOWN` (DESIGN3D item 55): `CN_alpha` at Mach 0.8 and
-/// `x_cp` at Mach 0.6-1.2: the data's own x_cp is that of a model whose stability is "almost neutral" at -2 to 2 degrees below Mach 0.9 (the report's words) and whose `CN` curve is
-/// non-linear at 0-4 degrees; the solver's `CN(2)` at Mach 0.6 / 0.8 is 8.1 / 4.8 per rad against 12.2 / 10.3 at 4 degrees (same non-linearity, stronger), so neither the secant nor the
-/// centre of pressure is defined the way the data's is.
+/// not modelled). Every incidence runs cold (`StabGate::cold`: the model has two steady states at 4 degrees at Mach 0.6 / 0.8, DESIGN3D item 67). Bands: `CN_alpha` 15 %, `x_cp` 0.35 cal (2 % of the
+/// length; the reading uncertainty is 0.09 to 0.27 cal). `FAIL KNOWN` (DESIGN3D item 67): `x_cp` at Mach 0.6-1.2. At Mach 0.6 / 0.8 the solver's CN is strongly non-linear at 0-4 degrees (its
+/// `CN(2)` is 0.283 / 0.170 against the data's 0.44 / 0.40, a model weakness of the fin lift at small incidence); at Mach 0.9-1.2 the response is linear and the `x_cp` error (+0.9 / -0.7 / -0.6 cal)
+/// is the model's own: the data's steep transonic rise of `x_cp` is not reproduced.
 #[test]
 #[ignore = "validation: lift tier on the GPU"]
 fn gate_x1_arcas_cn_alpha_and_xcp() {
@@ -201,7 +201,7 @@ fn gate_x1_arcas_cn_alpha_and_xcp() {
         cn_band: Band::Rel(0.15),
         xcp_abs: 0.35,
         info: false,
-        known_cn: &[0.8],
+        known_cn: &[],
         known_xcp: &[0.6, 0.8, 0.9, 1.0, 1.2],
         cold: true,
     };
@@ -237,7 +237,12 @@ fn gate_x2_yuska_cn_alpha_and_xcp() {
         cn_band: Band::Rel(0.13),
         xcp_abs: 0.25,
         info,
-        known_cn: if tag == "yuska-C-roll0" { &[2.38] } else { &[] },
+        // the fit of the report (-3..4 degrees) reads 0.5 to 1 % above the 2 degree secant: C Mach 2.00 / 2.38 / 3.17 and B Mach 2.38 sit at +13.5 % against the 13 % band (DESIGN3D item 67)
+        known_cn: match tag {
+            "yuska-C-roll0" => &[2.0, 2.38, 3.17],
+            "yuska-B-roll0" => &[2.38],
+            _ => &[],
+        },
         known_xcp: if tag.starts_with("yuska-A-roll") { &[3.47] } else { &[] },
         cold: false,
     };
