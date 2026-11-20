@@ -91,11 +91,79 @@ pub fn shared() -> &'static Mutex<GridCache> {
     &CACHE
 }
 
+/// Solvers of cases that a later call will ask for, built on a background thread while the GPU iterates the current point ([`Case3::prefetch_solver`]): the host set-up of a
+/// point (mesher, wall distance, the solver's arrays: 0.5-1 s of CPU at the product's grid sizes) is then off the critical path. Newest last, at most [`PREBUILT_MAX`].
+static PREBUILT: Mutex<Vec<(String, std::thread::JoinHandle<Result<Solver3, Error>>)>> = Mutex::new(Vec::new());
+
+/// Solvers built ahead and not yet asked for: each is of the order of 500 B per cell on the host.
+const PREBUILT_MAX: usize = 2;
+
 impl Case3 {
-    /// [`Case3::build_solver`] on the grid of the process-wide cache ([`shared`]).
+    /// What the host solver of this case is built from: everything but the progress sink and the snapshot sink (the Mach number and incidence set the free stream the solver starts
+    /// from, the grid parameters and the tier the grid and its wall distance, the numerics and the equations the solver's configuration).
+    pub fn build_key(&self) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            self.mach.to_bits(),
+            self.alpha.to_bits(),
+            self.body,
+            self.grid,
+            self.numerics,
+            self.tier,
+            self.jet,
+            self.viscous,
+            self.wall_thermal,
+            (self.transition, self.compressibility)
+        )
+    }
+
+    /// [`Case3::build_solver`] on the grid of the process-wide cache ([`shared`]); the solver of a [`Case3::prefetch_solver`] of the same case when there is one (waited for when it
+    /// is still being built).
     pub fn build_solver_cached(&self) -> Result<Solver3, Error> {
+        let key = self.build_key();
+        let handle = {
+            let mut pre = PREBUILT.lock().unwrap_or_else(|e| e.into_inner());
+            pre.iter().position(|(k, _)| *k == key).map(|i| pre.remove(i).1)
+        };
+        if let Some(h) = handle {
+            let t = std::time::Instant::now();
+            let built = h.join();
+            bowshock_cfd::timing::note("prefetch_wait", t.elapsed().as_secs_f64());
+            if let Ok(Ok(solver)) = built {
+                return Ok(solver);
+            }
+        }
+        self.build_solver_shared()
+    }
+
+    /// [`Case3::build_solver`] on the grid of the process-wide cache, never on a prefetched solver.
+    fn build_solver_shared(&self) -> Result<Solver3, Error> {
         shared().lock().unwrap_or_else(|e| e.into_inner()).solver(self)
     }
+
+    /// Starts building the host solver of this case on a background thread: the next [`Case3::build_solver_cached`] of the same case ([`Case3::build_key`]) takes it. A case already
+    /// being built or built is not started again; beyond [`PREBUILT_MAX`] solvers the oldest is let go.
+    pub fn prefetch_solver(&self) {
+        let key = self.build_key();
+        let mut pre = PREBUILT.lock().unwrap_or_else(|e| e.into_inner());
+        if pre.iter().any(|(k, _)| *k == key) {
+            return;
+        }
+        let mut case = self.clone();
+        (case.progress, case.snapshots) = (None, None);
+        let spawned = std::thread::Builder::new().name("prefetch-solver".into()).spawn(move || case.build_solver_shared());
+        if let Ok(handle) = spawned {
+            if pre.len() >= PREBUILT_MAX {
+                pre.remove(0);
+            }
+            pre.push((key, handle));
+        }
+    }
+}
+
+/// Lets go of the solvers built ahead and not taken (the end of a solve): the threads finish, their results are dropped.
+pub fn release_prebuilt() {
+    PREBUILT.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]
@@ -166,6 +234,30 @@ mod tests {
             assert_eq!(s.grid.part, fresh.grid.part);
             assert_eq!(s.u, fresh.u);
         }
+    }
+
+    #[test]
+    fn a_prefetched_solver_is_the_one_a_plain_build_gives_and_is_taken_once() {
+        let c = tiny(11);
+        let fresh = c.build_solver().unwrap();
+        c.prefetch_solver();
+        c.prefetch_solver();
+        let key = c.build_key();
+        assert_eq!(PREBUILT.lock().unwrap().iter().filter(|(k, _)| *k == key).count(), 1, "one build per case");
+        let taken = c.build_solver_cached().unwrap();
+        assert!(!PREBUILT.lock().unwrap().iter().any(|(k, _)| *k == key), "taken");
+        assert_eq!((taken.grid.ni, taken.grid.nj, taken.grid.nk), (fresh.grid.ni, fresh.grid.nj, fresh.grid.nk));
+        assert_eq!(taken.grid.vol, fresh.grid.vol);
+        assert_eq!(taken.u, fresh.u);
+        // another Mach number is another case: not served by it
+        let mut other = tiny(11);
+        other.mach = 3.0;
+        assert!(other.build_key() != key);
+        c.prefetch_solver();
+        let own = other.build_solver_cached().unwrap();
+        assert_eq!(own.u[0], other.build_solver().unwrap().u[0]);
+        release_prebuilt();
+        assert!(PREBUILT.lock().unwrap().is_empty());
     }
 
     /// What the cache saves on the product grid (ANF sector, wall-resolved `Coarse` tier, base-wake grid): the solver from the mesher against the solver from a

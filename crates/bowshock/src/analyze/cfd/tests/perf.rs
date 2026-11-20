@@ -597,6 +597,46 @@ fn engine3d_finned_timing() {
     println!("PERF {}", serde_json_perf(wall, all[13]));
 }
 
+/// The host-side set-up of the points of the finned example (DESIGN3D item 69), no GPU: for a drag node and an angle node of every Mach number of the table, the grid cache
+/// emptied first, the seconds of the mesher, the axis map, the grid clone, the solver arrays, the equations (wall distance included) and the seed wedge's build. `RAYON_NUM_THREADS`
+/// or a loaded machine shows which parts are CPU bound.
+#[test]
+#[ignore = "timing of the host-side set-up of the finned example: seconds of CPU"]
+fn host_setup_timing() {
+    let (rocket, vehicle) = example();
+    let plan = plan(&rocket, &vehicle, UnitSystem::default()).unwrap();
+    let job = Job {
+        plan,
+        altitude: 120.0,
+        nodes: nodes((0.1, 3.0)).unwrap(),
+        stage: 1,
+        grid: CfdGrid::Coarse,
+        compute: Default::default(),
+        cpu_only: false,
+        stability: lift_nodes((0.1, 3.0)).unwrap(),
+        power_on: Vec::new(),
+    };
+    let grid_mach = job.nodes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let altitude = job.altitude.clamp(0.0, SOLVER_CEILING);
+    let session = Session::Local { backend: solver::Backend::Cpu };
+    let mut total = 0.0;
+    for (kind, machs) in [(NodeKind::Drag, job.nodes.clone()), (NodeKind::Lift, job.stability.clone())] {
+        for &m in &machs {
+            let analysis = node_analysis(&job, kind, &session, altitude, grid_mach, true, m, false).ok().expect("the node's analysis");
+            let c = if kind == NodeKind::Lift { solver::Condition::new(m, 2.0) } else { solver::Condition::from(m) };
+            let t = Instant::now();
+            let (notes, main_s, wedge_s) = analysis.host_build_probe(c, kind == NodeKind::Drag).unwrap();
+            total += t.elapsed().as_secs_f64();
+            println!(
+                "HOST {} M {m:.2}: solver {main_s:.3} s + seed wedge {wedge_s:.3} s | {}",
+                if kind == NodeKind::Lift { "angle" } else { "drag" },
+                notes.iter().map(|(k, v)| format!("{k} {v:.3}")).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    println!("HOST total {total:.2} s");
+}
+
 /// The draft-first flow as the app runs it (DESIGN3D item 57), through the app path on the finned example rocket: the draft solve (the drag at every Mach node, no angles) and then
 /// the coarse solve of the same job (drag and the 3D angles), in one process like the app's two solves. Prints the time to the first result, the total, the two drag tables and
 /// their difference per Mach number, the coarse angles, and a `PERF` line. `BOWSHOCK_DRAFT_ONLY=1` stops after the draft solve (a time on a slow device or backend).

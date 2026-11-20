@@ -487,7 +487,7 @@ pub struct Analysis {
 
 mod solver3;
 #[doc(hidden)]
-pub use solver3::{take_facade_timings, warm_runs, FacadeTiming};
+pub use solver3::{release_prefetch, take_facade_timings, warm_runs, FacadeTiming};
 
 /// Free stream of a viscous sweep.
 struct Rans {

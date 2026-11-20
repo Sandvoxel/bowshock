@@ -152,6 +152,24 @@ fn extras_of(case: &Case3, g: &Grid3, ratio: &[f64], tractions: &[bowshock_cfd::
     (eddy, cf)
 }
 
+/// The case of the run that follows the current one ([`Analysis::hint_next`]), until the GPU sweep starts building it ahead.
+static NEXT_HINT: std::sync::Mutex<Option<Case3>> = std::sync::Mutex::new(None);
+
+/// Starts the host build of the hinted case, once (the hint is taken).
+#[cfg(feature = "gpu")]
+fn fire_next_hint() {
+    if let Some(case) = NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        case.prefetch_solver();
+    }
+}
+
+/// Ends the building ahead (the end of a solve): the hint is dropped and the solvers built ahead and not taken are let go.
+#[doc(hidden)]
+pub fn release_prefetch() {
+    *NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    crate::engine::cache3::release_prebuilt();
+}
+
 /// The most iterations of a seed wedge: it only has to settle the base wake roughly, the finned run takes it from there.
 const SEED_MAX_ITERATIONS: usize = 3000;
 
@@ -497,6 +515,10 @@ impl Gpu3 {
                 GpuState { runner: crate::engine::gpu3::GpuRunner3::new(case, precision)?, key, reused: false }
             }
         };
+        // the iterations of a finned point are the time the next run's host set-up is built in (a wedge's are too short to hide a build in)
+        if !extended {
+            fire_next_hint();
+        }
         let p = match start {
             Some(start) => {
                 let (u, turb) = start.on(case, &state.runner.host.grid);
@@ -635,6 +657,55 @@ impl Analysis {
         }
         let case = self.solver3_case(Condition::from(2.0), 0, Tier::Euler, false)?;
         case.build_solver_cached().map(|_| ())
+    }
+
+    /// The host-side set-up of condition `c` as a point of the sweep builds it, with its seed wedge when the point is seeded (`seed`): the notes of
+    /// [`bowshock_cfd::timing`] (mesher, wall distance, solver arrays, ...) of building the solver from an empty grid cache, and the seconds of the two builds (instrumentation of
+    /// the fixed costs, DESIGN3D item 69).
+    #[doc(hidden)]
+    pub fn host_build_probe(&self, c: Condition, seed: bool) -> Result<(Vec<(&'static str, f64)>, f64, f64), Error> {
+        self.check_solver3(&[c])?;
+        let flow = self.wall_flow(&[c.mach])?;
+        let level = self.resolution.level();
+        let case = self.solver3_case(c, level, Self::tier3(c, self.resolution, flow), false)?;
+        *crate::engine::cache3::shared().lock().unwrap_or_else(|e| e.into_inner()) = crate::engine::cache3::GridCache::new(3);
+        let _ = bowshock_cfd::timing::take();
+        let t = std::time::Instant::now();
+        let s = case.build_solver_cached()?;
+        let main_s = t.elapsed().as_secs_f64();
+        let cells = s.grid.ni * s.grid.nj * s.grid.nk;
+        drop(s);
+        let mut notes = bowshock_cfd::timing::take();
+        notes.push(("cells", cells as f64));
+        let wedge_s = if seed {
+            let wedge = self.seed_case(&case, c, level)?;
+            let t = std::time::Instant::now();
+            drop(wedge.build_solver_cached()?);
+            t.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
+        Ok((notes, main_s, wedge_s))
+    }
+
+    /// Tells the GPU sweep which run follows the one about to start: the host solver of the first point of `next` (conditions as `run` takes them) is built on a background thread
+    /// while the GPU iterates the first cold point of the run that is coming ([`Case3::prefetch_solver`]), and the run after finds it ready. One hint is held: a newer one replaces
+    /// it. Only the 3D engine without a warm start uses it (the warm sweep solves in another order); other analyses and conditions that do not make a case are ignored.
+    /// The hint changes nothing about the solve: the solver built is the one `run` would build.
+    #[doc(hidden)]
+    pub fn hint_next(&self, next: &[Condition]) {
+        if crate::engine::timing::no_fixedcost() || self.engine != Engine::Solver3 || self.warm_start || next.is_empty() || self.check_solver3(next).is_err() {
+            return;
+        }
+        let first = next.iter().copied().min_by(|a, b| {
+            (a.alpha_deg != 0.0).cmp(&(b.alpha_deg != 0.0)).then(a.mach.total_cmp(&b.mach)).then(a.alpha_deg.total_cmp(&b.alpha_deg))
+        });
+        let machs: Vec<f64> = next.iter().map(|c| c.mach).collect();
+        let case = first.and_then(|c| {
+            let flow = self.wall_flow(&machs).ok()?;
+            self.solver3_case(c, self.resolution.level(), Self::tier3(c, self.resolution, flow), false).ok()
+        });
+        *NEXT_HINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = case;
     }
 
     /// The flow the walls of a wall-resolved grid are sized for: the viscous knobs of the analysis (`viscous`, `roughness`, the fins' roughness, `grid_mach`)

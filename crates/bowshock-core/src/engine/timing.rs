@@ -53,6 +53,13 @@ impl PointTiming {
     }
 }
 
+/// Whether `BOWSHOCK_NO_FIXEDCOST` is set: the measurement switch of the A/B runs of DESIGN3D item 69, which takes the fixed-cost work back to the way it was before (no host build
+/// ahead, ...). Every change of that item is behind it; the results do not depend on it.
+#[doc(hidden)]
+pub fn no_fixedcost() -> bool {
+    std::env::var_os("BOWSHOCK_NO_FIXEDCOST").is_some()
+}
+
 static TIMINGS: Mutex<Vec<PointTiming>> = Mutex::new(Vec::new());
 
 /// Logs `t` (and prints it under `BOWSHOCK_TIMING`).
