@@ -5,7 +5,6 @@
 //! `BT_MACHS` (comma list, default `0.404,0.608,0.831`), `BT_VARIANTS` (comma list, default `base`), tokens joined by `+`:
 //! - `lvl<N>`: grid level (default 0); `ref<NN>`: `with_refinement(NN / 10)`;
 //! - `fo`: first order throughout; `nolm`: the low-Mach flux correction off; `lm`: on; `pc`: low-Mach preconditioning of the implicit left-hand side on; `minmod`, `venk`: limiter;
-//! - `sens<lo>_<hi>`: CPU shock-sensor thresholds (relative pressure jump of the Rusanov blend; `sens0_0` is not allowed: `sensoff` = thresholds 1e9);
 //! - `sting<R>`: the sting radius (default 0.13); `cflmax<N>`, `cfl0_<x>`, `sub<N>`, `nobc`, `nolines`: implicit parameters;
 //! - `seg<k>`, `wake<k>`, `gap<k>`, `njo<k>`, `dx<k>`, `drw<k>`: the boattail cells, the cells behind the base, the rows between sting and base radius, the rows above, the end-cell size and the first cell height refined by `k`;
 //! - `closed`: the boattail continues as a sting of the base radius to the outflow (`Wake::Sting`, no base, no wake: the pressure drag of nose and boattail must vanish, d'Alembert);
@@ -61,7 +60,6 @@ fn body_of(parts: &[&str]) -> BaseBody {
 
 fn case_of(m: f64, variant: &str) -> Case3 {
     let parts: Vec<&str> = variant.split('+').collect();
-    bowshock_cfd::limiter::set_diag_sensor(0.0, 0.0);
     let level = parts.iter().find_map(|p| p.strip_prefix("lvl")).map_or(0, |v| v.parse::<u32>().expect("lvlN"));
     let mut c = if parts.contains(&"closed") { bowshock_cases::wedge::sting_case(m, body_of(&parts), level) } else { Case3::wedge(m, body_of(&parts), level) };
     for p in &parts {
@@ -70,10 +68,6 @@ fn case_of(m: f64, variant: &str) -> Case3 {
         }
         if let Some(v) = p.strip_prefix("iters") {
             c.numerics.max_iter = v.parse().expect("itersN");
-        }
-        if let Some(v) = p.strip_prefix("sens") {
-            let (lo, hi) = if v == "off" { (1e9, 2e9) } else { v.split_once('_').map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap())).expect("sens<lo>_<hi>") };
-            bowshock_cfd::limiter::set_diag_sensor(lo, hi);
         }
     }
     // region refinements of the base-wake grid (cell counts times the factor, even): `seg` the boattail's cells, `wake` the cells behind the base, `gap` the rows between the sting and the base

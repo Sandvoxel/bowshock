@@ -59,8 +59,7 @@ pub const SHOCK_SENSOR_HI: f64 = 0.02;
 #[inline]
 pub fn shock_weight(pl: f64, pr: f64) -> f64 {
     let s = (pr - pl).abs() / pl.min(pr);
-    let (lo, hi) = diag_sensor();
-    let t = ((s - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let t = ((s - SHOCK_SENSOR_LO) / (SHOCK_SENSOR_HI - SHOCK_SENSOR_LO)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
@@ -103,22 +102,5 @@ mod tests {
         }
         // antisymmetric under sign flip
         assert!((v(-0.4, -1.3) + v(0.4, 1.3)).abs() < 1e-15);
-    }
-}
-
-// DIAGNOSTIC (boattail study): runtime thresholds of the CPU shock sensor
-static DIAG_LO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static DIAG_HI: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub fn set_diag_sensor(lo: f64, hi: f64) {
-    DIAG_LO.store(lo.to_bits(), std::sync::atomic::Ordering::Relaxed);
-    DIAG_HI.store(hi.to_bits(), std::sync::atomic::Ordering::Relaxed);
-}
-#[inline]
-fn diag_sensor() -> (f64, f64) {
-    let lo = DIAG_LO.load(std::sync::atomic::Ordering::Relaxed);
-    if lo == 0 {
-        (SHOCK_SENSOR_LO, SHOCK_SENSOR_HI)
-    } else {
-        (f64::from_bits(lo), f64::from_bits(DIAG_HI.load(std::sync::atomic::Ordering::Relaxed)))
     }
 }
