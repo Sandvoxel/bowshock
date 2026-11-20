@@ -1100,7 +1100,7 @@ impl Analysis {
                 }
                 let t = Instant::now();
                 let neighbour = parent.filter(|_| j == 0).and_then(|p| carried.get(&p)).map(|f| (f, &tune));
-                let (r, s) = self.cold_point(runner, &case, c, kind, level, &mut seeds, neighbour, &mut tm)?;
+                let (mut r, mut s) = self.cold_point(runner, &case, c, kind, level, &mut seeds, neighbour, &mut tm)?;
                 cap = Some(r.final_cfl_cap().unwrap_or(case.numerics.implicit.cfl_max));
                 let mut next_warm = true;
                 tm.run_s += t.elapsed().as_secs_f64();
@@ -1111,7 +1111,30 @@ impl Analysis {
                     next_warm = false;
                 }
                 tm.reused = runner.reused(&s);
-                points[i] = Some(self.point3(runner, &s, &case, c, &r, keep, &mut tm)?);
+                let mut point = self.point3(runner, &s, &case, c, &r, keep, &mut tm)?;
+                // a settled zero-incidence point with a base suction no rocket has is solved once more at a low CFL ([`plausible`]); the points above the floor cost nothing
+                if c.alpha_deg == 0.0 && plausible::suspect(&point) {
+                    let t = Instant::now();
+                    let mut low = case.clone();
+                    low.numerics.implicit.cfl_max = low.numerics.implicit.cfl_max.min(plausible::RETRY_CFL_MAX);
+                    let (r2, s2) = self.cold_point(runner, &low, c, kind, level, &mut seeds, None, &mut tm)?;
+                    tm.run_s += t.elapsed().as_secs_f64();
+                    if r2.stop_reason == StopReason::Cancelled {
+                        return Err(Error::Cancelled);
+                    }
+                    let second = self.point3(runner, &s2, &low, c, &r2, keep, &mut tm)?;
+                    let (kept, second_kept) = plausible::decide(point, second);
+                    point = kept;
+                    if second_kept {
+                        runner.recycle(std::mem::replace(&mut s, s2));
+                        r = r2;
+                        cap = Some(r.final_cfl_cap().unwrap_or(low.numerics.implicit.cfl_max));
+                    } else {
+                        runner.recycle(s2);
+                    }
+                    next_warm = point.quality != Quality::Failed && lift_quality(&r) != Quality::Failed;
+                }
+                points[i] = Some(point);
                 record_facade(tm);
                 if j == 0 && wanted[g] > 0 && matches!(lift_quality(&r), Quality::Converged | Quality::Stationary) {
                     if let Some(field) = runner.carry(&s, &case, cap.unwrap_or(case.numerics.implicit.cfl_max))? {

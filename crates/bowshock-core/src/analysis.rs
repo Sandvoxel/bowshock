@@ -485,6 +485,7 @@ pub struct Analysis {
     fin_outline: FinOutline,
 }
 
+mod plausible;
 mod solver3;
 #[doc(hidden)]
 pub use solver3::{release_prefetch, take_facade_timings, warm_runs, FacadeTiming};

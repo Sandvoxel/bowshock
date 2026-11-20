@@ -37,6 +37,9 @@ fn hook(c: &mut solver::engine::case3::Case3) {
     if let Some(x) = env_f("DIAG_ACROSS") {
         c.grid.fin_cells_across = x as usize;
     }
+    if let Some(x) = env_f("DIAG_SPAN") {
+        c.grid.span_cells = Some(x as usize);
+    }
     if let Some(x) = env_f("DIAG_CHORD") {
         c.grid.fin_chord_cells = Some(x as usize);
     }
