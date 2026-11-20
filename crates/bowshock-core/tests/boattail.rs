@@ -416,3 +416,60 @@ fn quad(k: usize, nose: bool, cp: Option<&[f64]>) -> f64 {
     cq.push(pts.last().unwrap().1);
     (0..xq.len() - 1).map(|i| -0.5 * (cq[i] + cq[i + 1]) * (area(xq[i + 1]) - area(xq[i]))).sum()
 }
+
+/// The amplification of a perturbation of the y-momentum of the first fluid row above the sting (and, for comparison, above the cylinder) in one implicit iteration, CPU against GPU, at fixed CFL
+/// (`BT_CFLS`, comma list): the state is the free stream plus `eps` in `rho v` of the row's cells, `cfl0 = cfl_max = CFL`, second order, one step. Prints the largest `|dU|` of the row after the step
+/// over `eps` for the five components.
+#[cfg(feature = "gpu")]
+#[test]
+#[ignore = "diagnosis: GPU against CPU, one implicit step of a perturbed state"]
+fn bt4_perturbation() {
+    use bowshock_cfd::gpu::Precision;
+    let m: f64 = std::env::var("BT_MACHS").ok().and_then(|v| v.split(',').next().map(|x| x.parse().unwrap())).unwrap_or(0.608);
+    let variant = std::env::var("BT_VARIANTS").ok().and_then(|v| v.split(',').next().map(|s| s.to_string())).unwrap_or_else(|| "base".into());
+    let cfls: Vec<f64> = std::env::var("BT_CFLS").map(|v| v.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or_else(|_| vec![1.0, 3.0, 10.0]);
+    let comp: usize = std::env::var("BT_COMP").ok().and_then(|v| v.parse().ok()).unwrap_or(2);
+    let eps = 1e-3;
+    for cfl in cfls {
+        let mut case = case_of(m, &variant);
+        case.numerics.implicit.cfl0 = cfl;
+        case.numerics.implicit.cfl_max = cfl;
+        case.numerics.first_order_iters = 0;
+        let mut r = bowshock_core::engine::gpu3::GpuRunner3::new(&case, Precision::F32).expect("gpu runner");
+        let mut cpu = case.build_solver_cached().expect("cpu solver");
+        let g = cpu.grid.clone();
+        let first_fluid = |i: usize| (0..g.nj).find(|&j| !g.is_solid(i, j, 0)).unwrap();
+        // the rows: above the sting at the last columns, above the cylinder at x ~ 3
+        let i_cyl = (0..g.ni).find(|&i| g.xc[g.cell(i, 0, 0)][0] > 3.0).unwrap();
+        let rows: Vec<(&str, usize, Vec<usize>)> = vec![("sting", first_fluid(g.ni - 1), (g.ni - 30..g.ni - 2).collect()), ("cyl", first_fluid(i_cyl), (i_cyl - 10..i_cyl + 10).collect())];
+        for (name, j, cols) in rows {
+            let mut u0 = cpu.u.clone();
+            for &i in &cols {
+                u0[g.cell(i, j, 0)][comp] += eps;
+            }
+            cpu.u.clone_from(&u0);
+            cpu.restart_ramp();
+            cpu.step();
+            r.gpu.set_state(&u0).expect("set state");
+            r.gpu.restart_ramp().expect("ramp");
+            r.gpu.run(1).expect("gpu step");
+            let ug = r.gpu.state_f64().expect("state");
+            let amp = |u: &[[f64; 5]]| -> [f64; 5] {
+                let mut a = [0.0f64; 5];
+                for &i in &cols {
+                    let c = g.cell(i, j, 0);
+                    for k in 0..5 {
+                        a[k] = a[k].max((u[c][k] - u0[c][k] + if k == comp { eps } else { 0.0 }).abs() / eps);
+                    }
+                }
+                a
+            };
+            println!(
+                "BT4 {variant} M{m:.3} cfl {cfl} row {name} (j {j}, r {:.3}): after one step |dm_{comp}|/eps cpu {:?} gpu {:?}",
+                g.xc[g.cell(cols[0], j, 0)][1].hypot(g.xc[g.cell(cols[0], j, 0)][2]),
+                amp(&cpu.u).map(|x| (x * 1e3).round() / 1e3),
+                amp(&ug).map(|x| (x * 1e3).round() / 1e3)
+            );
+        }
+    }
+}
