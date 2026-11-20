@@ -27,7 +27,7 @@ pub(super) const WARM_START: bool = false;
 /// build-up's exit-area correction of the base drag, and the table solves no power-on nodes (no extra cost in the full solve). The solved effect is opposite in sign to that correction
 /// (the base drag rises with the jet on, x2 subsonic) and unvalidated (NASA TP-2005 fails, ISSUES #13), so it is an opt-in of the app (`BOWSHOCK_POWER_ON` set, or this constant): a table
 /// solved with it carries the part, one solved without it does not, and the flight uses the part where it is.
-pub(super) const POWER_ON: bool = false;
+pub const POWER_ON: bool = false;
 /// Mach number of the jet at the nozzle exit of the power-on solve: a hobby motor's nozzle expands its exhaust to about 2.5 (expansion ratio 6-8, `gamma` 1.2 in the real gas).
 pub(super) const JET_EXIT_MACH: f64 = 2.5;
 /// Total temperature of the jet (K): the flame temperature of an ammonium-perchlorate composite propellant (2 800-3 300 K) in the air model of the solver.

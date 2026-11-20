@@ -1,0 +1,137 @@
+{
+  "key": 9940247350102620912,
+  "geometry": 6993141472689309326,
+  "stage": 1,
+  "solved_at": 1795150252,
+  "solve_seconds": 982.524586252,
+  "backend": "GPU (Luma)",
+  "fallback": null,
+  "altitude": 1143.0,
+  "notes": [
+    "Walls solved with the parts' finish: 6 um sand-grain roughness.",
+    "Mach 2.30 converged after 2 restarts at a lower CFL limit (100.0 to 49.0): the run first went unstable, so the point is from different numerics than the others.",
+    "Mach 3.00 converged after 2 restarts at a lower CFL limit (100.0 to 49.0): the run first went unstable, so the point is from different numerics than the others.",
+    "Mach 0.80 at 2° did not converge and is left out.",
+    "Mach 0.95 at 2° did not converge and is left out.",
+    "Mach 1.10 at 2° did not converge and is left out.",
+    "Mach 1.30 at 2° did not converge and is left out.",
+    "Mach 1.70 at 2° did not converge and is left out.",
+    "Mach 2.30 at 2° did not converge and is left out.",
+    "Mach 3.00 at 2° did not converge and is left out.",
+    "Angles left out: the solver did not converge at enough Mach numbers at the angles."
+  ],
+  "points": [
+    {
+      "mach": 0.1,
+      "cd": 0.4611615033341994,
+      "friction": 0.27367975725080984,
+      "pressure": 0.011336149527781008,
+      "base": 0.10161402511572042,
+      "fins": 0.07453157143988814,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.5,
+      "cd": 0.39955253677912983,
+      "friction": 0.21952222312143543,
+      "pressure": 0.012383130365034295,
+      "base": 0.10258290148395773,
+      "fins": 0.06506428180870241,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.8,
+      "cd": 0.3979248573194239,
+      "friction": 0.2023998353676104,
+      "pressure": 0.01655571068833501,
+      "base": 0.10926699495573843,
+      "fins": 0.0697023163077401,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.9,
+      "cd": 0.43362314701066296,
+      "friction": 0.1955501333282824,
+      "pressure": 0.029319319591599235,
+      "base": 0.12476243539816617,
+      "fins": 0.08399125869261514,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.0,
+      "cd": 0.5878705478329307,
+      "friction": 0.19053762438779817,
+      "pressure": 0.07702119953983685,
+      "base": 0.2091762381314063,
+      "fins": 0.1111354857738894,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.1,
+      "cd": 0.5663590137511915,
+      "friction": 0.18562221240587456,
+      "pressure": 0.08284095972735236,
+      "base": 0.1962741932861694,
+      "fins": 0.10162164833179511,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.3,
+      "cd": 0.5324066290083944,
+      "friction": 0.1759444679570144,
+      "pressure": 0.07521853449626169,
+      "base": 0.19226773009671494,
+      "fins": 0.08897589645840343,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.7,
+      "cd": 0.468249071894534,
+      "friction": 0.15701294924795345,
+      "pressure": 0.06747846845645825,
+      "base": 0.1735215457502823,
+      "fins": 0.07023610843984004,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 2.3,
+      "cd": 0.39011554141283356,
+      "friction": 0.1314642619662961,
+      "pressure": 0.05730957807644428,
+      "base": 0.1417235052085291,
+      "fins": 0.05961819616156406,
+      "other": 0.0,
+      "quality": "Stationary",
+      "restart": {
+        "rollbacks": 2,
+        "cfl_from": 100.0,
+        "cfl_to": 49.0
+      }
+    },
+    {
+      "mach": 3.0,
+      "cd": 0.3130817842147523,
+      "friction": 0.10706688903788408,
+      "pressure": 0.04879869604234787,
+      "base": 0.10454174170050907,
+      "fins": 0.05267445743401126,
+      "other": 0.0,
+      "quality": "Stationary",
+      "restart": {
+        "rollbacks": 2,
+        "cfl_from": 100.0,
+        "cfl_to": 49.0
+      }
+    }
+  ],
+  "grid": "Coarse",
+  "lift": null
+}

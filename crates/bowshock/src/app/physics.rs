@@ -187,6 +187,9 @@ pub struct Physics {
     phase: Phase,
     /// The document revision and phase the cache was computed for.
     computed_for: Option<(u64, Phase)>,
+    /// Whether the flight flies the solved jet's effect on the base where the CFD table has it (opt-in, DESIGN3D item 58: [`crate::analyze::cfd::power_on_requested`] at start-up);
+    /// off, it keeps the build-up's exit-area correction of the motor-on base.
+    pub(crate) solved_jet: bool,
     /// The CFD plan of the stack from each stage (index `k` is model stage `k + 1`).
     cfd_plans: Vec<Result<crate::analyze::cfd::Plan, String>>,
     /// The units `cfd_plans` was made in.
@@ -228,6 +231,7 @@ impl Physics {
             downloaded,
             phase: Phase::Full,
             computed_for: None,
+            solved_jet: crate::analyze::cfd::power_on_requested(),
             cfd_plans: Vec::new(),
             cfd_units: None,
             liftoff: Err(BridgeError::EmptyRocket),
@@ -348,7 +352,7 @@ impl Physics {
         match self.cfd_plan(stage) {
             Some(Ok(plan)) if plan.geometry == table.geometry => {
                 // the solved jet's effect on the base is opt-in (DESIGN3D item 58): by default the flight keeps the build-up's exit-area correction
-                let jet = crate::analyze::cfd::power_on_requested().then(|| plan.jet()).flatten();
+                let jet = self.solved_jet.then(|| plan.jet()).flatten();
                 Ok(bowshock_sim::DragTable::from_cfd(table, jet.as_ref()))
             }
             Some(Ok(_)) | None => Err("CFD table is stale (the rocket changed): flying on Extended.".to_string()),

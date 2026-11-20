@@ -595,6 +595,7 @@ mod tests {
     /// [`app_with`], with the 3D angles option set as given before the solve starts.
     fn app_with_angles(scripts: &[Demo], angles: bool) -> (App, u64) {
         let mut app = App::with_example();
+        app.analyze_mut().cfd.draft_first = false;
         app.analyze_mut().cfd.angles = angles;
         app.analyze_mut().cfd.demo = scripts.iter().copied().collect();
         drop(app.update(AppMessage::Mode(Mode::Analyze)));
@@ -719,6 +720,20 @@ mod tests {
         assert!(!solve_view::active(app.analyze()));
     }
 
+    /// The solved jet of the stack's motor is opt-in (DESIGN3D item 58): the example has a motor, and without `BOWSHOCK_POWER_ON` its solve has no power-on node, so the full
+    /// solve costs what it did before the jet existed.
+    #[test]
+    fn the_motors_jet_is_not_solved_unless_asked_for() {
+        const _: () = assert!(!crate::analyze::cfd::POWER_ON, "the solved jet is off in the source");
+        if crate::analyze::cfd::power_on_requested() {
+            return;
+        }
+        let (app, _) = app_with(&[Demo::Done]);
+        let plan = app.analyze().cfd.plan.clone();
+        assert!(plan.as_ref().as_ref().expect("the example maps").motor.is_some(), "the example flies a motor");
+        assert!(job(&app).power_on.is_empty());
+    }
+
     #[test]
     fn the_script_runs_the_angles_after_the_drag_nodes_in_one_stream() {
         let (app, _) = app_with(&[Demo::AngleMid]);
@@ -820,6 +835,7 @@ mod tests {
     fn the_compute_setting_goes_with_the_solve_and_a_failed_connect_shows_on_the_screen() {
         use crate::app::settings::{Compute, Machine, MachineRef, Mode as ComputeMode};
         let mut app = App::with_example();
+        app.analyze_mut().cfd.draft_first = false;
         app.analyze_mut().cfd.demo = [Demo::RemoteSetup].into_iter().collect();
         drop(app.update(AppMessage::Mode(Mode::Analyze)));
         let remote = Compute {

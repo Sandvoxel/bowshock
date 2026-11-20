@@ -939,7 +939,14 @@ fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
     assert!(app.ctx_mut().doc.store_cfd_table(cfd_table(geometry)));
     let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
     assert_eq!(input.drag_tables[0].as_ref().map(|t| t.points.len()), Some(3));
-    assert!(flight::drag_note(app.ctx(), &spec).unwrap().contains("no solved jet"), "a table without a power-on part says the exit area is taken out");
+    // the solved jet is opt-in (DESIGN3D item 58): by default the flight keeps the exit-area correction and says nothing about a jet
+    assert!(!app.ctx().physics.solved_jet, "off by default");
+    assert_eq!(flight::drag_note(app.ctx(), &spec), None);
+    app.ctx_mut().physics.solved_jet = true;
+    assert!(
+        flight::drag_note(app.ctx(), &spec).unwrap().contains("no solved jet"),
+        "asked for, a table without a power-on part says the exit area is taken out"
+    );
 
     // a power-on part solved for the motor it flies is used (and the note goes); one for another motor is not
     let power = |jet| bowshock_model::CfdPowerOn {
@@ -958,6 +965,10 @@ fn the_cfd_drag_source_attaches_a_matching_table_and_says_why_it_cannot() {
     let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
     assert_eq!(input.drag_tables[0].as_ref().map(|t| t.power_on.len()), Some(1));
     assert_eq!(flight::drag_note(app.ctx(), &spec), None);
+    // not asked for, the same table's power-on part is not flown
+    app.ctx_mut().physics.solved_jet = false;
+    let (input, _) = flight::prepare(app.ctx(), &spec).unwrap();
+    assert!(input.drag_tables[0].as_ref().unwrap().power_on.is_empty(), "the solved jet is opt-in");
 
     let extended = Spec { drag: bowshock_model::DragSource::Extended, ..spec };
     assert!(flight::prepare(app.ctx(), &extended).unwrap().0.drag_tables.is_empty());

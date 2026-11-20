@@ -599,7 +599,7 @@ impl State {
         let asked = refine.or(force).unwrap_or(CfdGrid::Coarse);
         // The coarse solve of a table that is missing or stale goes through the draft grid first (a result in a fraction of the time, then the coarse table replaces it); the
         // solve that follows a draft table goes straight to its grid.
-        let draft_first = refine.is_none() && cfd::draft_first(asked, &self.cfd.status);
+        let draft_first = refine.is_none() && self.cfd.draft_first && cfd::draft_first(asked, &self.cfd.status);
         let (grid, then) = if draft_first { (CfdGrid::Draft, Some(asked)) } else { (asked, None) };
         let job = Arc::new(cfd::Job {
             plan: plan.clone(),
@@ -896,6 +896,9 @@ pub(crate) struct Cfd {
     force: Option<CfdGrid>,
     /// A draft-first solve stored its table: the next refresh solves on this grid (see [`cfd::draft_first`]).
     refine: Option<CfdGrid>,
+    /// Whether a solve of a missing or stale table may go through the draft grid first (see [`cfd::draft_first`]); on, except in the tests of the scripted single solve (the 3D
+    /// engine is the default engine now, and the draft-first flow is two solves).
+    draft_first: bool,
     serial: u64,
     /// Scripted solves the next solves play instead of running the solver (`BOWSHOCK_CFD_DEMO`, for screenshots).
     demo: VecDeque<solve_demo::Demo>,
@@ -928,6 +931,7 @@ impl Default for Cfd {
             failed: None,
             force: None,
             refine: None,
+            draft_first: true,
             serial: 0,
             demo: VecDeque::new(),
         }

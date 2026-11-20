@@ -1,0 +1,125 @@
+{
+  "key": 8945178315452276955,
+  "geometry": 1506630799864234618,
+  "stage": 1,
+  "solved_at": 1795151252,
+  "solve_seconds": 999.923194781,
+  "backend": "GPU (Luma)",
+  "fallback": null,
+  "altitude": 1036.3200000000002,
+  "notes": [
+    "Walls solved smooth (the parts' finish is polished).",
+    "Mach 0.80 at 2° did not converge and is left out.",
+    "Mach 0.95 at 2° did not converge and is left out.",
+    "Mach 1.10 at 2° did not converge and is left out.",
+    "Mach 1.30 at 2° did not converge and is left out.",
+    "Mach 1.70 at 2° did not converge and is left out.",
+    "Mach 2.30 at 2° did not converge and is left out.",
+    "Mach 3.00 at 2° did not converge and is left out.",
+    "Angles left out: the solver did not converge at enough Mach numbers at the angles."
+  ],
+  "points": [
+    {
+      "mach": 0.1,
+      "cd": 0.6466142558814981,
+      "friction": 0.36940004475032134,
+      "pressure": 0.004891504316784564,
+      "base": 0.09128792743655996,
+      "fins": 0.18103477937783224,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.5,
+      "cd": 0.5341822947513943,
+      "friction": 0.2772487325381823,
+      "pressure": 0.0050737522771590205,
+      "base": 0.09271667189575905,
+      "fins": 0.15914313804029406,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.8,
+      "cd": 0.5180712901771454,
+      "friction": 0.2487699568375592,
+      "pressure": 0.007524811090526041,
+      "base": 0.09786733032944252,
+      "fins": 0.16390919191961767,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.9,
+      "cd": 0.5814965981791242,
+      "friction": 0.23907419039416508,
+      "pressure": 0.018475471592554152,
+      "base": 0.11586089653015536,
+      "fins": 0.20808603966224967,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.0,
+      "cd": 0.7598667579916668,
+      "friction": 0.2317968773944957,
+      "pressure": 0.07307727371823446,
+      "base": 0.20515546913659158,
+      "fins": 0.24983713774234506,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.1,
+      "cd": 0.7159235759586958,
+      "friction": 0.2252950146569394,
+      "pressure": 0.08131684467083938,
+      "base": 0.1904212207284467,
+      "fins": 0.21889049590247034,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.3,
+      "cd": 0.660963029808727,
+      "friction": 0.21254580440450152,
+      "pressure": 0.06964532682202018,
+      "base": 0.18762038573966522,
+      "fins": 0.19115151284254012,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.7,
+      "cd": 0.5765326171349134,
+      "friction": 0.18946977998336292,
+      "pressure": 0.058876556828463635,
+      "base": 0.16908036791505154,
+      "fins": 0.1591059124080353,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 2.3,
+      "cd": 0.47702664982225174,
+      "friction": 0.15988548228951127,
+      "pressure": 0.05052050952005179,
+      "base": 0.13431684105016226,
+      "fins": 0.13230381696252638,
+      "other": 0.0,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 3.0,
+      "cd": 0.3937387520723204,
+      "friction": 0.13180344545226572,
+      "pressure": 0.04486548716206122,
+      "base": 0.10282014570712797,
+      "fins": 0.11424967375086552,
+      "other": 0.0,
+      "quality": "Stationary"
+    }
+  ],
+  "grid": "Coarse",
+  "lift": null
+}

@@ -190,7 +190,8 @@ fn the_bands_come_from_the_measured_terms_without_a_second_sweep() {
     let polar = solver3().run(&[Condition::from(2.0), Condition::new(2.0, 2.0)]).unwrap();
     let (p, a) = (&polar.points[0], &polar.points[1]);
     let band = p.cd_band.expect("a drag band at zero incidence");
-    assert!(band.low > band.high && band.high > 0.0, "{band:?}");
+    // supersonic: the model reads up to 7 % high and up to 10 % low, and the wall temperature adds to the high side (`uncertainty::terms`)
+    assert!(band.low > 0.0 && band.high > band.low, "{band:?}");
     assert_eq!(p.cd_uncertainty, Some(band.half_width()));
     assert!(p.x_cp_band.is_none());
     assert_eq!(a.cd_band.is_some(), a.drag.total.is_finite());
