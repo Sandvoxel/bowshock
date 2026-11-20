@@ -544,6 +544,55 @@ fn engine3d_finned_timing() {
     let run_total: f64 = runs.iter().map(|r| r.run_s).sum();
     let fixed = sums[0] + sums[1] + sums[2] + sums[3] + sums[4] + case_s + post_s + host_s + field_s + drop_s;
     println!("SUM {} runs, {iterations} iterations: iterating {run_total:.1} s of {wall:.1} s wall; fixed costs per point (build, context, upload, reset, first chunk, facade) {fixed:.1} s; points at the iteration cap: {capped:?} = {capped_s:.1} s", runs.len());
+    // the finer parts (item 69): the set-up and the per-chunk host work by name, for the seed wedges (under 200 000 cells) and the finned points apart
+    for (name, small) in [("seed wedges", true), ("finned points", false)] {
+        let rs: Vec<_> = runs.iter().filter(|r| (r.cells < 200_000) == small).collect();
+        let mut parts: Vec<(&str, f64)> = Vec::new();
+        for r in &rs {
+            for &(k, v) in &r.parts {
+                match parts.iter_mut().find(|(n, _)| *n == k) {
+                    Some((_, t)) => *t += v,
+                    None => parts.push((k, v)),
+                }
+            }
+        }
+        let sum = |f: &dyn Fn(&solver::engine::timing::PointTiming) -> f64| rs.iter().map(|r| f(r)).sum::<f64>();
+        println!(
+            "PARTS {name}: {} runs, {} it, run {:.2} s | build {:.2} ctx {:.2} upload {:.2} reset {:.2} first chunk {:.2} (steady-state equivalent {:.2}) rest {:.2} downloads {:.2} forces {:.2} final {:.2} | {}",
+            rs.len(),
+            rs.iter().map(|r| r.iters_exec).sum::<usize>(),
+            sum(&|r| r.run_s),
+            sum(&|r| r.build_s),
+            sum(&|r| r.ctx_s),
+            sum(&|r| r.upload_s),
+            sum(&|r| r.reset_s),
+            sum(&|r| r.first_chunk_s),
+            rs.iter().filter(|r| r.chunks_rest > 0).map(|r| r.rest_chunks_s / r.chunks_rest as f64).sum::<f64>(),
+            sum(&|r| r.rest_chunks_s),
+            sum(&|r| r.download_s),
+            sum(&|r| r.forces_s),
+            sum(&|r| r.final_s),
+            parts.iter().map(|(k, v)| format!("{k} {v:.2}")).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let kinds = ["wedge", "sector", "half"];
+    for k in kinds {
+        let f: Vec<_> = facade.iter().filter(|t| t.what == "point" && t.kind == k).collect();
+        if f.is_empty() {
+            continue;
+        }
+        println!(
+            "FACADE {k}: {} points, run {:.2} s (of which seed {:.2} s, {} wedge iterations), case {:.3}, post {:.3}, host {:.3}, Field3 {:.3}",
+            f.len(),
+            f.iter().map(|t| t.run_s).sum::<f64>(),
+            f.iter().map(|t| t.seed_s).sum::<f64>(),
+            f.iter().map(|t| t.seed_iters).sum::<usize>(),
+            f.iter().map(|t| t.case_s).sum::<f64>(),
+            f.iter().map(|t| t.post_s).sum::<f64>(),
+            f.iter().map(|t| t.host_s).sum::<f64>(),
+            f.iter().map(|t| t.field_s).sum::<f64>()
+        );
+    }
     let all = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, iterations];
     println!("PERF {}", serde_json_perf(wall, all[13]));
 }

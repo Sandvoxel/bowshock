@@ -57,8 +57,8 @@ impl GridCache {
             self.hits += 1;
             return Ok(out);
         }
-        let grid = Arc::new(body_grid3(p)?);
-        let axis = Arc::new(AxisMap::new(&grid));
+        let grid = Arc::new(bowshock_cfd::timing::timed("mesher", || body_grid3(p))?);
+        let axis = Arc::new(bowshock_cfd::timing::timed("axis", || AxisMap::new(&grid)));
         self.builds += 1;
         if self.entries.len() == self.capacity {
             self.entries.remove(0);
@@ -70,7 +70,8 @@ impl GridCache {
     /// The implicit CPU solver of `case` on its (cached) grid and axis map: [`Case3::build_solver`] without the mesher and the axis map.
     pub fn solver(&mut self, case: &Case3) -> Result<Solver3, Error> {
         let (grid, axis) = self.entry(&case.grid)?;
-        Ok(case.solver_with_axis(Grid3::clone(&grid), AxisMap::clone(&axis)))
+        let (grid, axis) = bowshock_cfd::timing::timed("grid_clone", || (Grid3::clone(&grid), AxisMap::clone(&axis)));
+        Ok(case.solver_with_axis(grid, axis))
     }
 
     /// Number of grids held.

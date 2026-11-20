@@ -177,7 +177,7 @@ impl Solver3 {
         let mut gamma = Vec::new();
         if sst {
             let faces = wall_faces(&self.grid, &self.solid);
-            dwall = wall_distance3(&self.grid, &self.solid, &faces);
+            dwall = crate::timing::timed("walldist", || wall_distance3(&self.grid, &self.solid, &faces));
             let rho = self.cfg.freestream[0];
             (turb, mu_t) = turbulence3::init(&model, &self.solid, |_| rho);
             if let Some(tr) = opts.transition {

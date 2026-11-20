@@ -87,12 +87,15 @@ pub struct GpuRunner3 {
     /// The CFL the next warm run starts its ramp at instead of restarting it at `cfl0` (taken by [`GpuRunner3::run_on`]; at most the run's `cfl_max`): a run that goes on from
     /// a converged field (a neighbouring Mach number, the next angle) is not a start-up, so it need not creep up from `cfl0`. `None`: the ramp restarts.
     pub start_cfl: Option<f64>,
+    /// The finer parts of the set-up (see [`PointTiming::parts`]), moved to the timing of the first run.
+    setup_parts: Vec<(&'static str, f64)>,
 }
 
 impl GpuRunner3 {
     /// Builds the host solver of `case` (viscous with SST when `Case3::viscous` is set: the wall forces of the runner then include the shear of the no-slip faces) and
     /// uploads it to the default GPU context.
     pub fn new(case: &Case3, prec: Precision) -> Result<GpuRunner3, Error> {
+        let _ = bowshock_cfd::timing::take();
         let t_build = Instant::now();
         // the grid (mesher, face geometry) comes from the process-wide cache: one `Analysis::run` per Mach node rebuilds neither it nor, with the shared default
         // context, the compiled kernels of the previous call
@@ -105,7 +108,7 @@ impl GpuRunner3 {
         if ctx.is_cpu() {
             return Err(Error::Gpu("no GPU: Luma opened its CPU backend".into()));
         }
-        make_room(&ctx, &host, prec)?;
+        bowshock_cfd::timing::timed("make_room", || make_room(&ctx, &host, prec))?;
         let t1 = Instant::now();
         let gpu = GpuSolver3::from_host(&ctx, &host, prec)?;
         let upload_seconds = t1.elapsed().as_secs_f64();
@@ -120,8 +123,10 @@ impl GpuRunner3 {
             upload_seconds,
             cfl_events: Vec::new(),
             start_cfl: None,
+            setup_parts: Vec::new(),
         };
-        runner.upload_wall_faces(case)?;
+        bowshock_cfd::timing::timed("wall_faces", || runner.upload_wall_faces(case))?;
+        runner.setup_parts = bowshock_cfd::timing::take();
         Ok(runner)
     }
 
@@ -297,6 +302,7 @@ impl GpuRunner3 {
         let mut tm = PointTiming { dim: 3, mach: case.mach, alpha_deg: case.alpha.to_degrees(), warm, cells: g.ni * g.nj * g.nk, ..Default::default() };
         if !warm {
             (tm.build_s, tm.ctx_s, tm.upload_s) = (self.build_seconds, self.ctx_seconds, self.upload_seconds);
+            tm.parts = std::mem::take(&mut self.setup_parts);
         }
         let n = &case.numerics;
         let cfg = Config3 {
@@ -359,7 +365,9 @@ impl GpuRunner3 {
             let (h, mon) = self.gpu.run_monitored(len)?;
             let dt_chunk = t_chunk.elapsed().as_secs_f64();
             // the state's own health: a wake that collapses towards vacuum keeps a finite residual below the limit (`COLLAPSE_FLOOR`); the failure is then the chunk's last iteration
+            let t_part = Instant::now();
             let [rho_min, p_min] = self.gpu.state_extrema()?;
+            tm.add("extrema", t_part.elapsed().as_secs_f64());
             let failure = h
                 .iter()
                 .position(|r| !r.is_finite() || *r > ROLLBACK_RESIDUAL)
@@ -385,6 +393,7 @@ impl GpuRunner3 {
                 tm.chunks_rest += 1;
                 tm.rest_chunks_s += dt_chunk;
             }
+            let t_part = Instant::now();
             let coeffs = |k: usize| coefficients(case, &self.host.grid, mon[k]);
             let by_incidence = |f: &LiftForces| if zero_incidence(&self.host.grid) || case.alpha.abs() < 1e-12 { f.ca } else { f.cn };
             for (k, r) in h.into_iter().enumerate() {
@@ -398,6 +407,7 @@ impl GpuRunner3 {
                     break;
                 }
             }
+            tm.add("stop_rule", t_part.elapsed().as_secs_f64());
             done = end;
             if stop.is_none() {
                 // the controller's snapshot is a download to host memory: counted with the state downloads of the point's timing
@@ -405,6 +415,7 @@ impl GpuRunner3 {
                 let snapshot = self.gpu.snapshot()?;
                 tm.downloads += 1;
                 tm.download_s += t_snap.elapsed().as_secs_f64();
+                tm.add("snapshot", t_snap.elapsed().as_secs_f64());
                 ctl.accept(snapshot, done, cfl_host);
             }
             // the state leaves the device only at a chunk where a snapshot is due
@@ -419,10 +430,13 @@ impl GpuRunner3 {
         }
         let t_final = Instant::now();
         let f = self.lift_forces(case)?;
+        tm.add("final_forces", t_final.elapsed().as_secs_f64());
         let mut result = rule.finish(case, f, stop.unwrap_or(done));
         // the `y+` of the streamwise walls (viscous runs) and the base Cp, from the device state (one state download; the host solver takes it for the pressure integration)
         result.y_plus_max = self.y_plus_report()?.unwrap_or(f64::NAN);
+        let t_part = Instant::now();
         self.host.u = self.gpu.state_f64()?;
+        tm.add("final_download", t_part.elapsed().as_secs_f64());
         result.cp_base = crate::engine::run3::base_cp(case, &self.host);
         result.cfl_events.clone_from(&ctl.events);
         self.cfl_events = ctl.events;

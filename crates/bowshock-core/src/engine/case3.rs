@@ -641,8 +641,8 @@ impl Case3 {
 
     /// [`Case3::solver_on`] with the axis map of `grid` already built (the grid cache shares it).
     pub fn solver_with_axis(&self, grid: Grid3, axis: bowshock_cfd::axis3::AxisMap) -> Solver3 {
-        let s = Solver3::with_axis(grid, axis, self.config3());
-        self.with_equations(s)
+        let s = bowshock_cfd::timing::timed("solver_new", || Solver3::with_axis(grid, axis, self.config3()));
+        bowshock_cfd::timing::timed("equations", || self.with_equations(s))
     }
 
     fn config3(&self) -> Config3 {

@@ -25,6 +25,7 @@ pub mod plate3;
 pub mod solver;
 pub mod solver3;
 pub mod sst;
+pub mod timing;
 pub mod transition3;
 pub mod turbulence;
 pub mod turbulence3;
