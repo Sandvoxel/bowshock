@@ -369,6 +369,12 @@ impl Gpu3 {
     }
 }
 
+/// A state with a density or pressure within a hundredth and a half of the free stream's in some cell has run into the GPU solver's positivity floor (`POSITIVITY_FLOOR`,
+/// 1e-2): a cell clipped there is a defect, and a point whose forces contain it is not a result (Rabia Coarse Mach 2.3: C_D 1.14 against 0.50 on the Draft grid, "settled").
+fn clipped_state(rho_min: f64, p_min: f64, fs: &[f64; 5]) -> bool {
+    !(rho_min >= 1.5e-2 * fs[0] && p_min >= 1.5e-2 * fs[4])
+}
+
 /// Quality of a 3D point, first match wins: [`Quality::Failed`] on a non-finite or blown-up state (the run stopped `NonFinite`), a cell whose density or
 /// pressure has collapsed (`collapsed`: below a thousandth of the free stream's; the CFL controller's health check, which a run that has used up its answers goes on
 /// with: a state with a vacuum at the leading edge of a fin settles, and its forces are those of the defect), a non-finite force or drag, a pressure at the outer boundaries more than 100 % off the free stream, or an area-mean base Cp
@@ -810,7 +816,7 @@ impl Analysis {
             Forces { cn, cm: if x_cp.is_finite() { -cn * x_cp / self.d_ref } else { 0.0 }, x_cp, ca }
         });
         let finite = total.is_finite() && forces.is_none_or(|f| f.cn.is_finite() && f.ca.is_finite());
-        let quality = quality3(r.stop_reason, c.mach, crate::engine::run3::collapsed(min_rho, min_p, &case.freestream()), finite, farfield_dp, cp_base);
+        let quality = quality3(r.stop_reason, c.mach, clipped_state(min_rho, min_p, &case.freestream()), finite, farfield_dp, cp_base);
 
         let mut warnings = Vec::new();
         if (0.7..1.05).contains(&c.mach) && self.has_sharp_corner() {
