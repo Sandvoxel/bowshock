@@ -68,21 +68,47 @@ fn dt_diag(run: &GpuRunner3, cfl: f64, label: &str) -> Result<(), String> {
             hist[edges.iter().position(|&e| ratio(c) < e).unwrap_or(edges.len())] += 1;
         }
         let n = cells.len() as f64;
-        let cols: Vec<String> = hist.iter().enumerate().map(|(b, h)| format!("{}{}: {:.1}%", if b < edges.len() { "<" } else { ">=" }, edges[b.min(edges.len() - 1)], 100.0 * *h as f64 / n)).collect();
+        let cols: Vec<String> = hist
+            .iter()
+            .enumerate()
+            .map(|(b, h)| format!("{}{}: {:.1}%", if b < edges.len() { "<" } else { ">=" }, edges[b.min(edges.len() - 1)], 100.0 * *h as f64 / n))
+            .collect();
         println!("DTDIAG {label} {name}: {} cells; L_k/(L_i+L_j) histogram {}", cells.len(), cols.join(", "));
         let mut r: Vec<f64> = cells.iter().map(|&c| ratio(c)).collect();
         let above = r.iter().filter(|&&x| x > 1.0).count() as f64 / n;
-        println!("DTDIAG {label} {name}: L_k/(L_i+L_j) p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}; share above 1: {:.1}%", pct(&mut r, 0.1), pct(&mut r, 0.5), pct(&mut r, 0.9), pct(&mut r, 0.99), pct(&mut r, 1.0), 100.0 * above);
+        println!(
+            "DTDIAG {label} {name}: L_k/(L_i+L_j) p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}; share above 1: {:.1}%",
+            pct(&mut r, 0.1),
+            pct(&mut r, 0.5),
+            pct(&mut r, 0.9),
+            pct(&mut r, 0.99),
+            pct(&mut r, 1.0),
+            100.0 * above
+        );
         // the step of the sum and of the capped sum (units of the solver), their ratio, and the convective CFL `dt |u_d| / h_d` (`h_d = V / mean face area of direction d`) of the sum's step
         let dts = |c: usize| cfl * g.vol[c] / (l[0][c] + l[1][c] + l[2][c]);
         let dtc = |c: usize| cfl * g.vol[c] / (l[0][c] + l[1][c] + l[2][c].min(l[0][c] + l[1][c]));
         let mut gain: Vec<f64> = cells.iter().map(|&c| dtc(c) / dts(c)).collect();
-        println!("DTDIAG {label} {name}: dt_capk / dt_sum p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}", pct(&mut gain, 0.1), pct(&mut gain, 0.5), pct(&mut gain, 0.9), pct(&mut gain, 0.99), pct(&mut gain, 1.0));
+        println!(
+            "DTDIAG {label} {name}: dt_capk / dt_sum p10 {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}",
+            pct(&mut gain, 0.1),
+            pct(&mut gain, 0.5),
+            pct(&mut gain, 0.9),
+            pct(&mut gain, 0.99),
+            pct(&mut gain, 1.0)
+        );
         let cc = |c: usize, dt: f64| {
             let (i, j, k) = (c % g.ni, (c / g.ni) % g.nj, c / (g.ni * g.nj));
             let q = u[c];
             let v = [q[1] / q[0], q[2] / q[0], q[3] / q[0]];
-            let fa = [&g.iface[(k * g.nj + j) * (g.ni + 1) + i], &g.iface[(k * g.nj + j) * (g.ni + 1) + i + 1], &g.jface[(k * (g.nj + 1) + j) * g.ni + i], &g.jface[(k * (g.nj + 1) + j) * g.ni + i + g.ni], &g.kface[c], &g.kface[c + g.ni * g.nj]];
+            let fa = [
+                &g.iface[(k * g.nj + j) * (g.ni + 1) + i],
+                &g.iface[(k * g.nj + j) * (g.ni + 1) + i + 1],
+                &g.jface[(k * (g.nj + 1) + j) * g.ni + i],
+                &g.jface[(k * (g.nj + 1) + j) * g.ni + i + g.ni],
+                &g.kface[c],
+                &g.kface[c + g.ni * g.nj],
+            ];
             let mut worst = 0.0f64;
             for d in 0..3 {
                 let (a, b) = (fa[2 * d], fa[2 * d + 1]);
@@ -94,11 +120,25 @@ fn dt_diag(run: &GpuRunner3, cfl: f64, label: &str) -> Result<(), String> {
         };
         for (what, f) in [("sum", &dts as &dyn Fn(usize) -> f64), ("capk", &dtc as &dyn Fn(usize) -> f64)] {
             let mut v: Vec<f64> = cells.iter().map(|&c| cc(c, f(c))).collect();
-            println!("DTDIAG {label} {name}: max-direction convective CFL dt|u|/h ({what}) p50 {:.2} p90 {:.2} p99 {:.2} max {:.2}", pct(&mut v, 0.5), pct(&mut v, 0.9), pct(&mut v, 0.99), pct(&mut v, 1.0));
+            println!(
+                "DTDIAG {label} {name}: max-direction convective CFL dt|u|/h ({what}) p50 {:.2} p90 {:.2} p99 {:.2} max {:.2}",
+                pct(&mut v, 0.5),
+                pct(&mut v, 0.9),
+                pct(&mut v, 0.99),
+                pct(&mut v, 1.0)
+            );
         }
         let mut d: Vec<f64> = cells.iter().map(|&c| dts(c)).collect();
         let mut dcap: Vec<f64> = cells.iter().map(|&c| dtc(c)).collect();
-        println!("DTDIAG {label} {name}: dt (cfl-scaled, solver units) sum p01 {:.3e} p50 {:.3e} p99 {:.3e}; capk p01 {:.3e} p50 {:.3e} p99 {:.3e}", pct(&mut d, 0.01), pct(&mut d, 0.5), pct(&mut d, 0.99), pct(&mut dcap, 0.01), pct(&mut dcap, 0.5), pct(&mut dcap, 0.99));
+        println!(
+            "DTDIAG {label} {name}: dt (cfl-scaled, solver units) sum p01 {:.3e} p50 {:.3e} p99 {:.3e}; capk p01 {:.3e} p50 {:.3e} p99 {:.3e}",
+            pct(&mut d, 0.01),
+            pct(&mut d, 0.5),
+            pct(&mut d, 0.99),
+            pct(&mut dcap, 0.01),
+            pct(&mut dcap, 0.5),
+            pct(&mut dcap, 0.99)
+        );
     }
     Ok(())
 }
@@ -158,7 +198,11 @@ fn main() -> Result<(), String> {
         // chord 10.5 in, tip 0, span 4.25 in, sweep 9.625 in, 0.1875 in thick) 1 in ahead of the base; Re_c of the Mach 0.8 flight at 1 036 m, the grid sized for Mach 3
         let d = 3.126;
         let blunt: f64 = value("--blunt-in").map_or(Ok(0.031), |v| v.parse()).map_err(|e| format!("--blunt-in: {e}"))?;
-        let nose = if blunt > 0.0 { bowshock_core::engine::body_grid::Family::Cone.blunted(13.25 / d, blunt / d).ok_or("no blunt cone")? } else { Nose::cone_fineness(13.25 / d) };
+        let nose = if blunt > 0.0 {
+            bowshock_core::engine::body_grid::Family::Cone.blunted(13.25 / d, blunt / d).ok_or("no blunt cone")?
+        } else {
+            Nose::cone_fineness(13.25 / d)
+        };
         let body = BaseBody::cylinder(Body { nose }, (97.25 - 13.25) / d);
         let fins = Fins3 {
             count: 3,

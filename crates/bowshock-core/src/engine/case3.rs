@@ -553,6 +553,11 @@ impl Case3 {
             self.numerics.implicit.ddadi = Some(1.0);
             self.numerics.implicit.lhs_dis_boost = DDADI_DIS_BOOST;
             self.numerics.implicit.cfl_max = DDADI_CFL_MAX;
+            // experiment (DESIGN3D item 60): `BOWSHOCK_DT_CAPK=<cfl_max>` takes the pseudo-time step with the `k` rate capped at `L_i + L_j` ([`DtMode::SumCapK`]) at that `cfl_max`
+            if let Some(cfl) = std::env::var("BOWSHOCK_DT_CAPK").ok().and_then(|v| v.parse::<f64>().ok()) {
+                self.numerics.implicit.dt_mode = DtMode::SumCapK;
+                self.numerics.implicit.cfl_max = cfl;
+            }
         }
         // the engine's `cfl_max` (100 with DDADI on the 3D domains; on the wedge 50 below Mach 1, 20 above) with the rollback controller of the runners
         // ([`Numerics3::cfl_control`]); the fixed rule of [`VISCOUS_3D_CFL_MAX`] is [`Case3::without_cfl_control`]
