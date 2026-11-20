@@ -1249,7 +1249,8 @@ fn body_grid3_inner(p: &Grid3Params) -> Result<Grid3, Error> {
                 let r = rn[j * (ni + 1) + i];
                 let di = if i < pl.i_le { pl.i_le - i } else { i.saturating_sub(pl.i_te) };
                 let dj = jj.saturating_sub(pl.j_tip);
-                let u_i = if i > pl.i_te { di as f64 / TE_TAPER_COLUMNS } else { di as f64 / 4.0 };
+                let le_cols = if i < pl.i_le { std::env::var("EXP_LE_TAPER").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(4.0) } else { 4.0 };
+                let u_i = if i > pl.i_te { di as f64 / TE_TAPER_COLUMNS } else { di as f64 / le_cols };
                 let u = u_i.max(dj as f64 / 4.0);
                 let (ic, jc) = (i.clamp(pl.i_le, pl.i_te), jj.min(pl.j_tip));
                 let h_f = h_at(ic, jc);
