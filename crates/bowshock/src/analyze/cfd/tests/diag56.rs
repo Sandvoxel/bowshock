@@ -57,6 +57,21 @@ fn hook(c: &mut solver::engine::case3::Case3) {
         }
         GRID_PARTS.lock().unwrap().push((g.ni, g.nj, g.nk, parts));
     }
+    // `DIAG_HASH=1`: FNV-1a of the node coordinates, part flags and solid boxes of every grid the run builds (compare two builds: a mesher change that must leave a rocket's grid alone)
+    if std::env::var_os("DIAG_HASH").is_some() {
+        let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut eat = |v: u64| {
+            for b in v.to_le_bytes() {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        [g.ni, g.nj, g.nk].iter().for_each(|&n| eat(n as u64));
+        g.x.iter().chain(&g.y).chain(&g.z).for_each(|v| eat(v.to_bits()));
+        g.part.iter().for_each(|&p| eat(p as u64));
+        g.solid.iter().for_each(|b| [b.i.start, b.i.end, b.j.start, b.j.end, b.k.start, b.k.end].iter().for_each(|&n| eat(n as u64)));
+        println!("HASH {} {}x{}x{} {h:016x}", std::env::var("DIAG_ROCKET").unwrap_or_default(), g.ni, g.nj, g.nk);
+    }
     if std::env::var_os("DIAG_GRID").is_some() {
         let g = solver::engine::grid3::body_grid3(&c.grid).expect("the grid builds");
         let label = std::env::var("DIAG_ROCKET").unwrap_or_default();
@@ -98,6 +113,19 @@ fn hook(c: &mut solver::engine::case3::Case3) {
             let (j, k) = (j as usize, k as usize);
             let xs: Vec<String> = (0..=g.ni).map(|i| format!("{:.4}", g.x[(k * (g.nj + 1) + j) * (g.ni + 1) + i])).collect();
             println!("ROW j {j} k {k} x nodes: {}", xs.join(" "));
+        }
+        // `DIAG_QUAD=i0,i1,j0,j1,k`: the (x, r) of the nodes of that window of the meridian plane k, one line per row j (top row first)
+        if let Ok(v) = std::env::var("DIAG_QUAD") {
+            let v: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect();
+            for j in (v[2]..=v[3]).rev() {
+                let nodes: Vec<String> = (v[0]..=v[1])
+                    .map(|i| {
+                        let n = (v[4] * (g.nj + 1) + j) * (g.ni + 1) + i;
+                        format!("{:.4},{:.4}", g.x[n], g.y[n].hypot(g.z[n]))
+                    })
+                    .collect();
+                println!("QUAD j {j}: {}", nodes.join("  "));
+            }
         }
     }
     if let Some(from) = env_f("DIAG_SNAP") {
