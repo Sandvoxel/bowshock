@@ -40,3 +40,65 @@ pub(super) fn decide(first: PolarPoint, second: PolarPoint) -> (PolarPoint, bool
     failed.quality = Quality::Failed;
     (failed, false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::{Drag, PointDetail};
+    use crate::engine::result::StopReason;
+
+    fn point(cd: f64, cp_base: f64, quality: Quality) -> PolarPoint {
+        PolarPoint {
+            mach: 0.5,
+            alpha_deg: 0.0,
+            drag: Drag { forebody_pressure: 0.0, friction: None, base: 0.0, base_modelled: false, fins: None, total: cd },
+            forces: None,
+            detail: PointDetail {
+                iterations: 100,
+                residual_drop_orders: 2.0,
+                stop_reason: StopReason::Settled,
+                cd_nose: 0.0,
+                cd_aft: Vec::new(),
+                cd_friction: 0.0,
+                cd_base_solver: 0.0,
+                cp_base,
+                wall: Vec::new(),
+                y_plus_max: f64::NAN,
+                farfield_dp: 0.0,
+                cfl_limit: Some(100.0),
+                rollbacks: Vec::new(),
+            },
+            quality,
+            warnings: Vec::new(),
+            cd_uncertainty: None,
+            cd_band: None,
+            x_cp_band: None,
+            field: None,
+            field3: None,
+        }
+    }
+
+    /// The Cancer Descending states of item 73: the wrong one (C_D 1.47, base C_p -1.02) is suspect, the right one (0.55, -0.12) and the points of the correct rockets are not.
+    #[test]
+    fn only_a_deep_base_suction_is_suspect() {
+        assert!(suspect(&point(1.47, -1.02, Quality::Stationary)));
+        assert!(suspect(&point(0.79, -0.37, Quality::Converged)));
+        for cp in [-0.12, -0.20, -0.239, 0.017, f64::NAN] {
+            assert!(!suspect(&point(0.55, cp, Quality::Stationary)), "{cp}");
+        }
+        assert!(!suspect(&point(1.47, -1.02, Quality::Failed)));
+    }
+
+    /// The second run replaces a wrong first; confirms a first that is real (still suspect, but reproduced); and a point neither run of which is usable is `Failed`.
+    #[test]
+    fn the_second_run_decides() {
+        let (kept, second) = decide(point(1.47, -1.02, Quality::Stationary), point(0.55, -0.12, Quality::Stationary));
+        assert!(second && kept.drag.total == 0.55 && matches!(kept.warnings[0], Warning::RestartedAtLowerCfl { cfl_to, .. } if cfl_to == RETRY_CFL_MAX));
+        let (kept, second) = decide(point(0.80, -0.34, Quality::Stationary), point(0.81, -0.33, Quality::Stationary));
+        assert!(second && kept.quality == Quality::Stationary);
+        let (kept, second) = decide(point(1.47, -1.02, Quality::Stationary), point(1.10, -0.60, Quality::Stationary));
+        assert!(!second && kept.quality == Quality::Failed);
+        let (kept, second) = decide(point(1.47, -1.02, Quality::Stationary), point(0.55, -0.12, Quality::Stalled));
+        assert!(!second && kept.quality == Quality::Failed);
+    }
+}
