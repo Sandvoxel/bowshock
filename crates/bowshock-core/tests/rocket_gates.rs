@@ -57,8 +57,37 @@ fn compare(lines: &mut Lines, gated: bool, viscous: bool, known: bool, id: &str,
 /// One reference point of a stability gate: Mach, `CN_alpha` (per rad, reference area of the data) and `x_cp` (calibers from the nose tip); NaN when the data has none.
 type StabPoint = (f64, f64, f64);
 
-/// What one gate compares: the rocket of each Mach number, the fin roll phase, the incidences run (warm-started in this order), the one the data's slope definition is taken at,
-/// and the bands.
+/// How a data set took its slope: the secant from zero incidence to one angle, or the least-squares line (free intercept) through the incidences `nodes` in degrees. The articles are
+/// symmetric, so the solver's `f(-a) = -f(a)` and `f(0) = 0`: only the positive incidences are run.
+#[derive(Clone, Copy)]
+enum Slope {
+    Secant(f64),
+    Fit(&'static [f64]),
+}
+
+impl Slope {
+    /// The slope per degree of the odd function whose values at the run incidences `alphas` are `at(i)`.
+    fn per_degree(self, alphas: &[f64], at: &dyn Fn(usize) -> f64) -> f64 {
+        let value = |a: f64| -> f64 {
+            if a == 0.0 {
+                return 0.0;
+            }
+            let i = alphas.iter().position(|&x| x == a.abs()).unwrap_or_else(|| panic!("incidence {a} is not run"));
+            a.signum() * at(i)
+        };
+        match self {
+            Slope::Secant(a) => value(a) / a,
+            Slope::Fit(nodes) => {
+                let n = nodes.len() as f64;
+                let (ma, mf) = (nodes.iter().sum::<f64>() / n, nodes.iter().map(|&a| value(a)).sum::<f64>() / n);
+                nodes.iter().map(|&a| (a - ma) * (value(a) - mf)).sum::<f64>() / nodes.iter().map(|&a| (a - ma) * (a - ma)).sum::<f64>()
+            }
+        }
+    }
+}
+
+/// What one gate compares: the rocket of each Mach number, the fin roll phase, the incidences run (warm-started in this order), how the data took its `CN_alpha` and its `x_cp`
+/// (`x_cp` of a fit is the ratio of the moment slope to the force slope, the incremental centre of pressure; of a secant `CM / CN` at that angle), and the bands.
 struct StabGate<'a> {
     id: &'static str,
     tag: &'static str,
@@ -66,7 +95,8 @@ struct StabGate<'a> {
     points: Vec<StabPoint>,
     phase: FinPhase,
     alphas: &'static [f64],
-    alpha_ref: f64,
+    cn: Slope,
+    xcp: Slope,
     mach_max: f64,
     cn_band: Band,
     xcp_abs: f64,
@@ -75,6 +105,9 @@ struct StabGate<'a> {
     /// Mach numbers whose `CN_alpha` / `x_cp` lines are documented discrepancies (`FAIL KNOWN DESIGN3D-X-item-55`, the band is not widened).
     known_cn: &'static [f64],
     known_xcp: &'static [f64],
+    /// Every incidence from the free stream instead of warm-started from the previous one: the Arcas short model at Mach 0.6 has two steady states at 4 degrees (CN 1.004 from a cold start,
+    /// 0.849 after 2 degrees; DESIGN3D item 67), and the data's angles are independent runs.
+    cold: bool,
 }
 
 fn run_stability(g: &StabGate) -> Lines {
@@ -86,7 +119,7 @@ fn run_stability(g: &StabGate) -> Lines {
         let mut s = Session::new(&cases[0])?;
         let mut out = Vec::new();
         for (k, c) in cases.iter().enumerate() {
-            out.push(s.run(c, k > 0)?);
+            out.push(s.run(c, k > 0 && !g.cold)?);
         }
         Ok((out, r.area_factor(), is_gate(tier_kind(), &cases[0])))
     });
@@ -96,36 +129,37 @@ fn run_stability(g: &StabGate) -> Lines {
         match run {
             Ok((sol, q, viscous)) => {
                 let gate = !g.info;
-                let k = g.alphas.iter().position(|&a| a == g.alpha_ref).expect("alpha_ref is one of the incidences");
-                let cna = |i: usize| q * sol[i].lift.cn / g.alphas[i].to_radians();
+                let cn_at = |i: usize| q * sol[i].lift.cn;
+                let m_at = |i: usize| sol[i].lift.cn * sol[i].lift.x_cp;
+                let rad = 180.0 / std::f64::consts::PI;
+                let cna = g.cn.per_degree(g.alphas, &cn_at) * rad;
+                // the secant `CM / CN` at an angle is the run's own `x_cp`; a fit is the moment slope over the force slope (the area factor cancels)
+                let xcp = match g.xcp {
+                    Slope::Secant(a) => sol[g.alphas.iter().position(|&x| x == a).expect("the secant incidence is run")].lift.x_cp,
+                    fit => fit.per_degree(g.alphas, &m_at) / fit.per_degree(g.alphas, &|i| sol[i].lift.cn),
+                };
                 if p.1.is_finite() {
-                    compare(&mut lines, gate, viscous, g.known_cn.contains(&p.0), g.id, &format!("{case}:cn_alpha"), cna(k), p.1, g.cn_band);
+                    compare(&mut lines, gate, viscous, g.known_cn.contains(&p.0), g.id, &format!("{case}:cn_alpha"), cna, p.1, g.cn_band);
                 }
                 if p.2.is_finite() {
-                    compare(
-                        &mut lines,
-                        gate,
-                        viscous,
-                        g.known_xcp.contains(&p.0),
-                        g.id,
-                        &format!("{case}:x_cp"),
-                        sol[k].lift.x_cp,
-                        p.2,
-                        Band::RelAbs(0.0, g.xcp_abs),
-                    );
+                    compare(&mut lines, gate, viscous, g.known_xcp.contains(&p.0), g.id, &format!("{case}:x_cp"), xcp, p.2, Band::RelAbs(0.0, g.xcp_abs));
                 }
-                let all: Vec<String> =
-                    g.alphas.iter().enumerate().map(|(i, a)| format!("CNa({a}) {:.2} x_cp {:.3} [{}]", cna(i), sol[i].lift.x_cp, sol[i].stop())).collect();
+                let all: Vec<String> = g
+                    .alphas
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| format!("CNa({a}) {:.2} x_cp({a}) {:.3} [{}]", cn_at(i) / a.to_radians(), sol[i].lift.x_cp, sol[i].stop()))
+                    .collect();
                 lines.info(
                     g.id,
                     &format!("{case}:slopes"),
                     &format!(
-                        "{}; data CNa {:.2} x_cp {:.3}; error {:+.1} % / {:+.3} cal",
+                        "{}; CNa {cna:.2} x_cp {xcp:.3}; data CNa {:.2} x_cp {:.3}; error {:+.1} % / {:+.3} cal",
                         all.join(", "),
                         p.1,
                         p.2,
-                        100.0 * (cna(k) / p.1 - 1.0),
-                        sol[k].lift.x_cp - p.2
+                        100.0 * (cna / p.1 - 1.0),
+                        xcp - p.2
                     ),
                 );
             }
@@ -146,10 +180,10 @@ fn arcas_points() -> Vec<StabPoint> {
 
 /// G-X1: the Arcas short model (l/d 18.2, tangent ogive, boattail with the reflex lip modelled as a plain boattail, double-wedge fins as G-F4) `CN_alpha` (secant 0 to 4 degrees, fins
 /// on, roll 0, `arcas_stab::SHORT_*`: figure readings, +-0.9 per rad) and `x_cp`, Lift half domain, fins in the pitch plane, free wake behind the base (the 1 in sting of the transonic tests is
-/// not modelled). Bands: `CN_alpha` 15 %, `x_cp` 0.35 cal (2 % of the length; the reading uncertainty is 0.09 to 0.27 cal). `FAIL KNOWN` (DESIGN3D item 55): `CN_alpha` at Mach 0.8 and
-/// `x_cp` at Mach 0.6-1.2: the data's own x_cp is that of a model whose stability is "almost neutral" at -2 to 2 degrees below Mach 0.9 (the report's words) and whose `CN` curve is
-/// non-linear at 0-4 degrees; the solver's `CN(2)` at Mach 0.6 / 0.8 is 8.1 / 4.8 per rad against 12.2 / 10.3 at 4 degrees (same non-linearity, stronger), so neither the secant nor the
-/// centre of pressure is defined the way the data's is.
+/// not modelled). Every incidence runs cold (`StabGate::cold`: the model has two steady states at 4 degrees at Mach 0.6 / 0.8, DESIGN3D item 67). Bands: `CN_alpha` 15 %, `x_cp` 0.35 cal (2 % of the
+/// length; the reading uncertainty is 0.09 to 0.27 cal). `FAIL KNOWN` (DESIGN3D item 67): `x_cp` at Mach 0.6-1.2. At Mach 0.6 / 0.8 the solver's CN is strongly non-linear at 0-4 degrees (its
+/// `CN(2)` is 0.283 / 0.170 against the data's 0.44 / 0.40, a model weakness of the fin lift at small incidence); at Mach 0.9-1.2 the response is linear and the `x_cp` error (+0.9 / -0.7 / -0.6 cal)
+/// is the model's own: the data's steep transonic rise of `x_cp` is not reproduced.
 #[test]
 #[ignore = "validation: lift tier on the GPU"]
 fn gate_x1_arcas_cn_alpha_and_xcp() {
@@ -161,13 +195,15 @@ fn gate_x1_arcas_cn_alpha_and_xcp() {
         points: arcas_points(),
         phase: FinPhase::InPlane,
         alphas: &[2.0, 4.0],
-        alpha_ref: 4.0,
+        cn: Slope::Secant(4.0),
+        xcp: Slope::Secant(4.0),
         mach_max: 2.96,
         cn_band: Band::Rel(0.15),
         xcp_abs: 0.35,
         info: false,
-        known_cn: &[0.8],
+        known_cn: &[],
         known_xcp: &[0.6, 0.8, 0.9, 1.0, 1.2],
+        cold: true,
     };
     run_stability(&g).finish();
 }
@@ -194,14 +230,21 @@ fn gate_x2_yuska_cn_alpha_and_xcp() {
         make,
         points: pts,
         phase,
-        alphas: &[2.0],
-        alpha_ref: 2.0,
+        alphas: &[4.0, 3.0, 2.0, 1.0],
+        cn: Slope::Fit(&[-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
+        xcp: Slope::Fit(&[-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
         mach_max: 3.47,
         cn_band: Band::Rel(0.13),
         xcp_abs: 0.25,
         info,
-        known_cn: if tag == "yuska-C-roll0" { &[2.38] } else { &[] },
+        // the fit of the report (-3..4 degrees) reads 0.5 to 1 % above the 2 degree secant: C Mach 2.00 / 2.38 / 3.17 and B Mach 2.38 sit at +13.5 % against the 13 % band (DESIGN3D item 67)
+        known_cn: match tag {
+            "yuska-C-roll0" => &[2.0, 2.38, 3.17],
+            "yuska-B-roll0" => &[2.38],
+            _ => &[],
+        },
         known_xcp: if tag.starts_with("yuska-A-roll") { &[3.47] } else { &[] },
+        cold: false,
     };
     // leaked so the closures live for the gates' `'static` borrow
     let (a, b, c): (&'static (dyn Fn(f64) -> Rocket + Sync), &'static (dyn Fn(f64) -> Rocket + Sync), &'static (dyn Fn(f64) -> Rocket + Sync)) =
@@ -236,14 +279,16 @@ fn gate_x3_grm_cn_alpha_and_xcp() {
         make: &make,
         points,
         phase: FinPhase::InPlane,
-        alphas: &[2.0, 4.0],
-        alpha_ref: 4.0,
+        alphas: &[4.0, 2.0],
+        cn: Slope::Secant(4.0),
+        xcp: Slope::Fit(&[0.0, 2.0, 4.0]),
         mach_max: 1.3,
         cn_band: Band::Rel(0.13),
         xcp_abs: 0.25,
         info: false,
         known_cn: &[0.85, 0.92, 0.94],
         known_xcp: &[],
+        cold: false,
     };
     run_stability(&g).finish();
 }
