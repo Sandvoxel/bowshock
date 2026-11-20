@@ -300,11 +300,12 @@ fn engine_name() -> &'static str {
     }
 }
 
-/// The Mach nodes and stability nodes of a solve: the app's, or `FLIGHTVAL_MACHS=0.8,2.0` (drag nodes only, no angle points) for a quick look.
+/// The Mach nodes and stability nodes of a solve: the app's, or `FLIGHTVAL_MACHS=0.8,2.0` and `FLIGHTVAL_LIFT_MACHS=0.8` (the drag nodes and the angle nodes, each empty when not given) for a quick look.
 fn job_nodes() -> (Vec<f64>, Vec<f64>) {
-    match std::env::var("FLIGHTVAL_MACHS") {
-        Ok(list) => (list.split(',').map(|m| m.trim().parse().unwrap()).collect(), Vec::new()),
-        Err(_) => (nodes((0.1, 3.0)).unwrap(), lift_nodes((0.1, 3.0)).unwrap()),
+    let list = |name: &str| std::env::var(name).ok().map(|l| l.split(',').map(|m| m.trim().parse().unwrap()).collect::<Vec<f64>>());
+    match (list("FLIGHTVAL_MACHS"), list("FLIGHTVAL_LIFT_MACHS")) {
+        (None, None) => (nodes((0.1, 3.0)).unwrap(), lift_nodes((0.1, 3.0)).unwrap()),
+        (drag, lift) => (drag.unwrap_or_default(), lift.unwrap_or_default()),
     }
 }
 
