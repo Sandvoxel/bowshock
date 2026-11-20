@@ -4,10 +4,13 @@
 
 pub mod anf;
 pub mod arcas;
+pub mod arcas_stab;
 pub mod base_drag;
 pub mod blunt_nose;
 pub mod fin_wave;
+pub mod grm;
 pub mod potential;
 pub mod shock_expansion;
 pub mod taylor_maccoll;
 pub mod tp2005;
+pub mod yuska;
