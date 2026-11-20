@@ -567,7 +567,7 @@ fn the_flat_plate_friction_reference_is_sane() {
 #[test]
 fn the_arcas_and_anf_data_are_wired() {
     assert_eq!(arcas::TRANSONIC.len() + arcas::SUPERSONIC.len(), 10);
-    assert_eq!(anf::CD0.len(), 5);
+    assert_eq!(anf::CD0.len(), 7);
     assert_eq!(anf::CD0_TUNNEL.len(), 2);
     let (body, scale) = arcas_body_spec().to_internal().expect("arcas body");
     assert!((scale.d_nose - arcas::BODY_DIAMETER).abs() < 1e-12);
