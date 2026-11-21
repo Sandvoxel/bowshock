@@ -10,6 +10,9 @@
 //!   engine) for the rockets of `FLIGHTVAL_CASES` (comma separated ids, default all) and stores them:
 //!   `tools/gpuq/gpuq submit --host any --name flightval -- env BOWSHOCK_ENGINE=3d FLIGHTVAL_SOLVE=1 FLIGHTVAL_OUT=out cargo nextest run --release -p bowshock flight_validation --run-ignored only --no-capture`.
 //!   Without it the stored tables are flown (seconds, CPU). A queue job sets `FLIGHTVAL_OUT=out` and copies the tables from `~/.cache/bowshock-gpuq/done/<id>/out`.
+//!   A stored table's `other` column (rail buttons and lugs, the build-up's) is re-derived from the fixture when it is loaded (`refresh_other`); the last columns of the printed
+//!   table read the geometric apogee as a barometric altimeter would (`indicated_above_pad`), as all six measured altitudes are barometric.
+//! * `gap` (ignored tests `apogee_gap*`, CPU) decomposes the gap to the measured apogees on the stored tables, DESIGN3D item 74.
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -26,6 +29,8 @@ use serde::Deserialize;
 
 use super::*;
 use crate::units::UnitSystem;
+
+mod gap;
 
 const IN: f64 = 0.0254;
 const FT: f64 = 0.3048;
@@ -394,20 +399,64 @@ fn flight_validation() {
     print_table(&fixtures(), &db);
 }
 
-fn load_table(f: &Fixture, engine: &str) -> Option<CfdTable> {
-    serde_json::from_slice(&std::fs::read(table_path(f, engine)).ok()?).ok()
+/// The table's `other` column (what the solver does not take: rail buttons and lugs, the build-up's) re-derived for the vehicle the fixture says now. The column is the
+/// build-up's whatever the solve was (`run::solve`: `built_up(plan, mach, altitude)`), so a stored table whose fixture got a rail guide afterwards is brought up to it
+/// without solving again.
+fn refresh_other(f: &Fixture, v: &Vehicle, table: &CfdTable) -> CfdTable {
+    let plan = plan_of(v).unwrap();
+    let mut t = table.clone();
+    for p in &mut t.points {
+        p.other = built_up(&plan, p.mach, f.site.altitude_ft * FT);
+        p.cd = p.friction + p.pressure + p.base + p.fins + p.other;
+    }
+    t
+}
+
+/// The altitude a barometric altimeter reads (above the pressure at the pad) when the rocket is `z` metres above the pad in the atmosphere of the site (the ISA lapse
+/// profile shifted to the ground temperature, hydrostatic): the ISA height of the pressure ratio.
+fn indicated_above_pad(f: &Fixture, z: f64) -> f64 {
+    let atm = bowshock_sim::Atmosphere::new(f.site.altitude_ft * FT, (f.site.temperature_f - 32.0) / 1.8 + 273.15);
+    let site = f.site.altitude_ft * FT;
+    let n = 2000;
+    let dz = z / n as f64;
+    // ln(p/p_pad) = - g/R integral dz / T
+    let mut ln_ratio = 0.0;
+    for i in 0..n {
+        let t = atm.at_msl(site + (i as f64 + 0.5) * dz).temperature;
+        ln_ratio -= 9.806_65 / 287.052_87 * dz / t;
+    }
+    // the ISA height difference of that pressure ratio, from the pad's ISA pressure at the site altitude
+    let isa = bowshock_sim::Atmosphere::standard();
+    let p_pad = isa.at_msl(site).pressure;
+    let p = p_pad * ln_ratio.exp();
+    let (mut lo, mut hi) = (site, site + 3.0 * z + 1000.0);
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if isa.at_msl(mid).pressure > p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi) - site
+}
+
+/// The stored table of `engine` for the fixture (see [`refresh_other`]).
+fn load_table(f: &Fixture, db: &MotorDb, engine: &str) -> Option<CfdTable> {
+    let table: CfdTable = serde_json::from_slice(&std::fs::read(table_path(f, engine)).ok()?).ok()?;
+    Some(refresh_other(f, &vehicle(f, db).ok()?, &table))
 }
 
 fn print_table(fixtures: &[Fixture], db: &MotorDb) {
-    println!("\n| rocket | motor | measured ft | data | peak Mach | 3D ft | 3D % | legacy ft | legacy % | build-up ft | build-up % | RASAero ft | RASAero % |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    let mut errs: [Vec<f64>; 4] = Default::default();
+    println!("\n| rocket | motor | measured ft | data | peak Mach | 3D ft | 3D % | legacy ft | legacy % | build-up ft | build-up % | RASAero ft | RASAero % | 3D read by a barometric altimeter ft | % |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    let mut errs: [Vec<f64>; 5] = Default::default();
     for f in fixtures {
         let v = vehicle(f, db).unwrap();
         let m = f.measured.apogee_ft;
         let err = |a: f64| 100.0 * (a - m) / m;
         let (build, mach) = fly(f, &v, None);
-        let cell = |engine: &str| match load_table(f, engine) {
+        let cell = |engine: &str| match load_table(f, db, engine) {
             Some(t) => {
                 let (a, _) = fly(f, &v, Some(&t));
                 (format!("{a:.0}"), format!("{:+.1}", err(a)), Some(err(a)))
@@ -416,11 +465,13 @@ fn print_table(fixtures: &[Fixture], db: &MotorDb) {
         };
         let (d3, e3, x3) = cell("3d");
         let (dl, el, xl) = cell("legacy");
-        for (k, x) in [x3, xl, Some(err(build)), Some(err(f.rasaero.table_ft))].into_iter().enumerate() {
+        // the altimeters of the flights are barometric: they read the pressure altitude above the pad, not the geometric height the flight gives
+        let baro = load_table(f, db, "3d").map(|t| indicated_above_pad(f, fly(f, &v, Some(&t)).0 * FT) / FT);
+        for (k, x) in [x3, xl, Some(err(build)), Some(err(f.rasaero.table_ft)), baro.map(err)].into_iter().enumerate() {
             errs[k].extend(x);
         }
         println!(
-            "| {} | {} {} | {:.0} | {} | {:.2} | {d3} | {e3} | {dl} | {el} | {build:.0} | {:+.1} | {:.0} | {:+.1} |",
+            "| {} | {} {} | {:.0} | {} | {:.2} | {d3} | {e3} | {dl} | {el} | {build:.0} | {:+.1} | {:.0} | {:+.1} | {} | {} |",
             f.name,
             f.motor.manufacturer,
             f.motor.designation,
@@ -429,10 +480,12 @@ fn print_table(fixtures: &[Fixture], db: &MotorDb) {
             mach,
             err(build),
             f.rasaero.table_ft,
-            err(f.rasaero.table_ft)
+            err(f.rasaero.table_ft),
+            baro.map_or("-".into(), |b| format!("{b:.0}")),
+            baro.map_or("-".into(), |b| format!("{:+.1}", err(b)))
         );
     }
-    for (name, e) in ["3D engine", "legacy engine", "build-up", "RASAero II"].iter().zip(&errs) {
+    for (name, e) in ["3D engine", "legacy engine", "build-up", "RASAero II", "3D engine read by a barometric altimeter"].iter().zip(&errs) {
         if e.is_empty() {
             continue;
         }

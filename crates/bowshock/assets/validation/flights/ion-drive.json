@@ -32,7 +32,10 @@
  },
  "roughness_in": 0.0,
  "nozzle_diameter_in": 0.0,
- "rail_guide": null,
+ "rail_guide": {
+  "diameter": 0.375,
+  "height": 0.3438
+ },
  "launch_weight_lb": 11.37,
  "cg_in": 39.5,
  "motor": {
