@@ -116,10 +116,6 @@ fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/validation/flights")
 }
 
-fn probe_env(name: &str) -> Option<f64> {
-    std::env::var(name).ok().and_then(|v| v.parse().ok())
-}
-
 fn fixtures() -> Vec<Fixture> {
     let mut paths: Vec<_> =
         std::fs::read_dir(dir()).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
@@ -153,9 +149,15 @@ fn fixtures() -> Vec<Fixture> {
             f.fins.section = s;
         }
     }
-    // `FLIGHTVAL_ROUGH_UM=60` gives every rocket that sand-grain roughness (um) instead of its file's
-    if let Some(um) = probe_env("FLIGHTVAL_ROUGH_UM") {
-        all.iter_mut().for_each(|f| f.roughness_in = um * 1e-6 / IN);
+    // The validation flies every rocket at the app's default finish (`Finish::default`, regular paint, 60 um): the files' own `Surface` setting (`roughness_in`, kept for
+    // reference: `Smooth (Zero Roughness)` for five, `Smooth Paint` for Don't Debate This) says what RASAero II was told, not what the rocket was. `FLIGHTVAL_ROUGH_UM=file`
+    // flies the files' setting, a number that roughness (um).
+    match std::env::var("FLIGHTVAL_ROUGH_UM").ok().as_deref() {
+        Some("file") => {}
+        other => {
+            let um = other.and_then(|v| v.parse().ok()).unwrap_or(bowshock_model::Finish::default().roughness() * 1e6);
+            all.iter_mut().for_each(|f| f.roughness_in = um * 1e-6 / IN);
+        }
     }
     match std::env::var("FLIGHTVAL_CASES") {
         Ok(list) => {
@@ -293,9 +295,14 @@ fn fly(f: &Fixture, v: &Vehicle, table: Option<&CfdTable>) -> (f64, f64) {
     (s.apogee / FT, s.max_mach)
 }
 
-/// `FLIGHTVAL_TAG=60um` names the tables `<id>.<engine>-60um.json` (a variant solved beside the stored ones, e.g. with `FLIGHTVAL_ROUGH_UM=60`).
+/// The stored tables are at the headline finish (`<id>.<engine>.json`); `FLIGHTVAL_ROUGH_UM=file` names them `<id>.<engine>-file.json` (the files' finish), and `FLIGHTVAL_TAG=x`
+/// `<id>.<engine>-x.json` for any other variant solved beside them.
 fn table_tag() -> String {
-    std::env::var("FLIGHTVAL_TAG").map(|t| format!("-{t}")).unwrap_or_default()
+    match (std::env::var("FLIGHTVAL_TAG"), std::env::var("FLIGHTVAL_ROUGH_UM")) {
+        (Ok(t), _) => format!("-{t}"),
+        (_, Ok(v)) if v == "file" => "-file".into(),
+        _ => String::new(),
+    }
 }
 
 fn table_path(f: &Fixture, engine: &str) -> PathBuf {

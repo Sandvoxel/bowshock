@@ -2,7 +2,8 @@
 //! `apogee_gap` (baseline against RASAero II's own flight, rail guide, motor and masses, exhaust, wind and site), `apogee_gap_finish` (surface finish by friction scaling),
 //! `apogee_gap_baro` (the barometric altimeter's reading), `apogee_gap_parts` (the zero-lift drag parts against the build-up), `apogee_gap_mass` (mass conventions),
 //! `apogee_gap_nodes` (where on the Mach axis the drag matters). `RASAERO_MOTORS=<dir>` (files `<id>.eng` taken by hand from the RASAero II motor file) adds the flight on RASAero's
-//! thrust curve of the same designation. The drag factors of boost and coast that reproduce RASAero II's flight (item 74) were fitted with a six-line local hook in the flight's
+//! thrust curve of the same designation. The tests were written on the polished tables and read the stored tables as the files' finish: run them with `FLIGHTVAL_ROUGH_UM=file`
+//! (the headline tables are at the app's default finish, 60 um). The drag factors of boost and coast that reproduce RASAero II's flight (item 74) were fitted with a six-line local hook in the flight's
 //! drag (a factor while the motor burns and while it coasts), not kept.
 
 use bowshock_sim::EventKind;
