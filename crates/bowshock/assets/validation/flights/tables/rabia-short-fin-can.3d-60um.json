@@ -1,0 +1,211 @@
+{
+  "key": 10062885250653887311,
+  "geometry": 6337007200065672101,
+  "stage": 1,
+  "solved_at": 1795237340,
+  "solve_seconds": 626.102833951,
+  "backend": "GPU (Luma)",
+  "fallback": null,
+  "altitude": 1036.3200000000002,
+  "notes": [
+    "Lugs and rail buttons are not in the solved geometry: their drag comes from the build-up.",
+    "Walls solved with the parts' finish: 60 um sand-grain roughness.",
+    "Mach 1.30 converged after 2 restarts at a lower CFL limit (100.0 to 49.0): the run first went unstable, so the point is from different numerics than the others.",
+    "Mach 2.30 converged after a restart at a lower CFL limit (100.0 to 70.0): the run first went unstable, so the point is from different numerics than the others.",
+    "Mach 3.00 converged after a restart at a lower CFL limit (100.0 to 70.0): the run first went unstable, so the point is from different numerics than the others."
+  ],
+  "points": [
+    {
+      "mach": 0.1,
+      "cd": 0.759996122177119,
+      "friction": 0.43421947662691285,
+      "pressure": 0.009170130757584341,
+      "base": 0.09250402003629826,
+      "fins": 0.19483841730004903,
+      "other": 0.02926407745627444,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.5,
+      "cd": 0.7061212065013942,
+      "friction": 0.38987607004273495,
+      "pressure": 0.005503621161787761,
+      "base": 0.09451972012842827,
+      "fins": 0.17932720913470768,
+      "other": 0.036894586033735514,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.8,
+      "cd": 0.7100035898663368,
+      "friction": 0.3705937153080513,
+      "pressure": 0.007425675894702751,
+      "base": 0.09991168365002048,
+      "fins": 0.18233533994894358,
+      "other": 0.04973717506461877,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 0.9,
+      "cd": 0.7733761943554596,
+      "friction": 0.36080705090179815,
+      "pressure": 0.017598676421853313,
+      "base": 0.11414705320650095,
+      "fins": 0.22478257655751588,
+      "other": 0.056040837267791244,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.0,
+      "cd": 0.9445517269243293,
+      "friction": 0.352739195833133,
+      "pressure": 0.07124655118599943,
+      "base": 0.19512041865667965,
+      "fins": 0.2614647188608685,
+      "other": 0.06398084238764862,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.1,
+      "cd": 0.9192849482936502,
+      "friction": 0.345600539957531,
+      "pressure": 0.08037096293619478,
+      "base": 0.18141348534309604,
+      "fins": 0.23871000514169288,
+      "other": 0.07318995491513544,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 1.3,
+      "cd": 0.8703314969606446,
+      "friction": 0.3291675177297378,
+      "pressure": 0.06941180515107442,
+      "base": 0.17728414304812132,
+      "fins": 0.21258807070211302,
+      "other": 0.08187996032959799,
+      "quality": "Stationary",
+      "restart": {
+        "rollbacks": 2,
+        "cfl_from": 100.0,
+        "cfl_to": 49.0
+      }
+    },
+    {
+      "mach": 1.7,
+      "cd": 0.7698966894758494,
+      "friction": 0.2947450601046134,
+      "pressure": 0.05919651501965355,
+      "base": 0.16432261187855918,
+      "fins": 0.1760685601568196,
+      "other": 0.07556394231620364,
+      "quality": "Stationary"
+    },
+    {
+      "mach": 2.3,
+      "cd": 0.6444816656113255,
+      "friction": 0.24531418793356474,
+      "pressure": 0.0510393602382713,
+      "base": 0.13006788278364922,
+      "fins": 0.1464471373387246,
+      "other": 0.07161309731711557,
+      "quality": "Stationary",
+      "restart": {
+        "rollbacks": 1,
+        "cfl_from": 100.0,
+        "cfl_to": 70.0
+      }
+    },
+    {
+      "mach": 3.0,
+      "cd": 0.5349135728116676,
+      "friction": 0.19661037734599046,
+      "pressure": 0.04545034165566395,
+      "base": 0.09596244779087915,
+      "fins": 0.12653806412469953,
+      "other": 0.07035234189443454,
+      "quality": "Stationary",
+      "restart": {
+        "rollbacks": 1,
+        "cfl_from": 100.0,
+        "cfl_to": 70.0
+      }
+    }
+  ],
+  "grid": "Coarse",
+  "lift": {
+    "key": 11998517870816238358,
+    "solved_at": 1795237340,
+    "solve_seconds": 626.102833951,
+    "backend": "GPU (Luma)",
+    "points": [
+      {
+        "mach": 0.5,
+        "alpha_deg": 2.0,
+        "cn": 0.7732231928044538,
+        "x_cp": 1.941452145681405,
+        "cm": -18.52708793178527,
+        "quality": "Stationary"
+      },
+      {
+        "mach": 0.8,
+        "alpha_deg": 2.0,
+        "cn": 0.8837637246973958,
+        "x_cp": 1.9722217453803512,
+        "cm": -21.51134247805073,
+        "quality": "Stationary"
+      },
+      {
+        "mach": 0.95,
+        "alpha_deg": 2.0,
+        "cn": 1.0129113026510248,
+        "x_cp": 1.9895593707164592,
+        "cm": -24.87161125927433,
+        "quality": "Stationary"
+      },
+      {
+        "mach": 1.1,
+        "alpha_deg": 2.0,
+        "cn": 1.0804971607600142,
+        "x_cp": 1.991810775387384,
+        "cm": -26.5611765060261,
+        "quality": "Stationary"
+      },
+      {
+        "mach": 1.3,
+        "alpha_deg": 2.0,
+        "cn": 0.8975281552119779,
+        "x_cp": 1.9929065642312234,
+        "cm": -22.07550356804348,
+        "quality": "Stationary"
+      },
+      {
+        "mach": 1.7,
+        "alpha_deg": 2.0,
+        "cn": 0.7092189205435655,
+        "x_cp": 1.9773076138314367,
+        "cm": -17.30733309634074,
+        "quality": "Stationary"
+      },
+      {
+        "mach": 2.3,
+        "alpha_deg": 2.0,
+        "cn": 0.5927389000318435,
+        "x_cp": 1.8809428899763299,
+        "cm": -13.759879787071885,
+        "quality": "Stationary"
+      },
+      {
+        "mach": 3.0,
+        "alpha_deg": 2.0,
+        "cn": 0.45778784574216763,
+        "x_cp": 1.7600563989668816,
+        "cm": -9.94412197649848,
+        "quality": "Stationary"
+      }
+    ],
+    "notes": [],
+    "bands": true
+  },
+  "bands": true,
+  "boattail": false
+}
