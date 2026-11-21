@@ -2,7 +2,8 @@
 //! `apogee_gap` (baseline against RASAero II's own flight, rail guide, motor and masses, exhaust, wind and site), `apogee_gap_finish` (surface finish by friction scaling),
 //! `apogee_gap_baro` (the barometric altimeter's reading), `apogee_gap_parts` (the zero-lift drag parts against the build-up), `apogee_gap_mass` (mass conventions),
 //! `apogee_gap_nodes` (where on the Mach axis the drag matters). `RASAERO_MOTORS=<dir>` (files `<id>.eng` taken by hand from the RASAero II motor file) adds the flight on RASAero's
-//! thrust curve of the same designation. The drag factors of boost and coast that reproduce RASAero II's flight (item 74) were fitted with a six-line local hook in the flight's
+//! thrust curve of the same designation. The tests were written on the polished tables and read the stored tables as the files' finish: run them with `FLIGHTVAL_ROUGH_UM=file`
+//! (the headline tables are at the app's default finish, 60 um). The drag factors of boost and coast that reproduce RASAero II's flight (item 74) were fitted with a six-line local hook in the flight's
 //! drag (a factor while the motor burns and while it coasts), not kept.
 
 use bowshock_sim::EventKind;
@@ -457,5 +458,75 @@ fn apogee_gap_nodes() {
         let whole = scaled(None);
         let nodes: Vec<String> = (0..t3.points.len()).map(|i| format!("{:.1}: {:+.0}", t3.points[i].mach, scaled(Some(i)))).collect();
         println!("| {} | {whole:+.0} | {} |", f.id, nodes.join(", "));
+    }
+}
+
+#[test]
+#[ignore = "diagnosis: the 3D table's base drag against Hoerner's base-drag correlation, and the drag the measured apogee asks for"]
+fn apogee_gap_base() {
+    let db = MotorDb::bundled();
+    let atm = bowshock_sim::Atmosphere::standard();
+    println!("\n## (l) base drag of the 3D table against correlations (C_D on the reference area): Hoerner's turbulent-layer base drag C_Db = 0.029 / sqrt(C_Df) (C_Df: the skin-friction drag of the body ahead of the base on the base area), the build-up's / Fleeman's 0.12 + 0.13 M^2 (Mach <= 1)");
+    println!("| rocket | M | L/D | delta/D at the base | 3D friction | 3D base | implied base Cp | Hoerner base | Fleeman base | build-up base | 3D fins | build-up fins |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for f in fixtures() {
+        let v = vehicle(&f, &db).unwrap();
+        let t3 = load_table(&f, &db, "3d").unwrap();
+        let aref = std::f64::consts::PI * (0.5 * v.reference_diameter).powi(2);
+        let last = v.body.last().unwrap();
+        let abase = std::f64::consts::PI * last.aft_radius.powi(2);
+        let len = v.length();
+        for m in [0.3, 0.6, 0.8] {
+            let p = crate::analyze::cfd::interp::at(&t3, m);
+            let air = atm.at_agl(t3.altitude);
+            let re_l = m * air.speed_of_sound / air.kinematic_viscosity() * len;
+            let delta = 0.37 * len / re_l.powf(0.2);
+            let cdf_base = p.friction * aref / abase;
+            let hoerner = 0.029 / cdf_base.sqrt() * abase / aref;
+            let fleeman = (0.12 + 0.13 * m * m) * abase / aref;
+            let bu = vs_mach(&v, 0.0, (m, m), 1, 0.0, &atm, t3.altitude)[0].drag;
+            println!(
+                "| {} | {m} | {:.1} | {:.3} | {:.4} | {:.4} | {:.3} | {hoerner:.4} | {fleeman:.4} | {:.4} | {:.4} | {:.4} |",
+                f.id,
+                len / v.reference_diameter,
+                delta / v.reference_diameter,
+                p.friction,
+                p.base,
+                -p.base * aref / abase,
+                bu.base,
+                p.fins,
+                bu.fins
+            );
+        }
+    }
+    println!("\n## (m) the drag the measured apogee asks for: the uniform factor k on the 3D table (polished, as stored) and the C_D it adds at Mach 0.6, next to the table's parts there");
+    println!("| rocket | k to the measured | added C_D at M 0.6 | 3D friction | pressure | base | fins | other |");
+    println!("|---|---|---|---|---|---|---|---|");
+    for f in fixtures() {
+        let v = vehicle(&f, &db).unwrap();
+        let t3 = load_table(&f, &db, "3d").unwrap();
+        let at = |k: f64| {
+            let mut t = t3.clone();
+            for p in &mut t.points {
+                p.friction *= k;
+                p.pressure *= k;
+                p.base *= k;
+                p.fins *= k;
+                p.other *= k;
+            }
+            apogee(&f, &v, Some(&t))
+        };
+        let (mut lo, mut hi) = (0.5, 3.0);
+        for _ in 0..30 {
+            let mid = 0.5 * (lo + hi);
+            if at(mid) > f.measured.apogee_ft {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let k = 0.5 * (lo + hi);
+        let p = crate::analyze::cfd::interp::at(&t3, 0.6);
+        println!("| {} | {k:.3} | {:+.3} | {:.3} | {:.4} | {:.3} | {:.3} | {:.3} |", f.id, (k - 1.0) * p.cd, p.friction, p.pressure, p.base, p.fins, p.other);
     }
 }

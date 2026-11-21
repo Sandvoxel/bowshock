@@ -36,3 +36,10 @@ Six public rockets with a measured apogee, full geometry and a catalogue motor, 
 * Don't Debate This: the file's fin leading-edge radius (0.025 in) is not in the fixture.
 * The motors are the same as RASAero II's motor file (`J570W`, `M1297W`, `N5800-CS`, `K550W`, `L730`, `M1850GG`): same total impulse within 0.2 % and same burn time, except Torrent's, where the fixture's file (the thrust curve of ThrustCurve.org simfile 5f4294d20002e9000000010a) burns 3.30 s against 3.20 s, has the same propellant mass (3.375 kg) and a lighter case (4.5 kg total against 5.851 kg), which does not change the flight (the dry mass follows from the launch weight less the motor, so the burnout mass is the launch weight less the propellant either way).
 
+## Surface finish and the stored tables
+
+**The validation flies every rocket at the app's default finish** (`Finish::default`, regular paint, 60 um), one rule in `fixtures()`; the `roughness_in` of a fixture is the example file's own `Surface` setting, kept for reference: `Smooth (Zero Roughness)` (0) for Byrum, Cancer Descending, Ion Drive, Rabia and Torrent, `Smooth Paint` (with `Turbulence` True) for Don't Debate This, which the app maps to 20 um (`Finish::SmoothPaint`; RASAero II's own value is 6.35 um). That is what RASAero II was told, not what the rockets were.
+
+* `tables/<id>.3d.json`, `tables/<id>.legacy.json`: solved at 60 um (headline). `tables/<id>.3d-file.json`, `tables/<id>.legacy-file.json`: solved at the files' finish; fly them with `FLIGHTVAL_ROUGH_UM=file` (the sensitivity row).
+* `FLIGHTVAL_ROUGH_UM=<um>` gives every rocket that roughness; `FLIGHTVAL_SOLVE=1` then writes `<id>.<engine>.json` (`-file` for `file`, `-<tag>` with `FLIGHTVAL_TAG=<tag>`). The legacy engine is `BOWSHOCK_ENGINE=legacy` (an unset one is the 3D engine).
+* The printed table has the geometric apogee against the measured; its second table reads every column, RASAero II's included, as a barometric altimeter would (all six measured altitudes are barometric). DESIGN3D items 56 and 75 have both bases and the sensitivity rows.
