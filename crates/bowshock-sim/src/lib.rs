@@ -47,7 +47,7 @@ pub use roll::{pitch_frequency, roll_resonance, RollResonance};
 pub use staging::{has_altitude_trigger, staging_times, Timeline};
 pub use vehicle::{
     BodyKind, BodySegment, FinCrossSection, FinPlanform, FinSet, Label, Labels, MassProps, NoseShape, Protuberance, StageMass, StageMotor, ThrustCurve, Timing,
-    Trigger, TubeFinSet, Vehicle,
+    Trigger, TubeFinSet, Vehicle, NOZZLE_EXIT_FRACTION, NOZZLE_EXIT_MACH,
 };
 
 /// Standard gravity (m/s^2).

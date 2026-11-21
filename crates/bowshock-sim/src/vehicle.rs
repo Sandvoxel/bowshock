@@ -383,7 +383,29 @@ impl ThrustCurve {
     pub fn cg(&self) -> f64 {
         0.5 * self.length
     }
+
+    /// Estimated diameter of the nozzle exit (m); 0 for a curve without thrust or case diameter. The motor files (RASP, RockSim) carry no nozzle dimensions, so the exit is
+    /// derived: the static thrust is `F = p_e A_e (1 + gamma M_e^2) - p_sl A_e` and a hobby nozzle is tuned to sea level (`p_e = p_sl`), so
+    /// `A_e = F / (gamma M_e^2 p_sl)` at the average thrust (impulse over burn time) and the exit Mach number [`NOZZLE_EXIT_MACH`], kept between [`NOZZLE_EXIT_FRACTION`]
+    /// of the case diameter. This is the area the exhaust covers at the base (the rest of the aft closure is base area the wake acts on, not the whole case).
+    pub fn nozzle_exit_diameter(&self) -> f64 {
+        const P_SEA_LEVEL: f64 = 101_325.0;
+        const GAMMA: f64 = 1.4;
+        let burn = self.burn_time();
+        let thrust = if burn > 0.0 { self.total_impulse() / burn } else { 0.0 };
+        if !(thrust.is_finite() && thrust > 0.0 && self.diameter > 0.0) {
+            return 0.0;
+        }
+        let matched = (4.0 * thrust / (std::f64::consts::PI * GAMMA * NOZZLE_EXIT_MACH * NOZZLE_EXIT_MACH * P_SEA_LEVEL)).sqrt();
+        matched.clamp(NOZZLE_EXIT_FRACTION.0 * self.diameter, NOZZLE_EXIT_FRACTION.1 * self.diameter)
+    }
 }
+
+/// Mach number of the exhaust at the nozzle exit of a hobby motor: its nozzle expands the exhaust to about 2.5 (expansion ratio 6-8, `gamma` 1.2 in the real gas).
+pub const NOZZLE_EXIT_MACH: f64 = 2.5;
+/// The nozzle exits of the commercial 29-98 mm motor cases are 0.5-0.8 of the case diameter (the nozzle exit diameters RASAero II's example rockets give: 0.55 of a 75 mm case, 0.56 of a
+/// 54 mm one, 0.64 of a 98 mm one).
+pub const NOZZLE_EXIT_FRACTION: (f64, f64) = (0.5, 0.8);
 
 /// Motor installed in a stage.
 #[derive(Clone, Debug, PartialEq)]

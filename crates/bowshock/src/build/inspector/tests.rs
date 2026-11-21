@@ -151,7 +151,8 @@ fn a_drag_override_starts_from_the_build_up_is_one_step_and_flies() {
     assert_eq!(fx.app.ctx().doc.undo_label(), Some("Override drag"));
     let seeded = fx.rocket().part(tube).unwrap().cd_override.unwrap();
     assert!(seeded > 0.0 && seeded < 0.4 && seeded != 0.5, "seeded from the build-up: {seeded}");
-    assert!((apogee(&fx) - plain).abs() < 0.5, "the computed value flies as before");
+    // a constant Cd of Mach 0.3 with the motor off, against the build-up flown through the whole Mach range and the burn (whose base drag the exhaust takes the nozzle exit out of)
+    assert!((apogee(&fx) - plain).abs() < 0.01 * plain, "the computed value flies as before: {plain} -> {}", apogee(&fx));
     fx.send(Message::Edit(Field::CdOverride, 0.4, false));
     assert!(apogee(&fx) < plain);
     fx.send(Message::ClearOverride(Field::CdOverride));

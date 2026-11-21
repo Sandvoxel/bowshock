@@ -38,22 +38,27 @@ pub(crate) fn lug_drag(re_per_m: f64, d_in: f64, inner_area: f64, frontal: f64, 
     (tube_cd * inner_area + 0.7 * (stag + base) * frontal) / a_ref
 }
 
-/// Rail button drag: cylinder drag (Gowen & Perkins, NACA TN 2960 fig. 7) at the
-/// mean Mach number inside the boundary layer at the button's station.
+/// Rail button drag: cylinder drag (Gowen & Perkins, NACA TN 2960 fig. 7) at the Mach number of the air inside the boundary layer at the button's station.
+///
+/// The layer is the turbulent one of the rest of the build-up: thickness `delta = 0.37 x / Re_x^0.2` (Schlichting) and its 1/7 power-law velocity profile `u/U = (y/delta)^(1/7)`.
+/// The button stands in it from the wall to its height `h`, so it sees the mean dynamic pressure `q/q_inf = (1/h) integral (u/U)^2 dy` (`7/9 (h/delta)^(2/7)` for a button inside the
+/// layer) and the Mach number `M sqrt(q/q_inf)`. (The formula had a linear profile, a laminar-like shape inside the turbulent thickness: a button half the layer thick then saw 6 % of
+/// the free-stream dynamic pressure instead of 64 %, and the transonic rise of the cylinder drag came at Mach 3-4. RASAero II models its rail guides as cylinders in the flow: its drag plot rises from Mach 0.8.)
 pub(super) fn button_drag(mach: f64, re_per_m: f64, station: f64, height: f64, diameter: f64, stag: f64, a_ref: f64) -> f64 {
     const DOMAIN: [f64; 12] = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.6, 2.0, 2.8, 100.0];
     const RANGE: [f64; 12] = [1.2, 1.22, 1.25, 1.3, 1.4, 1.5, 1.6, 2.1, 1.5, 1.45, 1.33, 1.33];
     let ref_area = height * diameter;
-    let mul = if mach > 1e-9 && re_per_m > 0.0 && station > 0.0 {
+    let mul = if mach > 1e-9 && re_per_m > 0.0 && station > 0.0 && height > 0.0 {
         let rex = re_per_m * station;
         let del = 0.37 * station / rex.powf(0.2);
-        let m_eff = if height > del { (height - 0.5 * del) * mach / height } else { height / 2.0 / del * mach };
+        let q_ratio = if height > del { (7.0 / 9.0 * del + (height - del)) / height } else { 7.0 / 9.0 * (height / del).powf(2.0 / 7.0) };
+        let m_eff = mach * q_ratio.sqrt();
         let i = DOMAIN.partition_point(|&d| d <= m_eff).clamp(1, DOMAIN.len() - 1);
         let t = ((m_eff - DOMAIN[i - 1]) / (DOMAIN[i] - DOMAIN[i - 1])).clamp(0.0, 1.0);
-        let cd = RANGE[i - 1] + (RANGE[i] - RANGE[i - 1]) * t;
-        cd * m_eff * m_eff / (mach * mach)
+        (RANGE[i - 1] + (RANGE[i] - RANGE[i - 1]) * t) * q_ratio
     } else {
-        8.786_395_072_609_939E-4
+        // no flow to measure the layer by: the cylinder in still air
+        RANGE[0]
     };
     mul * stag * ref_area / a_ref
 }

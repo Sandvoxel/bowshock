@@ -368,10 +368,13 @@ fn the_jet_is_the_motors_average_thrust_in_the_solvers_air_model() {
     let f = jet.exit_pressure_pa * area * (1.0 + 1.4 * jet.exit_mach * jet.exit_mach) - 101_325.0 * area;
     assert!((f / thrust - 1.0).abs() < 1e-9, "{f} N against {thrust} N");
     // between the fractions of the case and inside the base
-    assert!(jet.exit_diameter >= JET_EXIT_FRACTION.0 * motor.diameter - 1e-12 && jet.exit_diameter <= JET_EXIT_FRACTION.1 * motor.diameter + 1e-12);
+    assert!(
+        jet.exit_diameter >= bowshock_sim::NOZZLE_EXIT_FRACTION.0 * motor.diameter - 1e-12
+            && jet.exit_diameter <= bowshock_sim::NOZZLE_EXIT_FRACTION.1 * motor.diameter + 1e-12
+    );
     assert!(jet.validate(2.0 * vehicle.body.last().unwrap().aft_radius).is_ok());
     // the motor is not part of the geometry: the drag table stays fresh when it changes
-    assert_eq!(plan.jet().map(|j| j.exit_mach), Some(JET_EXIT_MACH));
+    assert_eq!(plan.jet().map(|j| j.exit_mach), Some(bowshock_sim::NOZZLE_EXIT_MACH));
     let mut other = vehicle.clone();
     other.stages[0].motor.as_mut().unwrap().curve.points.iter_mut().for_each(|p| p.1 *= 2.0);
     let again = super::super::plan(&rocket, &other, UnitSystem::default()).unwrap();
