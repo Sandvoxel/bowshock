@@ -461,30 +461,28 @@ fn load_table(f: &Fixture, db: &MotorDb, engine: &str) -> Option<CfdTable> {
 }
 
 fn print_table(fixtures: &[Fixture], db: &MotorDb) {
-    println!("\n| rocket | motor | measured ft | data | peak Mach | 3D ft | 3D % | legacy ft | legacy % | build-up ft | build-up % | RASAero ft | RASAero % | 3D read by a barometric altimeter ft | % |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
-    let mut errs: [Vec<f64>; 5] = Default::default();
+    println!("\n| rocket | motor | measured ft | data | peak Mach | 3D ft | 3D % | legacy ft | legacy % | build-up ft | build-up % | RASAero ft | RASAero % |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    // the second table reads every prediction as a barometric altimeter would (all six measured altitudes are barometric: they are the pressure altitude above the pad, not the
+    // geometric height the flight gives), RASAero II's included
+    let mut baro_rows = Vec::new();
+    let mut errs: [Vec<f64>; 8] = Default::default();
     for f in fixtures {
         let v = vehicle(f, db).unwrap();
         let m = f.measured.apogee_ft;
         let err = |a: f64| 100.0 * (a - m) / m;
         let (build, mach) = fly(f, &v, None);
-        let cell = |engine: &str| match load_table(f, db, engine) {
-            Some(t) => {
-                let (a, _) = fly(f, &v, Some(&t));
-                (format!("{a:.0}"), format!("{:+.1}", err(a)), Some(err(a)))
-            }
-            None => ("-".into(), "-".into(), None),
-        };
-        let (d3, e3, x3) = cell("3d");
-        let (dl, el, xl) = cell("legacy");
-        // the altimeters of the flights are barometric: they read the pressure altitude above the pad, not the geometric height the flight gives
-        let baro = load_table(f, db, "3d").map(|t| indicated_above_pad(f, fly(f, &v, Some(&t)).0 * FT) / FT);
-        for (k, x) in [x3, xl, Some(err(build)), Some(err(f.rasaero.table_ft)), baro.map(err)].into_iter().enumerate() {
-            errs[k].extend(x);
+        let flown = |engine: &str| load_table(f, db, engine).map(|t| fly(f, &v, Some(&t)).0);
+        let (a3, al) = (flown("3d"), flown("legacy"));
+        let show = |a: Option<f64>| a.map_or(("-".into(), "-".into()), |a| (format!("{a:.0}"), format!("{:+.1}", err(a))));
+        let ((d3, e3), (dl, el)) = (show(a3), show(al));
+        let geometric = [a3, al, Some(build), Some(f.rasaero.table_ft)];
+        let read = geometric.map(|a| a.map(|a| indicated_above_pad(f, a * FT) / FT));
+        for (k, a) in geometric.iter().chain(&read).enumerate() {
+            errs[k].extend(a.map(err));
         }
         println!(
-            "| {} | {} {} | {:.0} | {} | {:.2} | {d3} | {e3} | {dl} | {el} | {build:.0} | {:+.1} | {:.0} | {:+.1} | {} | {} |",
+            "| {} | {} {} | {:.0} | {} | {:.2} | {d3} | {e3} | {dl} | {el} | {build:.0} | {:+.1} | {:.0} | {:+.1} |",
             f.name,
             f.motor.manufacturer,
             f.motor.designation,
@@ -494,11 +492,22 @@ fn print_table(fixtures: &[Fixture], db: &MotorDb) {
             err(build),
             f.rasaero.table_ft,
             err(f.rasaero.table_ft),
-            baro.map_or("-".into(), |b| format!("{b:.0}")),
-            baro.map_or("-".into(), |b| format!("{:+.1}", err(b)))
         );
+        let cells: Vec<String> = read
+            .iter()
+            .map(|a| {
+                let (ft, pc) = show(*a);
+                format!("{ft} | {pc}")
+            })
+            .collect();
+        baro_rows.push(format!("| {} | {m:.0} | {} |", f.id, cells.join(" | ")));
     }
-    for (name, e) in ["3D engine", "legacy engine", "build-up", "RASAero II", "3D engine read by a barometric altimeter"].iter().zip(&errs) {
+    println!("\nread as a barometric altimeter (the same correction on every column, RASAero II's included):");
+    println!("| rocket | measured ft | 3D ft | 3D % | legacy ft | legacy % | build-up ft | build-up % | RASAero ft | RASAero % |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    baro_rows.iter().for_each(|r| println!("{r}"));
+    let names = ["3D engine", "legacy engine", "build-up", "RASAero II"];
+    for (name, e) in names.iter().map(|n| n.to_string()).chain(names.iter().map(|n| format!("{n}, barometric reading"))).zip(&errs) {
         if e.is_empty() {
             continue;
         }
