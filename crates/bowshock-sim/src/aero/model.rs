@@ -57,12 +57,13 @@ impl Aero {
                 Protuberance::RailButton { station, height, diameter } => ProtCalc::Button { station, height, diameter },
             })
             .collect();
+        // the exhaust covers the nozzle exit, not the motor case
         let motor_d = v
             .stages
             .iter()
             .filter_map(|s| s.motor.as_ref())
             .filter(|m| m.mount_aft_station - m.curve.length < length)
-            .map(|m| m.curve.diameter)
+            .map(|m| m.curve.nozzle_exit_diameter())
             .fold(0.0, f64::max);
         Self {
             d_ref: v.reference_diameter,
@@ -349,7 +350,7 @@ impl Aero {
                 Pressure::Table { table, area } => table.at(m) * area / ar,
                 Pressure::BluntTable { table, hemisphere, tip_ratio, area } => blunt_nose_cd(table.at(m), cap_cd(m, hemisphere), *tip_ratio) * area / ar,
             } + stag * b.front_face / ar;
-            // Base drag; exhaust covers the motor exit area of the terminal base.
+            // Base drag; the exhaust covers the nozzle exit area of the terminal base.
             let mut area = b.back_face;
             if motor_on && b.is_last {
                 area = (area - self.motor_exit_area).max(0.0);

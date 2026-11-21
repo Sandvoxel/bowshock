@@ -779,3 +779,70 @@ fn the_blunted_profile_drives_the_wetted_area_and_the_nose_cp() {
     assert!((sb.cn_alpha - 2.0).abs() < 1e-9);
     assert!(sb.cp < sa.cp, "more volume: the CP moves towards the tip ({} vs {})", sb.cp, sa.cp);
 }
+
+/// The exhaust covers the nozzle's exit, not the motor case: the base drag while a motor burns loses the exit's share of the base, estimated from the thrust and kept within 0.5-0.8 of
+/// the case diameter (the motor files carry no nozzle).
+#[test]
+fn the_exhaust_covers_the_nozzle_exit_not_the_motor_case() {
+    let curve = |thrust: f64, diameter: f64| ThrustCurve {
+        points: vec![(0.0, thrust), (2.0, thrust)],
+        propellant_mass: 0.01,
+        total_mass: 0.02,
+        length: 0.07,
+        diameter,
+    };
+    assert_eq!(curve(0.0, 0.018).nozzle_exit_diameter(), 0.0, "no thrust, no exit");
+    assert_eq!(curve(5.0, 0.0).nozzle_exit_diameter(), 0.0, "no case, no exit");
+    assert!((curve(5.0, 0.018).nozzle_exit_diameter() - 0.5 * 0.018).abs() < 1e-12, "a weak motor: the lower limit");
+    assert!((curve(5000.0, 0.018).nozzle_exit_diameter() - 0.8 * 0.018).abs() < 1e-12, "a strong one: the upper limit");
+    // between the limits the exit is the one matched to sea level: A = F / (gamma M^2 p)
+    let f = 1000.0;
+    let d = curve(f, 0.075).nozzle_exit_diameter();
+    let area = f / (1.4 * NOZZLE_EXIT_MACH * NOZZLE_EXIT_MACH * 101_325.0);
+    assert!((0.25 * PI * d * d - area).abs() < 1e-12 * area.max(1.0), "{d}");
+    assert!((0.5 * 0.075..0.8 * 0.075).contains(&d));
+
+    let mut v = alpha_like();
+    v.stages.push(StageMass {
+        dry: MassProps { mass: 0.05, cg: 0.2, i_long: 0.0, i_rot: 0.0 },
+        fore_station: 0.0,
+        aft_station: 0.33,
+        motor: Some(StageMotor { curve: curve(5.0, 0.018), mount_aft_station: 0.33, ignition: Timing::LAUNCH, ejection_delay: None, tilt_lockout: None }),
+        separation: Timing::BURNOUT,
+    });
+    let a = Aero::new(&v);
+    let (on, off) = (a.drag(0.3, 1e6, true).base, a.drag(0.3, 1e6, false).base);
+    let body_d = 2.0 * 0.0093;
+    let want = 1.0 - (0.009f64 / body_d).powi(2);
+    assert!(
+        (on / off - want).abs() < 1e-9,
+        "base with the motor on over off: {} against the nozzle's {want} (the case would leave {})",
+        on / off,
+        1.0 - (0.018f64 / body_d).powi(2)
+    );
+}
+
+/// A rail button stands in the turbulent layer: its 1/7 power-law profile gives a button half the layer thick 64 % of the free stream's dynamic pressure (the old linear profile
+/// 6 %), and the cylinder's transonic drag rise follows the Mach number inside the layer (at 80 % of the free stream's, so it comes at Mach 1.25).
+#[test]
+fn a_rail_button_in_the_turbulent_layer_sees_most_of_the_dynamic_pressure() {
+    use super::drag::button_drag;
+    // a 4 in rocket at 250 m/s near the aft button: the layer is about 15 mm thick, the button 8.7 mm high
+    let (station, re_per_m, height, diameter, a_ref): (f64, f64, f64, f64, f64) = (1.2, 1.3e7, 0.0087, 0.0095, 0.0081);
+    let unshielded = |mach: f64| {
+        let (d, r) = ([0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.6], [1.2, 1.22, 1.25, 1.3, 1.4, 1.5, 1.6, 2.1, 1.5]);
+        let i = d.partition_point(|&x| x <= mach).clamp(1, d.len() - 1);
+        (r[i - 1] + (r[i] - r[i - 1]) * (mach - d[i - 1]) / (d[i] - d[i - 1])) * height * diameter / a_ref
+    };
+    let del = 0.37 * station / (re_per_m * station).powf(0.2);
+    let q = 7.0 / 9.0 * (height / del).powf(2.0 / 7.0);
+    assert!((0.4..1.0).contains(&q), "the layer is {del} m thick: q {q}");
+    let low = button_drag(0.1, re_per_m, station, height, diameter, 1.0, a_ref);
+    assert!((low / unshielded(0.1) - q).abs() < 0.02, "at low Mach the button sees the layer's dynamic pressure: {} against {q}", low / unshielded(0.1));
+    // the rise: the button's drag rises with the Mach number inside the layer (the old linear profile held it at a quarter of the free stream's: flat to Mach 2)
+    let (m5, m9) = (button_drag(0.5, re_per_m, station, height, diameter, 1.0, a_ref), button_drag(0.9, re_per_m, station, height, diameter, 1.0, a_ref));
+    assert!(m9 > 1.2 * m5, "{m5} -> {m9}");
+    // a button taller than the layer sees the free stream above it
+    let tall = button_drag(0.3, re_per_m, station, 4.0 * del, diameter, 1.0, a_ref) / (unshielded(0.3) * 4.0 * del / height);
+    assert!((0.8..1.0).contains(&tall), "{tall}");
+}
