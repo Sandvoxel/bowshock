@@ -35,7 +35,7 @@
   "wedge_fraction": 0.08333333333333333,
   "te_to_base": 1.12
  },
- "roughness_in": 0.00025,
+ "roughness_in": 0.000787402,
  "nozzle_diameter_in": 2.488,
  "rail_guide": null,
  "launch_weight_lb": 48.19,

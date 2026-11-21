@@ -116,6 +116,10 @@ fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/validation/flights")
 }
 
+fn probe_env(name: &str) -> Option<f64> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
 fn fixtures() -> Vec<Fixture> {
     let mut paths: Vec<_> =
         std::fs::read_dir(dir()).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
@@ -148,6 +152,10 @@ fn fixtures() -> Vec<Fixture> {
         if let Ok(s) = std::env::var("FLIGHTVAL_SECTION") {
             f.fins.section = s;
         }
+    }
+    // `FLIGHTVAL_ROUGH_UM=60` gives every rocket that sand-grain roughness (um) instead of its file's
+    if let Some(um) = probe_env("FLIGHTVAL_ROUGH_UM") {
+        all.iter_mut().for_each(|f| f.roughness_in = um * 1e-6 / IN);
     }
     match std::env::var("FLIGHTVAL_CASES") {
         Ok(list) => {
@@ -285,8 +293,13 @@ fn fly(f: &Fixture, v: &Vehicle, table: Option<&CfdTable>) -> (f64, f64) {
     (s.apogee / FT, s.max_mach)
 }
 
+/// `FLIGHTVAL_TAG=60um` names the tables `<id>.<engine>-60um.json` (a variant solved beside the stored ones, e.g. with `FLIGHTVAL_ROUGH_UM=60`).
+fn table_tag() -> String {
+    std::env::var("FLIGHTVAL_TAG").map(|t| format!("-{t}")).unwrap_or_default()
+}
+
 fn table_path(f: &Fixture, engine: &str) -> PathBuf {
-    dir().join("tables").join(format!("{}.{engine}.json", f.id))
+    dir().join("tables").join(format!("{}.{engine}{}.json", f.id, table_tag()))
 }
 
 /// Where a solved table is written: `$FLIGHTVAL_OUT` (a GPU queue job writes `out/`, which `gpuq` copies back) or the fixture directory.
@@ -393,7 +406,7 @@ fn flight_validation() {
                 table.solve_seconds,
                 table.notes
             );
-            write_table(&format!("{}.{engine}.json", f.id), &table);
+            write_table(&format!("{}.{engine}{}.json", f.id, table_tag()), &table);
         }
     }
     print_table(&fixtures(), &db);

@@ -36,3 +36,7 @@ Six public rockets with a measured apogee, full geometry and a catalogue motor, 
 * Don't Debate This: the file's fin leading-edge radius (0.025 in) is not in the fixture.
 * The motors are the same as RASAero II's motor file (`J570W`, `M1297W`, `N5800-CS`, `K550W`, `L730`, `M1850GG`): same total impulse within 0.2 % and same burn time, except Torrent's, where the fixture's file (the thrust curve of ThrustCurve.org simfile 5f4294d20002e9000000010a) burns 3.30 s against 3.20 s, has the same propellant mass (3.375 kg) and a lighter case (4.5 kg total against 5.851 kg), which does not change the flight (the dry mass follows from the launch weight less the motor, so the burnout mass is the launch weight less the propellant either way).
 
+## Surface finish per rocket (`roughness_in`)
+
+The example files' `Surface` setting (RASAero II's equivalent sand roughness table: Smooth (Zero Roughness) 0, Sheet Metal 0.00016 in, Smooth Paint 0.00025 in, ...): Byrum, Cancer Descending, Ion Drive, Rabia, Torrent: `Smooth (Zero Roughness)` (0 kept); Don't Debate This: `Smooth Paint` (with `Turbulence` True), which the app maps to 20 um (`Finish::SmoothPaint`, RASAero II's own value is 6.35 um). `FLIGHTVAL_ROUGH_UM=<um>` gives every rocket one roughness and `FLIGHTVAL_TAG=<tag>` names the tables `<id>.<engine>-<tag>.json`, to solve and fly a variant beside the stored tables.
+
